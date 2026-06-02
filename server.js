@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = '/data';
 const UPLOADS_DIR = '/data/uploads';
 const DB_PATH = '/data/game.db';
-const OWNER_TG_ID = '391995937';
+const OWNER_TG_ID = '341995937';
 const ADMIN_TG_IDS = new Set([
   OWNER_TG_ID,
   ...(process.env.ADMIN_TG_IDS || '').split(',').map((id) => id.trim()).filter(Boolean)
@@ -113,7 +113,7 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_tg_id ON tickets(tg_id)');
 
   await run(`INSERT OR REPLACE INTO users (tg_id, username, is_approved, dice_frozen, role)
-    VALUES (391995937, 'Owner', 1, 0, 'admin')`);
+    VALUES (341995937, 'Owner', 1, 0, 'admin')`);
 
   const taskCount = await get('SELECT COUNT(*) AS count FROM tasks');
   if (taskCount.count === 0) await seedTasks();
