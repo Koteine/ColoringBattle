@@ -112,7 +112,7 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_images ON submissions(status, image_name)');
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_tg_id ON tickets(tg_id)');
 
-  await run(`INSERT OR IGNORE INTO users (tg_id, username, is_approved, dice_frozen, role)
+  await run(`INSERT OR REPLACE INTO users (tg_id, username, is_approved, dice_frozen, role)
     VALUES (391995937, 'Owner', 1, 0, 'admin')`);
 
   const taskCount = await get('SELECT COUNT(*) AS count FROM tasks');
