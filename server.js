@@ -96,10 +96,13 @@ async function initDb() {
   )`);
 
   await ensureAccumulatingTicketsTable();
+  await ensureRaffleResultsTable();
 
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_player_status ON submissions(tg_id, status, task_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_images ON submissions(status, image_name)');
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_tg_id ON tickets(tg_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_tickets_status_random ON tickets(status, ticket_number)');
+  await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_place ON raffle_results(place_number)');
 
   await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
     VALUES (?, 'Owner', 0, 1, 0, 'admin')
@@ -118,6 +121,7 @@ async function ensureAccumulatingTicketsTable() {
     ticket_number INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_id TEXT NOT NULL,
     type TEXT DEFAULT 'standard' CHECK(type IN ('standard', 'bonus')),
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'burnt')),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id)
   )`;
@@ -130,16 +134,41 @@ async function ensureAccumulatingTicketsTable() {
   const sql = String(existing.sql || '').toLowerCase();
   const hasProperPrimaryKey = sql.includes('ticket_number integer primary key autoincrement');
   const hasTgIdUniqueness = sql.includes('unique') && sql.includes('tg_id');
-  if (hasProperPrimaryKey && !hasTgIdUniqueness) return;
+  const columns = await all('PRAGMA table_info(tickets)');
+  const hasStatus = columns.some((column) => column.name === 'status');
+
+  if (hasProperPrimaryKey && !hasTgIdUniqueness) {
+    if (!hasStatus) await run("ALTER TABLE tickets ADD COLUMN status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'burnt'))");
+    await run("UPDATE tickets SET status = 'active' WHERE status IS NULL OR status = ''");
+    return;
+  }
 
   await run('ALTER TABLE tickets RENAME TO tickets_old');
   await run(desiredSql);
-  await run(`INSERT INTO tickets (ticket_number, tg_id, type, created_at)
-    SELECT ticket_number, tg_id, COALESCE(type, 'standard'), COALESCE(created_at, CURRENT_TIMESTAMP)
+  const statusExpression = hasStatus
+    ? "CASE WHEN status IN ('active', 'winner', 'burnt') THEN status ELSE 'active' END"
+    : "'active'";
+  await run(`INSERT INTO tickets (ticket_number, tg_id, type, status, created_at)
+    SELECT ticket_number, tg_id, COALESCE(type, 'standard'),
+      ${statusExpression},
+      COALESCE(created_at, CURRENT_TIMESTAMP)
     FROM tickets_old
     WHERE tg_id IS NOT NULL
     ORDER BY ticket_number ASC`);
   await run('DROP TABLE tickets_old');
+}
+
+async function ensureRaffleResultsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS raffle_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    place_number INTEGER NOT NULL UNIQUE,
+    ticket_number INTEGER NOT NULL,
+    tg_id TEXT NOT NULL,
+    username TEXT DEFAULT '',
+    drawn_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (ticket_number) REFERENCES tickets(ticket_number),
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
 }
 
 async function seedTasks() {
@@ -241,7 +270,7 @@ async function getActiveSubmission(tgId) {
 }
 
 async function getPlayerTickets(tgId) {
-  return all('SELECT ticket_number, type, created_at FROM tickets WHERE tg_id = ? ORDER BY ticket_number ASC', [tgId]);
+  return all('SELECT ticket_number, type, status, created_at FROM tickets WHERE tg_id = ? ORDER BY ticket_number ASC', [tgId]);
 }
 
 async function pickUnusedTask(tgId) {
@@ -258,8 +287,8 @@ async function pickUnusedTask(tgId) {
 }
 
 async function issueTicket(tgId, type = 'standard') {
-  const result = await run('INSERT INTO tickets (tg_id, type) VALUES (?, ?)', [tgId, type]);
-  return get('SELECT ticket_number, type FROM tickets WHERE ticket_number = ?', [result.id]);
+  const result = await run("INSERT INTO tickets (tg_id, type, status) VALUES (?, ?, 'active')", [tgId, type]);
+  return get('SELECT ticket_number, type, status FROM tickets WHERE ticket_number = ?', [result.id]);
 }
 
 function rollD6() {
@@ -288,6 +317,76 @@ function buildUniqueWinnerDraw(tickets) {
   }
 
   return { winners, burnedTickets };
+}
+
+async function getRaffleStatus() {
+  const [results, latestWinner, stats] = await Promise.all([
+    all(`SELECT id, place_number, ticket_number, tg_id, username, drawn_at
+      FROM raffle_results
+      ORDER BY place_number ASC`),
+    get(`SELECT id, place_number, ticket_number, tg_id, username, drawn_at
+      FROM raffle_results
+      ORDER BY place_number DESC
+      LIMIT 1`),
+    get(`SELECT
+        COUNT(*) AS total_tickets,
+        SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_tickets,
+        SUM(CASE WHEN status = 'winner' THEN 1 ELSE 0 END) AS winner_tickets,
+        SUM(CASE WHEN status = 'burnt' THEN 1 ELSE 0 END) AS burnt_tickets
+      FROM tickets`)
+  ]);
+
+  return {
+    results,
+    latest_winner: latestWinner || null,
+    total_tickets: stats?.total_tickets || 0,
+    active_tickets: stats?.active_tickets || 0,
+    winner_tickets: stats?.winner_tickets || 0,
+    burnt_tickets: stats?.burnt_tickets || 0
+  };
+}
+
+async function drawLiveRaffleWinner() {
+  await run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const winner = await get(`SELECT t.ticket_number, t.tg_id, t.type, u.username
+      FROM tickets t
+      JOIN users u ON u.tg_id = t.tg_id
+      WHERE t.status = 'active'
+      ORDER BY RANDOM()
+      LIMIT 1`);
+
+    if (!winner) {
+      await run('COMMIT');
+      return null;
+    }
+
+    const nextPlace = await get('SELECT COALESCE(MAX(place_number), 0) + 1 AS place_number FROM raffle_results');
+    const placeNumber = Number(nextPlace.place_number || 1);
+    const inserted = await run(`INSERT INTO raffle_results (place_number, ticket_number, tg_id, username)
+      VALUES (?, ?, ?, ?)`, [placeNumber, winner.ticket_number, winner.tg_id, winner.username || '']);
+
+    await run("UPDATE tickets SET status = 'winner' WHERE ticket_number = ?", [winner.ticket_number]);
+    const burnt = await run(`UPDATE tickets
+      SET status = 'burnt'
+      WHERE tg_id = ? AND ticket_number <> ? AND status = 'active'`, [winner.tg_id, winner.ticket_number]);
+
+    await run('COMMIT');
+
+    return {
+      id: inserted.id,
+      place_number: placeNumber,
+      ticket_number: winner.ticket_number,
+      tg_id: winner.tg_id,
+      username: winner.username || '',
+      type: winner.type,
+      burnt_tickets: burnt.changes || 0,
+      drawn_at: new Date().toISOString()
+    };
+  } catch (error) {
+    await run('ROLLBACK').catch(() => {});
+    throw error;
+  }
 }
 
 app.get('/api/me/:tgId', async (req, res, next) => {
@@ -322,8 +421,8 @@ app.post('/api/apply', async (req, res, next) => {
 
 app.get('/api/raffle', async (_req, res, next) => {
   try {
-    const [stats, finalists] = await Promise.all([
-      get('SELECT COUNT(*) AS total_tickets FROM tickets'),
+    const [raffle, finalists] = await Promise.all([
+      getRaffleStatus(),
       all(`SELECT u.tg_id, u.username, u.current_cell, COUNT(t.ticket_number) AS tickets_count
         FROM users u
         LEFT JOIN tickets t ON t.tg_id = u.tg_id
@@ -331,7 +430,15 @@ app.get('/api/raffle', async (_req, res, next) => {
         GROUP BY u.tg_id
         ORDER BY u.current_cell DESC, u.username COLLATE NOCASE ASC, u.tg_id ASC`)
     ]);
-    res.json({ total_tickets: stats.total_tickets || 0, finalists });
+    res.json({ ...raffle, finalists });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/raffle/status', async (_req, res, next) => {
+  try {
+    res.json(await getRaffleStatus());
   } catch (error) {
     next(error);
   }
@@ -578,12 +685,28 @@ app.get('/api/admin/tickets-export', async (req, res, next) => {
   }
 });
 
+app.post('/api/admin/draw-winner', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const winner = await drawLiveRaffleWinner();
+    if (!winner) {
+      res.json({ ok: true, winner: null, message: 'Активных Красочек для розыгрыша больше нет', ...(await getRaffleStatus()) });
+      return;
+    }
+
+    res.json({ ok: true, winner, ...(await getRaffleStatus()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/admin/global-reset', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     await run('DELETE FROM submissions');
+    await run('DELETE FROM raffle_results');
     await run('DELETE FROM tickets');
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?)', ['submissions', 'tickets']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?)', ['submissions', 'tickets', 'raffle_results']);
     await run('UPDATE users SET current_cell = 0, dice_frozen = 0');
 
     await fs.promises.mkdir(UPLOADS_DIR, { recursive: true });

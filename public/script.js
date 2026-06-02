@@ -38,11 +38,15 @@ const els = {
   finalistLine: document.getElementById('finalistLine'),
   paletteGrid: document.getElementById('paletteGrid'),
   totalTickets: document.getElementById('totalTickets'),
-  finalistsList: document.getElementById('finalistsList'),
+  activeTickets: document.getElementById('activeTickets'),
+  magicPalette: document.getElementById('magicPalette'),
+  winnerReveal: document.getElementById('winnerReveal'),
+  raffleLog: document.getElementById('raffleLog'),
   pendingUsers: document.getElementById('pendingUsers'),
   pendingSubmissions: document.getElementById('pendingSubmissions'),
   allUsers: document.getElementById('allUsers'),
   ticketsExport: document.getElementById('ticketsExport'),
+  drawWinnerBtn: document.getElementById('drawWinnerBtn'),
   refreshExportBtn: document.getElementById('refreshExportBtn'),
   globalResetBtn: document.getElementById('globalResetBtn'),
   toast: document.getElementById('toast')
@@ -65,6 +69,8 @@ let pollingTimer = null;
 let lastSubmissionStatus = '';
 let isRolling = false;
 let raffleLoadedAt = 0;
+let rafflePollingTimer = null;
+let lastRaffleWinnerId = null;
 
 function isOwnerId(id) {
   return String(id || '').trim() === OWNER_TG_ID;
@@ -136,7 +142,8 @@ function setActiveTab(tab) {
     button.classList.toggle('active', button.dataset.tab === activeTab);
   });
 
-  if (activeTab === 'raffle') loadRaffle(false).catch((error) => showToast(error.message));
+  if (activeTab === 'raffle') startRafflePolling(true);
+  else stopRafflePolling();
   if (activeTab === 'admin' && adminAllowed) loadAdminPanel().catch((error) => showToast(error.message));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -354,22 +361,81 @@ async function checkStatus() {
   }
 }
 
-async function loadRaffle(force = true) {
-  const now = Date.now();
-  if (!force && now - raffleLoadedAt < 15000) return;
-  const data = await api('/api/raffle');
-  raffleLoadedAt = now;
-  els.totalTickets.textContent = data.total_tickets || 0;
-  els.finalistsList.innerHTML = data.finalists.length ? '' : '<div class="empty-state">Пока никто не дошёл до 100 клетки.</div>';
-  for (const finalist of data.finalists) {
+function formatWinnerName(winner) {
+  const username = String(winner?.username || '').trim();
+  return username ? `@${username.replace(/^@/, '')}` : `ID ${winner?.tg_id || '—'}`;
+}
+
+function renderRaffleLog(results = []) {
+  els.raffleLog.innerHTML = results.length ? '' : '<div class="empty-state">Победителей пока нет. Ждём первый розыгрыш!</div>';
+  for (const winner of results) {
     const item = document.createElement('article');
-    item.className = 'item';
+    item.className = 'item winner-row';
     item.innerHTML = `
-      <strong>${escapeHtml(finalist.username || finalist.tg_id)}</strong>
-      <p class="muted">TG ID: ${escapeHtml(finalist.tg_id)} · клетка ${finalist.current_cell}/100 · Красочек: ${finalist.tickets_count || 0}</p>
+      <strong>${escapeHtml(winner.place_number)}-е место: №${escapeHtml(winner.ticket_number)} — ${escapeHtml(formatWinnerName(winner))}</strong>
+      <span class="muted">${escapeHtml(new Date(winner.drawn_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))}</span>
     `;
-    els.finalistsList.append(item);
+    els.raffleLog.append(item);
   }
+}
+
+function animateRaffleWinner(winner) {
+  if (!winner) return;
+  const blobs = [...els.magicPalette.querySelectorAll('.paint-blob')];
+  const blob = blobs[(Number(winner.place_number || 1) - 1) % blobs.length];
+  blobs.forEach((item) => item.classList.remove('erasing'));
+  void blob.offsetWidth;
+  blob.classList.add('erasing');
+
+  els.winnerReveal.classList.remove('show');
+  els.winnerReveal.textContent = `Красочка №${winner.ticket_number} — ${formatWinnerName(winner)}!`;
+  void els.winnerReveal.offsetWidth;
+  window.setTimeout(() => els.winnerReveal.classList.add('show'), 420);
+}
+
+async function loadRaffle(force = true, animateNew = false) {
+  const now = Date.now();
+  if (!force && now - raffleLoadedAt < 2500) return;
+  const data = await api('/api/raffle/status');
+  raffleLoadedAt = now;
+
+  els.totalTickets.textContent = data.total_tickets || 0;
+  els.activeTickets.textContent = data.active_tickets || 0;
+  renderRaffleLog(data.results || []);
+
+  const latest = data.latest_winner || null;
+  if (!latest) {
+    els.winnerReveal.textContent = 'Ждём первую Красочку!';
+    els.winnerReveal.classList.add('show');
+    lastRaffleWinnerId = null;
+    return;
+  }
+
+  if (lastRaffleWinnerId === null) {
+    lastRaffleWinnerId = latest.id;
+    els.winnerReveal.textContent = `Красочка №${latest.ticket_number} — ${formatWinnerName(latest)}!`;
+    els.winnerReveal.classList.add('show');
+    return;
+  }
+
+  if (latest.id !== lastRaffleWinnerId) {
+    lastRaffleWinnerId = latest.id;
+    if (animateNew) animateRaffleWinner(latest);
+  }
+}
+
+function startRafflePolling(runImmediately = false) {
+  if (runImmediately) loadRaffle(true, true).catch((error) => showToast(error.message));
+  if (rafflePollingTimer) return;
+  rafflePollingTimer = window.setInterval(() => {
+    if (activeTab === 'raffle') loadRaffle(true, true).catch((error) => console.warn('Raffle polling error:', error.message));
+  }, 3000);
+}
+
+function stopRafflePolling() {
+  if (!rafflePollingTimer) return;
+  window.clearInterval(rafflePollingTimer);
+  rafflePollingTimer = null;
 }
 
 async function loadAdminPanel() {
@@ -566,6 +632,32 @@ async function refreshExport() {
   showToast('Выгрузка обновлена');
 }
 
+async function drawNextWinner() {
+  if (!tgId) return showToast('Не найден Telegram ID администратора');
+  els.drawWinnerBtn.disabled = true;
+  try {
+    const data = await api('/api/admin/draw-winner', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ admin_tg_id: tgId })
+    });
+
+    if (!data.winner) {
+      showToast(data.message || 'Активных Красочек больше нет');
+    } else {
+      showToast(`${data.winner.place_number}-е место: Красочка №${data.winner.ticket_number} — ${formatWinnerName(data.winner)}`);
+      lastRaffleWinnerId = data.winner.id - 1;
+      await loadRaffle(true, true);
+    }
+
+    await loadAdminPanel().catch(() => {});
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    els.drawWinnerBtn.disabled = false;
+  }
+}
+
 async function globalReset() {
   if (!window.confirm('Точно выполнить полный вайп игры и удалить все загруженные картинки?')) return;
   await api('/api/admin/global-reset', {
@@ -575,6 +667,7 @@ async function globalReset() {
   });
   showToast('Глобальный сброс выполнен');
   raffleLoadedAt = 0;
+  lastRaffleWinnerId = null;
   await loadState();
   await loadRaffle(true).catch(() => {});
 }
@@ -582,6 +675,7 @@ async function globalReset() {
 els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
 els.submitForm.addEventListener('submit', submitWork);
+els.drawWinnerBtn.addEventListener('click', () => drawNextWinner().catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
 document.querySelectorAll('.nav-btn').forEach((button) => {
