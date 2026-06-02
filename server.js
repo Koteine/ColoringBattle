@@ -13,7 +13,8 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = '/data';
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DB_PATH = path.join(DATA_DIR, 'game.db');
-const ADMIN_TG_IDS = new Set((process.env.ADMIN_TG_IDS || '').split(',').map((id) => id.trim()).filter(Boolean));
+const OWNER_TG_ID = '391995937';
+const ADMIN_TG_IDS = new Set([OWNER_TG_ID, ...(process.env.ADMIN_TG_IDS || '').split(',').map((id) => id.trim()).filter(Boolean)]);
 
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
@@ -75,6 +76,9 @@ async function initDb() {
     role TEXT DEFAULT 'player',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  await run(`INSERT OR IGNORE INTO users (tg_id, username, is_approved, dice_frozen, role)
+    VALUES (?, ?, 1, 0, 'admin')`, [OWNER_TG_ID, 'Owner']);
 
   await run(`CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,6 +163,7 @@ async function requireApproved(tgId) {
 }
 
 async function requireAdmin(tgId) {
+  if (ADMIN_TG_IDS.has(String(tgId))) await ensureUser(tgId);
   const user = await requireApproved(tgId);
   if (user.role !== 'admin') throw Object.assign(new Error('Доступ только для администратора'), { status: 403 });
   return user;
@@ -268,6 +273,68 @@ app.post('/api/admin/approve-user', async (req, res, next) => {
   }
 });
 
+app.get('/api/admin/users', async (req, res, next) => {
+  try {
+    await requireAdmin(req.query.admin_tg_id);
+    const users = await all(`SELECT tg_id, username, current_cell, is_approved, dice_frozen, role, created_at FROM users
+      ORDER BY role DESC, is_approved DESC, username COLLATE NOCASE ASC, tg_id ASC`);
+    res.json({ users });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/add-user', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    await run(`INSERT INTO users (tg_id, username, is_approved, dice_frozen, role)
+      VALUES (?, ?, 1, 0, 'player')
+      ON CONFLICT(tg_id) DO UPDATE SET is_approved = 1`, [tgId, req.body.username ? String(req.body.username).trim() : '']);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/remove-user', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    if (tgId === OWNER_TG_ID) throw Object.assign(new Error('Нельзя исключить супер-админа'), { status: 400 });
+    await run('UPDATE users SET is_approved = 0, dice_frozen = 0 WHERE tg_id = ?', [tgId]);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/change-cell', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    const currentCell = Number(req.body.current_cell);
+    if (!Number.isInteger(currentCell) || currentCell < 0 || currentCell > 100) throw Object.assign(new Error('Клетка должна быть целым числом от 0 до 100'), { status: 400 });
+    const result = await run('UPDATE users SET current_cell = ? WHERE tg_id = ?', [currentCell, tgId]);
+    if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
+    res.json({ ok: true, current_cell: currentCell });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/reset-dice', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    const result = await run('UPDATE users SET dice_frozen = 0 WHERE tg_id = ?', [tgId]);
+    if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/admin/submissions', async (req, res, next) => {
   try {
     await requireAdmin(req.query.admin_tg_id);
@@ -314,11 +381,28 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
   }
 });
 
+app.post('/api/admin/global-reset', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    await run('DELETE FROM submissions');
+    await run('UPDATE users SET current_cell = 0, dice_frozen = 0');
+    for (const fileName of await fs.promises.readdir(UPLOADS_DIR)) {
+      await fs.promises.rm(path.join(UPLOADS_DIR, fileName), { force: true, recursive: true });
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/admin/reset', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     await run('DELETE FROM submissions');
     await run('UPDATE users SET current_cell = 0, dice_frozen = 0');
+    for (const fileName of await fs.promises.readdir(UPLOADS_DIR)) {
+      await fs.promises.rm(path.join(UPLOADS_DIR, fileName), { force: true, recursive: true });
+    }
     res.json({ ok: true });
   } catch (error) {
     next(error);

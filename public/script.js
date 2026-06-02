@@ -26,7 +26,10 @@ const els = {
   workImage: document.getElementById('workImage'),
   submitBtn: document.getElementById('submitBtn'),
   pendingUsers: document.getElementById('pendingUsers'),
+  allUsers: document.getElementById('allUsers'),
   pendingSubmissions: document.getElementById('pendingSubmissions'),
+  manualAddForm: document.getElementById('manualAddForm'),
+  manualTgId: document.getElementById('manualTgId'),
   refreshBtn: document.getElementById('refreshBtn'),
   resetBtn: document.getElementById('resetBtn'),
   toast: document.getElementById('toast')
@@ -191,11 +194,13 @@ async function checkStatus() {
 
 async function loadAdminPanel() {
   const adminParam = `admin_tg_id=${encodeURIComponent(tgId)}`;
-  const [users, submissions] = await Promise.all([
+  const [pendingUsers, allUsers, submissions] = await Promise.all([
     api(`/api/admin/pending-users?${adminParam}`),
+    api(`/api/admin/users?${adminParam}`),
     api(`/api/admin/submissions?${adminParam}`)
   ]);
-  renderPendingUsers(users.users);
+  renderPendingUsers(pendingUsers.users);
+  renderAllUsers(allUsers.users);
   renderPendingSubmissions(submissions.submissions);
 }
 
@@ -218,6 +223,73 @@ function renderPendingUsers(users) {
     });
     item.append(button);
     els.pendingUsers.append(item);
+  }
+}
+
+function renderAllUsers(users) {
+  els.allUsers.innerHTML = users.length ? '' : '<p class="muted">Игроков пока нет.</p>';
+  for (const user of users) {
+    const item = document.createElement('article');
+    item.className = 'item player-row';
+    item.innerHTML = `
+      <div>
+        <strong>${escapeHtml(user.username || 'Без ника')}</strong>
+        <p class="muted">TG ID: ${escapeHtml(user.tg_id)} · роль: ${escapeHtml(user.role)} · ${Number(user.is_approved) === 1 ? 'доступ открыт' : 'доступ закрыт'} · кубик: ${Number(user.dice_frozen) === 1 ? 'заморожен' : 'готов'}</p>
+      </div>
+      <label class="muted">Текущая клетка
+        <input type="number" min="0" max="100" value="${Number(user.current_cell || 0)}" data-cell-input="${escapeHtml(user.tg_id)}">
+      </label>
+    `;
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const changeCell = document.createElement('button');
+    changeCell.textContent = 'Изменить клетку';
+    changeCell.addEventListener('click', async () => {
+      const input = item.querySelector('input[type="number"]');
+      await api('/api/admin/change-cell', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_tg_id: tgId, tg_id: user.tg_id, current_cell: input.value })
+      });
+      showToast('Клетка изменена');
+      await loadAdminPanel();
+      if (user.tg_id === tgId) await loadState();
+    });
+
+    const resetDice = document.createElement('button');
+    resetDice.className = 'ghost';
+    resetDice.textContent = 'Разморозить кубик';
+    resetDice.addEventListener('click', async () => {
+      await api('/api/admin/reset-dice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_tg_id: tgId, tg_id: user.tg_id })
+      });
+      showToast('Кубик разморожен');
+      await loadAdminPanel();
+      if (user.tg_id === tgId) await loadState();
+    });
+
+    const remove = document.createElement('button');
+    remove.className = 'danger';
+    remove.textContent = 'Исключить';
+    remove.disabled = user.role === 'admin' && user.tg_id === tgId;
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`Исключить игрока ${user.username || user.tg_id}?`)) return;
+      await api('/api/admin/remove-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_tg_id: tgId, tg_id: user.tg_id })
+      });
+      showToast('Игрок исключен');
+      await loadAdminPanel();
+    });
+
+    actions.append(changeCell, resetDice, remove);
+    item.append(actions);
+    els.allUsers.append(item);
   }
 }
 
@@ -271,8 +343,8 @@ function renderPendingSubmissions(submissions) {
 }
 
 async function resetGame() {
-  if (!window.confirm('Сбросить координаты всех игроков и очистить историю работ?')) return;
-  await api('/api/admin/reset', {
+  if (!window.confirm('Полностью сбросить игру: обнулить клетки, удалить историю и картинки?')) return;
+  await api('/api/admin/global-reset', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ admin_tg_id: tgId })
@@ -287,6 +359,21 @@ els.submitForm.addEventListener('submit', (event) => submitWork(event).catch((er
   showToast(error.message);
 }));
 els.refreshBtn.addEventListener('click', () => loadState().catch((error) => showToast(error.message)));
+els.manualAddForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    await api('/api/admin/add-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ admin_tg_id: tgId, tg_id: els.manualTgId.value })
+    });
+    els.manualTgId.value = '';
+    showToast('Доступ одобрен');
+    await loadAdminPanel();
+  } catch (error) {
+    showToast(error.message);
+  }
+});
 els.resetBtn.addEventListener('click', () => resetGame().catch((error) => showToast(error.message)));
 
 loadState().catch((error) => showToast(error.message));
