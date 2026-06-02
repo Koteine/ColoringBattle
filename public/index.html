@@ -258,6 +258,29 @@
     .raffle-log-card { display: grid; gap: 14px; }
     .winner-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .winner-row strong { font-size: 18px; }
+
+    .raffle-status-panel { display: grid; gap: 12px; }
+    .raffle-status-panel .winner-reveal { position: static; inset: auto; transform: none; opacity: 1; min-height: 96px; }
+    .raffle-status-panel .winner-reveal.show { animation: winnerRevealStatic .55s ease forwards; }
+    @keyframes winnerRevealStatic { from { opacity: 0; transform: scale(.95); } to { opacity: 1; transform: scale(1); } }
+    .countdown-card { padding: 22px; border-radius: 30px; text-align: center; background: linear-gradient(135deg, rgba(255,241,168,.7), rgba(189,224,254,.68)); border: 1px solid var(--line); }
+    .countdown-time { display: block; margin-top: 8px; font-size: clamp(30px, 10vw, 56px); font-weight: 1000; color: #7c4d8d; }
+    .scratch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(156px, 1fr)); gap: 14px; }
+    .scratch-card { position: relative; min-height: 186px; border-radius: 28px; overflow: hidden; border: 1px solid rgba(255,255,255,.72); background: linear-gradient(145deg, rgba(255,255,255,.86), rgba(255,246,231,.72)); box-shadow: 0 18px 44px rgba(97,70,120,.18); touch-action: none; user-select: none; }
+    .scratch-prize { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; font-weight: 1000; color: #5b4162; }
+    .scratch-prize .coin { width: 82px; height: 82px; border-radius: 50%; display: grid; place-items: center; font-size: 46px; background: radial-gradient(circle at 30% 25%, #fff8c4, #ffd166 48%, #c78300 100%); box-shadow: inset 0 -10px 16px rgba(132,79,0,.28), 0 14px 36px rgba(198,134,0,.3); transform: scale(.86); opacity: .75; transition: transform .35s ease, opacity .35s ease; }
+    .scratch-card.won .coin { transform: scale(1.08); opacity: 1; animation: coinPop .72s ease; }
+    .scratch-card.lost .scratch-prize { font-size: 44px; }
+    .scratch-card canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+    .scratch-label { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 2; padding: 8px 10px; border-radius: 999px; text-align: center; font-weight: 950; background: rgba(255,255,255,.82); border: 1px solid var(--line); pointer-events: none; }
+    .scratch-card.revealed canvas, .scratch-card.revealed .scratch-label { opacity: 0; pointer-events: none; transition: opacity .35s ease; }
+    .winners-list { display: grid; gap: 10px; }
+    .confetti-layer { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 40; }
+    .confetti-piece { position: absolute; top: -16px; width: 10px; height: 16px; border-radius: 3px; animation: confettiFall 1.6s linear forwards; }
+    .lottery-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
+    .lottery-form .actions { margin-top: 0; }
+    @keyframes coinPop { 0% { transform: scale(.45) rotate(-20deg); } 65% { transform: scale(1.18) rotate(10deg); } 100% { transform: scale(1.08) rotate(0); } }
+    @keyframes confettiFall { to { transform: translateY(110vh) rotate(760deg); opacity: 0; } }
     .list { display: grid; gap: 12px; }
     .item { border: 1px solid var(--line); border-radius: 22px; padding: 14px; background: rgba(255,255,255,.58); }
     .item img { max-width: 220px; max-height: 220px; border-radius: 18px; object-fit: cover; border: 1px solid var(--line); }
@@ -303,7 +326,7 @@
     .toast { position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px); transform: translateX(-50%); max-width: min(680px, calc(100% - 24px)); padding: 14px 18px; border-radius: 18px; background: #3b2342; border: 1px solid rgba(255,255,255,.24); color: white; box-shadow: 0 20px 60px rgba(97,70,120,.35); z-index: 30; }
 
     @media (max-width: 800px) {
-      .stats-grid, .game-grid, .raffle-hero, .admin-grid, .ticket-admin { grid-template-columns: 1fr; }
+      .stats-grid, .game-grid, .raffle-hero, .admin-grid, .ticket-admin, .lottery-form { grid-template-columns: 1fr; }
       .player-tools { grid-template-columns: 1fr; }
       .app { padding: 12px; }
       .card { padding: 16px; border-radius: 26px; }
@@ -389,23 +412,29 @@
     <section id="raffleScreen" class="screen hidden" data-screen="raffle">
       <section class="card raffle-hero">
         <div>
-          <span class="soft-chip">🎟 Live Raffle</span>
+          <span class="soft-chip">🎟 Скретч-лотерея</span>
           <p id="totalTickets" class="big-number">0</p>
-          <p class="muted">Красочек выдано · активных в барабане: <strong id="activeTickets">0</strong></p>
+          <p class="muted">Красочек выдано · еще не стерто: <strong id="activeTickets">0</strong> · призов осталось: <strong id="remainingPrizes">0</strong></p>
         </div>
-        <div id="magicPalette" class="magic-palette" aria-live="polite">
-          <span class="paint-blob"></span>
-          <span class="paint-blob"></span>
-          <span class="paint-blob"></span>
-          <span class="paint-blob"></span>
-          <span class="paint-blob"></span>
-          <div id="winnerReveal" class="winner-reveal">Ждём первую Красочку!</div>
+        <div id="raffleStatusPanel" class="raffle-status-panel" aria-live="polite">
+          <div id="raffleCountdown" class="countdown-card hidden">
+            <strong>Лотерея скоро начнется</strong>
+            <span id="countdownTime" class="countdown-time">—</span>
+            <p class="muted">До старта скретч-карт</p>
+          </div>
+          <div id="winnerReveal" class="winner-reveal show">Стирайте Красочки и ищите монетку!</div>
         </div>
       </section>
 
+      <section class="card">
+        <h2>Мои скретч-карты</h2>
+        <p class="muted">Проведите пальцем или мышкой по серому слою. После стирания 50% площади результат честно определит сервер.</p>
+        <div id="scratchGrid" class="scratch-grid"></div>
+      </section>
+
       <section class="card raffle-log-card">
-        <h2>Лог победителей</h2>
-        <div id="raffleLog" class="list"></div>
+        <h2>Нашедшие монетку</h2>
+        <div id="winnersList" class="winners-list"></div>
       </section>
     </section>
 
@@ -422,11 +451,24 @@
         </section>
 
         <section class="card">
-          <h3>Выгрузка для розыгрыша</h3>
-          <textarea id="ticketsExport" readonly placeholder="Красочки появятся после одобрения работ"></textarea>
+          <h3>Управление лотереей</h3>
+          <p class="muted">Задайте окно активности и количество доступных призов для скретч-карт.</p>
+          <form id="raffleConfigForm" class="lottery-form">
+            <label class="muted">Старт
+              <input id="raffleStartInput" type="datetime-local">
+            </label>
+            <label class="muted">Финиш
+              <input id="raffleEndInput" type="datetime-local">
+            </label>
+            <label class="muted">Количество призов
+              <input id="totalPrizesInput" type="number" min="0" step="1" inputmode="numeric">
+            </label>
+            <div class="actions"><button type="submit">Сохранить настройки</button></div>
+          </form>
+          <p id="raffleConfigHint" class="muted">Настройки еще не загружены.</p>
+          <textarea id="ticketsExport" readonly placeholder="Сводка по Красочкам появится после одобрения работ"></textarea>
           <div class="actions">
-            <button id="drawWinnerBtn" type="button">✨ Разыграть следующее место</button>
-            <button id="refreshExportBtn" class="ghost" type="button">Обновить выгрузку</button>
+            <button id="refreshExportBtn" class="ghost" type="button">Обновить сводку</button>
           </div>
         </section>
       </div>

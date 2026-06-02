@@ -133,13 +133,35 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     const checkAccumulated = await jsonRequest(server.baseUrl, '/api/check-status/200');
     assert.equal(checkAccumulated.tickets.length, 2);
 
-    const draw = await jsonRequest(server.baseUrl, '/api/admin/draw-winner', {
+    const now = Date.now();
+    const config = await jsonRequest(server.baseUrl, '/api/admin/raffle-config', {
       method: 'POST',
+      body: JSON.stringify({
+        admin_tg_id: '341995937',
+        raffle_start: new Date(now - 60_000).toISOString(),
+        raffle_end: new Date(now + 3_600_000).toISOString(),
+        total_prizes: 2
+      })
+    });
+    assert.equal(config.ok, true);
+    assert.equal(config.is_active, true);
+    assert.equal(config.remaining_prizes, 2);
+
+    const scratch = await jsonRequest(server.baseUrl, '/api/raffle/scratch-ticket', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '200', ticket_number: checkAccumulated.tickets[0].ticket_number })
+    });
+    assert.equal(scratch.ok, true);
+    assert.equal(scratch.result, 'win');
+    assert.equal(scratch.winner.tg_id, '200');
+    assert.equal(scratch.remaining_prizes, 1);
+
+    const drawResponse = await fetch(`${server.baseUrl}/api/admin/draw-winner`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ admin_tg_id: '341995937' })
     });
-    assert.equal(draw.ok, true);
-    assert.equal(Boolean(draw.winner), true);
-    assert.equal(draw.winner.tg_id, '200');
+    assert.equal(drawResponse.status, 410);
 
     const grant = await jsonRequest(server.baseUrl, '/api/admin/grant-ticket', {
       method: 'POST',
