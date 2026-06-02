@@ -3,121 +3,203 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Coloring Battle</title>
+  <title>Красочки — Telegram WebApp игра</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    :root { --bg:#0f172a; --panel:#17223a; --panel2:#21304e; --text:#f8fafc; --muted:#a8b3c7; --accent:#67e8f9; --good:#86efac; --warn:#fde68a; --bad:#fca5a5; }
-    * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; background:radial-gradient(circle at top,#25406e,var(--bg)); color:var(--text); font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    button,input { font:inherit; }
-    button { border:0; border-radius:14px; padding:12px 16px; font-weight:800; color:#07111f; background:var(--accent); cursor:pointer; }
-    button:disabled { opacity:.45; cursor:not-allowed; }
-    .app { width:min(1120px,100%); margin:0 auto; padding:18px; }
-    .top { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
-    .card { background:linear-gradient(145deg,rgba(255,255,255,.09),rgba(255,255,255,.035)); border:1px solid rgba(255,255,255,.12); border-radius:24px; padding:18px; box-shadow:0 18px 50px rgba(0,0,0,.24); }
-    .hidden { display:none!important; }
-    .muted { color:var(--muted); }
-    .notice { color:var(--warn); font-weight:800; }
-    .success { color:var(--good); font-weight:900; }
-    .danger { background:var(--bad); }
-    .ghost { background:rgba(255,255,255,.14); color:var(--text); }
-    .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:12px; }
-    .stats strong { display:block; font-size:26px; }
-    .board { display:grid; grid-template-columns:repeat(10,minmax(42px,1fr)); gap:8px; min-width:520px; }
-    .board-wrap { overflow:auto; }
-    .cell { aspect-ratio:1; display:grid; place-items:center; border-radius:14px; background:var(--panel2); color:var(--muted); font-weight:900; position:relative; }
-    .cell.active { background:linear-gradient(135deg,var(--accent),var(--good)); color:#06111d; }
-    .cell.active::after { content:"★"; position:absolute; right:6px; top:4px; }
-    .controls,.task-form,.row,.actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .task-form { align-items:stretch; flex-direction:column; margin-top:12px; }
-    input[type="file"], input[type="text"], input[type="number"], textarea { width:100%; color:var(--text); background:rgba(0,0,0,.22); border:1px solid rgba(255,255,255,.14); border-radius:14px; padding:12px; }
-    .admin-grid { display:grid; grid-template-columns:1fr 1.4fr; gap:16px; }
-    .list { display:grid; gap:10px; }
-    .item { background:rgba(0,0,0,.2); border-radius:16px; padding:12px; }
-    .admin-form { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin-bottom:12px; }
-    .admin-form label { flex:1 1 220px; display:grid; gap:6px; color:var(--muted); font-weight:800; }
-    .player-row { display:grid; grid-template-columns:1fr minmax(120px,180px); gap:10px; align-items:end; }
-    .player-row .actions { grid-column:1 / -1; }
-    .item img { max-width:180px; max-height:180px; border-radius:12px; display:block; margin:8px 0; }
-    .toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); z-index:10; background:#fff; color:#0f172a; border-radius:18px; padding:14px 18px; box-shadow:0 16px 50px rgba(0,0,0,.35); font-weight:900; max-width:92vw; }
-    @media (max-width:780px) { .top,.controls { align-items:stretch; flex-direction:column; } .stats,.admin-grid { grid-template-columns:1fr; } }
+    :root {
+      --bg: #101827;
+      --card: rgba(255,255,255,.1);
+      --card-strong: rgba(255,255,255,.16);
+      --text: #fff7ed;
+      --muted: #cbd5e1;
+      --accent: #fb7185;
+      --accent-2: #38bdf8;
+      --good: #86efac;
+      --warn: #fde68a;
+      --bad: #fca5a5;
+      --ink: #172033;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(251,113,133,.45), transparent 34rem),
+        radial-gradient(circle at top right, rgba(56,189,248,.38), transparent 30rem),
+        linear-gradient(135deg, #111827, #312e81 58%, #4c1d95);
+    }
+
+    button, input, textarea { font: inherit; }
+    button {
+      border: 0;
+      border-radius: 16px;
+      padding: 12px 16px;
+      color: var(--ink);
+      font-weight: 900;
+      background: linear-gradient(135deg, #fef08a, #fb7185);
+      cursor: pointer;
+      box-shadow: 0 12px 30px rgba(0,0,0,.18);
+      transition: transform .15s ease, opacity .15s ease;
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:disabled { cursor: not-allowed; opacity: .48; filter: grayscale(.8); }
+    input, textarea {
+      width: 100%;
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 14px;
+      padding: 12px 14px;
+      color: var(--text);
+      background: rgba(15,23,42,.72);
+      outline: none;
+    }
+    textarea { min-height: 110px; resize: vertical; }
+    a { color: #bae6fd; }
+
+    .app { width: min(1180px, 100%); margin: 0 auto; padding: 18px; }
+    .hidden { display: none !important; }
+    .muted { color: var(--muted); }
+    .pill { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 8px 12px; background: rgba(255,255,255,.14); font-weight: 800; }
+    .card {
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 28px;
+      padding: 20px;
+      background: linear-gradient(145deg, var(--card), rgba(255,255,255,.055));
+      box-shadow: 0 24px 70px rgba(0,0,0,.26);
+      backdrop-filter: blur(12px);
+    }
+    .top { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+    .brand h1 { margin: 0; font-size: clamp(26px, 5vw, 44px); }
+    .brand p { margin: 6px 0 0; color: var(--muted); }
+    .header-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+    .stat { background: var(--card-strong); border-radius: 22px; padding: 14px; }
+    .stat span { display: block; color: var(--muted); font-size: 13px; }
+    .stat strong { display: block; margin-top: 5px; font-size: 24px; }
+
+    .route { position: relative; padding: 32px 8px 18px; margin: 18px 0; }
+    .route-line { height: 14px; border-radius: 999px; background: rgba(255,255,255,.18); overflow: hidden; }
+    .route-fill { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #22c55e, #fde047, #fb7185, #a78bfa); transition: width .35s ease; }
+    .route-runner { position: absolute; top: 6px; left: 0; transform: translateX(-50%); font-size: 34px; transition: left .35s ease; filter: drop-shadow(0 8px 10px rgba(0,0,0,.35)); }
+    .route-labels { display: flex; justify-content: space-between; margin-top: 8px; color: var(--muted); font-weight: 800; }
+
+    .game-grid { display: grid; grid-template-columns: minmax(260px, .85fr) minmax(300px, 1.15fr); gap: 16px; align-items: stretch; }
+    .dice-button { width: 100%; min-height: 185px; border-radius: 30px; font-size: clamp(24px, 5vw, 42px); display: grid; place-items: center; }
+    .dice-button.wait { background: linear-gradient(135deg, #94a3b8, #64748b); color: #e2e8f0; }
+    .task-text { margin: 12px 0 16px; font-size: 20px; font-weight: 850; line-height: 1.35; }
+    .tickets-line { margin-top: 16px; padding: 14px 16px; border-radius: 18px; background: rgba(254,240,138,.16); border: 1px dashed rgba(254,240,138,.55); font-weight: 850; }
+    .finalist { margin-top: 10px; color: var(--good); font-weight: 950; }
+
+    .admin { margin-top: 20px; display: grid; gap: 16px; }
+    .admin h2, .admin h3 { margin-top: 0; }
+    .admin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .list { display: grid; gap: 12px; }
+    .item { border: 1px solid rgba(255,255,255,.14); border-radius: 20px; padding: 14px; background: rgba(15,23,42,.48); }
+    .item img { max-width: 220px; max-height: 220px; border-radius: 16px; object-fit: cover; border: 1px solid rgba(255,255,255,.2); }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; align-items: center; }
+    .ghost { color: var(--text); background: rgba(255,255,255,.16); }
+    .danger { background: linear-gradient(135deg, #fca5a5, #ef4444); }
+    .success { background: linear-gradient(135deg, #bbf7d0, #22c55e); }
+    .player-row { display: grid; gap: 10px; }
+    .player-tools { display: grid; grid-template-columns: minmax(120px, 180px) repeat(3, max-content); gap: 10px; align-items: end; }
+    .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: min(680px, calc(100% - 24px)); padding: 14px 18px; border-radius: 18px; background: #020617; border: 1px solid rgba(255,255,255,.18); color: var(--text); box-shadow: 0 20px 60px rgba(0,0,0,.35); z-index: 10; }
+
+    @media (max-width: 760px) {
+      .top, .game-grid, .admin-grid { grid-template-columns: 1fr; display: grid; }
+      .header-grid, .player-tools { grid-template-columns: 1fr; }
+      .top { align-items: stretch; }
+    }
   </style>
 </head>
 <body>
   <main class="app">
-    <header class="top">
-      <div>
-        <h1>Coloring Battle</h1>
-        <p class="muted">Telegram WebApp игра-бродилка на 100 клеток.</p>
+    <section class="top">
+      <div class="brand">
+        <h1>🎨 Красочки</h1>
+        <p>Бродилка на 100 клеток: бросайте кубик, выполняйте задания и собирайте лотерейные номерки.</p>
       </div>
-      <button id="refreshBtn" class="ghost">Обновить</button>
-    </header>
+      <span class="pill" id="connectionBadge">Telegram WebApp</span>
+    </section>
 
     <section id="waitingScreen" class="card hidden">
-      <h2>Заявка создана</h2>
-      <p>Ваш Telegram ID:</p>
-      <h3 id="waitingTgId">—</h3>
-      <p class="notice">Отправьте этот ID администратору для получения доступа.</p>
+      <h2>Заявка отправлена</h2>
+      <p>Ваш Telegram ID: <strong id="waitingTgId">—</strong></p>
+      <p class="muted">Администратор должен одобрить вход. После одобрения игра появится автоматически при обновлении.</p>
     </section>
 
-    <section id="gameScreen" class="hidden">
-      <div class="stats">
-        <div class="card"><span class="muted">Игрок</span><strong id="username">—</strong></div>
-        <div class="card"><span class="muted">Клетка</span><strong id="currentCell">0 / 100</strong></div>
-        <div class="card"><span class="muted">Кубик</span><strong id="diceState">Готов</strong></div>
+    <section id="gameScreen" class="card hidden">
+      <div class="header-grid">
+        <div class="stat"><span>Игрок</span><strong id="username">—</strong></div>
+        <div class="stat"><span>Текущая клетка</span><strong id="currentCell">0/100</strong></div>
+        <div class="stat"><span>Кубик</span><strong id="diceState">—</strong></div>
       </div>
 
-      <section class="card board-wrap"><div id="board" class="board"></div></section>
-
-      <section class="card" style="margin-top:12px">
-        <div class="controls">
-          <button id="rollBtn">Бросить кубик</button>
-          <span id="rollInfo" class="muted">Получите задание после броска.</span>
-        </div>
-      </section>
-
-      <section id="taskCard" class="card hidden" style="margin-top:12px">
-        <h2 id="taskTitle">Задание</h2>
-        <p id="taskText"></p>
-        <p id="taskStatus" class="notice"></p>
-        <form id="submitForm" class="task-form">
-          <label for="workImage">Фото выполненной работы</label>
-          <input id="workImage" name="work_image" type="file" accept="image/*" required>
-          <button id="submitBtn" type="submit">Сдать работу</button>
-        </form>
-      </section>
-    </section>
-
-    <section id="adminPanel" class="card hidden" style="margin-top:16px">
-      <div class="top">
-        <h2>Админ-панель</h2>
-        <button id="resetBtn" class="danger">Глобальный сброс игры</button>
+      <div class="route" aria-label="Прогресс маршрута от 0 до 100 клеток">
+        <div id="routeRunner" class="route-runner">🧑‍🎨</div>
+        <div class="route-line"><div id="routeFill" class="route-fill"></div></div>
+        <div class="route-labels"><span>0</span><span>50</span><span>100</span></div>
       </div>
-      <section>
-        <h3>Добавить игрока вручную</h3>
-        <form id="manualAddForm" class="admin-form">
-          <label for="manualTgId">Telegram ID
-            <input id="manualTgId" type="text" inputmode="numeric" placeholder="Например: 123456789" required>
-          </label>
-          <button type="submit">Одобрить доступ</button>
-        </form>
-      </section>
-      <div class="admin-grid">
+
+      <div class="game-grid">
         <section>
-          <h3>Игроки</h3>
-          <div id="allUsers" class="list"></div>
+          <button id="rollBtn" class="dice-button" type="button">🎲 Бросить кубик</button>
+          <p id="diceHint" class="muted">После броска кубик заморозится до проверки задания.</p>
         </section>
-        <section>
+
+        <section class="card">
+          <h2>Задание</h2>
+          <p id="taskText" class="task-text muted">Бросьте кубик, чтобы получить задание.</p>
+          <p id="taskStatus" class="muted"></p>
+          <form id="submitForm" class="hidden">
+            <input id="workImage" name="work_image" type="file" accept="image/*">
+            <div class="actions"><button id="submitBtn" type="submit">Отправить фото</button></div>
+          </form>
+          <div id="ticketsLine" class="tickets-line">Мои Красочки: пока нет (Всего: 0 шт.)</div>
+          <div id="finalistLine" class="finalist hidden">🏁 Финалист! Финишные бонусные Красочки выданы.</div>
+        </section>
+      </div>
+    </section>
+
+    <section id="adminPanel" class="admin hidden">
+      <section class="card">
+        <h2>🛠 Админ-панель</h2>
+        <p class="muted">Панель видна только пользователям с ролью admin.</p>
+      </section>
+
+      <div class="admin-grid">
+        <section class="card">
           <h3>Заявки на вход</h3>
           <div id="pendingUsers" class="list"></div>
-          <h3>Нерешенные задания</h3>
-          <div id="pendingSubmissions" class="list"></div>
+        </section>
+
+        <section class="card">
+          <h3>Выгрузка для розыгрыша</h3>
+          <textarea id="ticketsExport" readonly placeholder="Красочки появятся после одобрения работ"></textarea>
+          <div class="actions"><button id="refreshExportBtn" class="ghost" type="button">Обновить выгрузку</button></div>
         </section>
       </div>
-    </section>
 
-    <div id="toast" class="toast hidden"></div>
+      <section class="card">
+        <h3>Лента проверки работ</h3>
+        <div id="pendingSubmissions" class="list"></div>
+      </section>
+
+      <section class="card">
+        <h3>Игроки и управление</h3>
+        <div id="allUsers" class="list"></div>
+      </section>
+
+      <section class="card">
+        <h3>Глобальный сброс игры</h3>
+        <p class="muted">Обнуляет клетки, очищает submissions и tickets, физически удаляет все картинки из /data/uploads.</p>
+        <button id="globalResetBtn" class="danger" type="button">Глобальный сброс игры</button>
+      </section>
+    </section>
   </main>
+
+  <div id="toast" class="toast hidden"></div>
   <script src="/script.js"></script>
 </body>
 </html>
