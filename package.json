@@ -1,0 +1,16 @@
+{
+  "name": "telegram-coloring-battle",
+  "version": "1.0.0",
+  "description": "Lightweight Telegram WebApp board game for 50 players",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node --watch server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {}
+}

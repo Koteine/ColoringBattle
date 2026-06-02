@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coloring Battle</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Telegram WebApp</p>
+        <h1>Coloring Battle</h1>
+        <p>Игра-бродилка на 100 клеток: бросайте кубик, выполняйте задания и ждите одобрения администратора.</p>
+      </div>
+      <button id="refreshBtn" class="ghost">Обновить</button>
+    </header>
+
+    <section id="lockedScreen" class="card hidden">
+      <h2>Добро пожаловать!</h2>
+      <p>Ваш Telegram ID:</p>
+      <code id="myTgId">—</code>
+      <p class="notice">Отправьте этот ID администратору для получения доступа.</p>
+    </section>
+
+    <section id="gameScreen" class="hidden">
+      <div class="stats">
+        <div class="card"><span>Игрок</span><strong id="username">—</strong></div>
+        <div class="card"><span>Клетка</span><strong id="cell">0 / 100</strong></div>
+        <div class="card"><span>Выполнено</span><strong id="completed">0</strong></div>
+      </div>
+
+      <section class="card board-wrap">
+        <div id="board" class="board" aria-label="Игровое поле на 100 клеток"></div>
+      </section>
+
+      <section class="card controls">
+        <button id="rollBtn" class="primary">Бросить кубик</button>
+        <p id="rollHint" class="muted">Кубик доступен, когда нет задания на проверке.</p>
+      </section>
+
+      <section id="taskCard" class="card task hidden">
+        <p class="eyebrow">Текущая карточка задания</p>
+        <h2 id="taskTitle">Задание</h2>
+        <p id="taskText"></p>
+        <p id="taskMeta" class="muted"></p>
+        <form id="submitForm" class="submit-form">
+          <label for="submission">Ссылка на фото или текст подтверждения</label>
+          <textarea id="submission" rows="4" placeholder="https://... или короткий текст"></textarea>
+          <button class="primary" type="submit">Сдать работу</button>
+        </form>
+        <p id="taskStatus" class="notice"></p>
+      </section>
+    </section>
+
+    <section id="adminScreen" class="card admin hidden">
+      <div class="admin-head">
+        <h2>Админ-панель</h2>
+        <button id="resetBtn" class="danger">Глобальный сброс</button>
+      </div>
+      <div class="admin-grid">
+        <section>
+          <h3>Заявки на вход</h3>
+          <div id="pendingUsers" class="list"></div>
+        </section>
+        <section>
+          <h3>Работы на проверке</h3>
+          <div id="submissions" class="list"></div>
+        </section>
+      </div>
+    </section>
+
+    <div id="toast" class="toast hidden"></div>
+  </main>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
