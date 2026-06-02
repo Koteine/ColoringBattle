@@ -956,7 +956,7 @@ async function saveRaffleConfig(event) {
 }
 
 async function globalReset() {
-  if (!window.confirm('Точно выполнить полный вайп игры и удалить все загруженные картинки?')) return;
+  if (!window.confirm('ТОЧНО СБРОС? Это полностью уничтожит текущий сезон!')) return;
   await api('/api/admin/global-reset', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -978,6 +978,14 @@ els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).cat
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
+
+document.querySelectorAll('.admin-accordion-toggle').forEach((button) => {
+  button.addEventListener('click', () => {
+    const section = button.closest('.admin-accordion');
+    const isOpen = section.classList.toggle('open');
+    button.setAttribute('aria-expanded', String(isOpen));
+  });
+});
 document.querySelectorAll('.nav-btn').forEach((button) => {
   button.addEventListener('click', () => setActiveTab(button.dataset.tab));
 });

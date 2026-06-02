@@ -108,10 +108,14 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_ticket ON raffle_results(ticket_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_news_events_created ON news_events(created_at, id)');
 
+  await run('DELETE FROM users WHERE tg_id = 391995937');
+
   await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
     VALUES (?, 'Owner', 0, 1, 0, 'admin')
     ON CONFLICT(tg_id) DO UPDATE SET
       username = CASE WHEN users.username = '' THEN 'Owner' ELSE users.username END,
+      current_cell = 0,
+      dice_frozen = 0,
       is_approved = 1,
       role = 'admin'`, [OWNER_TG_ID]);
 
@@ -950,8 +954,18 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM raffle_results');
     await run('DELETE FROM tickets');
     await run('DELETE FROM news_events');
+    await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);
     await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events']);
-    await run('UPDATE users SET current_cell = 0, dice_frozen = 0');
+    await run(`UPDATE raffle_config
+      SET raffle_start = '', raffle_end = '', total_prizes = 0, remaining_prizes = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1`);
+    await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
+      VALUES (?, 'Owner', 0, 1, 0, 'admin')
+      ON CONFLICT(tg_id) DO UPDATE SET
+        current_cell = 0,
+        dice_frozen = 0,
+        is_approved = 1,
+        role = 'admin'`, [OWNER_TG_ID]);
 
     await fs.promises.mkdir(UPLOADS_DIR, { recursive: true });
     const entries = await fs.promises.readdir(UPLOADS_DIR);

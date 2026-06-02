@@ -285,8 +285,18 @@
     .item { border: 1px solid var(--line); border-radius: 22px; padding: 14px; background: rgba(255,255,255,.58); }
     .item img { max-width: 220px; max-height: 220px; border-radius: 18px; object-fit: cover; border: 1px solid var(--line); }
 
-    .admin { display: grid; gap: 16px; }
-    .admin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .admin { display: grid; gap: 14px; }
+    .admin-title-card { text-align: center; }
+    .admin-title-card h2 { margin: 0; }
+    .admin-accordion { padding: 0; overflow: hidden; }
+    .admin-accordion-toggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; border-radius: 28px; background: rgba(255,255,255,.52); box-shadow: none; color: var(--ink); text-align: left; }
+    .admin-accordion-toggle::after { content: '⌄'; flex: 0 0 auto; font-size: 24px; transition: transform .26s ease; }
+    .admin-accordion.open .admin-accordion-toggle::after { transform: rotate(180deg); }
+    .admin-accordion-panel { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .3s ease; }
+    .admin-accordion.open .admin-accordion-panel { grid-template-rows: 1fr; }
+    .admin-accordion-inner { min-height: 0; overflow: hidden; padding: 0 16px; }
+    .admin-accordion.open .admin-accordion-inner { padding-bottom: 16px; }
+    .admin-section-body { display: grid; gap: 12px; }
     .player-accordion { padding: 0; overflow: hidden; }
     .player-summary { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px; border-radius: 22px; background: rgba(255,255,255,.42); box-shadow: none; text-align: left; }
     .player-summary::after { content: '⌄'; font-size: 22px; transition: transform .24s ease; }
@@ -326,7 +336,7 @@
     .toast { position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px); transform: translateX(-50%); max-width: min(680px, calc(100% - 24px)); padding: 14px 18px; border-radius: 18px; background: #3b2342; border: 1px solid rgba(255,255,255,.24); color: white; box-shadow: 0 20px 60px rgba(97,70,120,.35); z-index: 30; }
 
     @media (max-width: 800px) {
-      .stats-grid, .game-grid, .raffle-hero, .admin-grid, .ticket-admin, .lottery-form { grid-template-columns: 1fr; }
+      .stats-grid, .game-grid, .raffle-hero, .ticket-admin, .lottery-form { grid-template-columns: 1fr; }
       .player-tools { grid-template-columns: 1fr; }
       .app { padding: 12px; }
       .card { padding: 16px; border-radius: 26px; }
@@ -439,69 +449,87 @@
     </section>
 
     <section id="adminPanel" class="admin hidden" data-screen="admin">
-      <section class="card">
-        <h2>🛠 Админка</h2>
-        <p class="muted">Все инструменты модерации, управления игроками и выгрузки собраны на этой вкладке.</p>
+      <section class="card admin-title-card">
+        <h2>Админка</h2>
       </section>
 
-      <div class="admin-grid">
-        <section class="card">
-          <h3>Модерация заявок</h3>
-          <div id="pendingUsers" class="list"></div>
-        </section>
-
-        <section class="card">
-          <h3>Управление лотереей</h3>
-          <p class="muted">Задайте окно активности и количество доступных призов для скретч-карт.</p>
-          <form id="raffleConfigForm" class="lottery-form">
-            <label class="muted">Старт
-              <input id="raffleStartInput" type="datetime-local">
-            </label>
-            <label class="muted">Финиш
-              <input id="raffleEndInput" type="datetime-local">
-            </label>
-            <label class="muted">Количество призов
-              <input id="totalPrizesInput" type="number" min="0" step="1" inputmode="numeric">
-            </label>
-            <div class="actions"><button type="submit">Сохранить настройки</button></div>
-          </form>
-          <p id="raffleConfigHint" class="muted">Настройки еще не загружены.</p>
-          <textarea id="ticketsExport" readonly placeholder="Сводка по Красочкам появится после одобрения работ"></textarea>
-          <div class="actions">
-            <button id="refreshExportBtn" class="ghost" type="button">Обновить сводку</button>
+      <section class="card admin-accordion">
+        <button class="admin-accordion-toggle" type="button" aria-expanded="false">Модерация заявок</button>
+        <div class="admin-accordion-panel">
+          <div class="admin-accordion-inner admin-section-body">
+            <div id="pendingUsers" class="list"></div>
           </div>
-        </section>
-      </div>
-
-      <section class="card">
-        <h3>Лента проверки работ</h3>
-        <div id="pendingSubmissions" class="list"></div>
-      </section>
-
-      <section class="card">
-        <h3>Игроки и управление</h3>
-        <div id="allUsers" class="list"></div>
-      </section>
-
-      <section class="card ticket-admin">
-        <div>
-          <h3>Подарить Красочку</h3>
-          <p class="muted">Введите Telegram ID игрока, чтобы вручную начислить следующий порядковый номер активной Красочки.</p>
-          <form id="grantTicketForm">
-            <input id="grantTicketTgId" type="text" inputmode="numeric" placeholder="Telegram ID игрока">
-            <div class="actions"><button type="submit">Начислить билет вручную</button></div>
-          </form>
         </div>
-        <div>
-          <h3>Реестр Красочек</h3>
-          <p class="muted">Все выданные билеты по порядку с владельцами и статусами.</p>
-          <div id="ticketRegistry" class="list ticket-registry"></div>
+      </section>
+
+      <section class="card admin-accordion">
+        <button class="admin-accordion-toggle" type="button" aria-expanded="false">Проверка работ</button>
+        <div class="admin-accordion-panel">
+          <div class="admin-accordion-inner admin-section-body">
+            <div id="pendingSubmissions" class="list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card admin-accordion">
+        <button class="admin-accordion-toggle" type="button" aria-expanded="false">Игроки и управление</button>
+        <div class="admin-accordion-panel">
+          <div class="admin-accordion-inner admin-section-body">
+            <div id="allUsers" class="list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card admin-accordion">
+        <button class="admin-accordion-toggle" type="button" aria-expanded="false">Подарить красочку</button>
+        <div class="admin-accordion-panel">
+          <div class="admin-accordion-inner ticket-admin">
+            <div>
+              <h3>Начисление</h3>
+              <p class="muted">Введите Telegram ID игрока, чтобы вручную начислить следующий порядковый номер активной Красочки.</p>
+              <form id="grantTicketForm">
+                <input id="grantTicketTgId" type="text" inputmode="numeric" placeholder="Telegram ID игрока">
+                <div class="actions"><button type="submit">Начислить билет вручную</button></div>
+              </form>
+            </div>
+            <div>
+              <h3>Реестр Красочек</h3>
+              <p class="muted">Все выданные билеты по порядку с владельцами и статусами.</p>
+              <div id="ticketRegistry" class="list ticket-registry"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card admin-accordion">
+        <button class="admin-accordion-toggle" type="button" aria-expanded="false">Розыгрыш</button>
+        <div class="admin-accordion-panel">
+          <div class="admin-accordion-inner admin-section-body">
+            <p class="muted">Задайте окно активности, количество доступных призов и обновляйте лог монеток.</p>
+            <form id="raffleConfigForm" class="lottery-form">
+              <label class="muted">Старт
+                <input id="raffleStartInput" type="datetime-local">
+              </label>
+              <label class="muted">Финиш
+                <input id="raffleEndInput" type="datetime-local">
+              </label>
+              <label class="muted">Количество призов
+                <input id="totalPrizesInput" type="number" min="0" step="1" inputmode="numeric">
+              </label>
+              <div class="actions"><button type="submit">Сохранить настройки</button></div>
+            </form>
+            <p id="raffleConfigHint" class="muted">Настройки еще не загружены.</p>
+            <textarea id="ticketsExport" readonly placeholder="Лог монеток появится после выдачи Красочек"></textarea>
+            <div class="actions">
+              <button id="refreshExportBtn" class="ghost" type="button">Обновить лог монеток</button>
+            </div>
+          </div>
         </div>
       </section>
 
       <section class="card">
         <h3>Глобальный сброс игры</h3>
-        <p class="muted">Обнуляет клетки, очищает submissions и tickets, физически удаляет все картинки из /data/uploads.</p>
+        <p class="muted">Полностью очищает сезон, удаляет картинки и возвращает игроков на экран подачи заявки.</p>
         <button id="globalResetBtn" class="danger" type="button">Глобальный сброс игры</button>
       </section>
     </section>
