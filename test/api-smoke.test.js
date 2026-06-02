@@ -110,6 +110,9 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     assert.equal(checkApproved.dice_frozen, 0);
     assert.equal(checkApproved.tickets.length, 1);
 
+    const news = await jsonRequest(server.baseUrl, '/api/news');
+    assert.match(news.events[0].message, /Красочка №1 досталась @player/);
+
     await jsonRequest(server.baseUrl, '/api/roll', {
       method: 'POST',
       body: JSON.stringify({ tg_id: '200' })
@@ -129,6 +132,32 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
 
     const checkAccumulated = await jsonRequest(server.baseUrl, '/api/check-status/200');
     assert.equal(checkAccumulated.tickets.length, 2);
+
+    const draw = await jsonRequest(server.baseUrl, '/api/admin/draw-winner', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937' })
+    });
+    assert.equal(draw.ok, true);
+    assert.equal(Boolean(draw.winner), true);
+    assert.equal(draw.winner.tg_id, '200');
+
+    const grant = await jsonRequest(server.baseUrl, '/api/admin/grant-ticket', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '200' })
+    });
+    assert.equal(grant.ticket.ticket_number, 3);
+    assert.equal(grant.ticket.status, 'active');
+
+    const registry = await jsonRequest(server.baseUrl, '/api/admin/tickets?admin_tg_id=341995937');
+    assert.equal(registry.tickets.length, 3);
+
+    await jsonRequest(server.baseUrl, '/api/admin/remove-ticket', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', ticket_number: grant.ticket.ticket_number })
+    });
+
+    const registryAfterRemoval = await jsonRequest(server.baseUrl, '/api/admin/tickets?admin_tg_id=341995937');
+    assert.equal(registryAfterRemoval.tickets.length, 2);
   } finally {
     await server.close();
   }

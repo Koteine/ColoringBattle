@@ -126,39 +126,30 @@
     .game-grid { display: grid; grid-template-columns: minmax(260px, .86fr) minmax(300px, 1.14fr); gap: 16px; align-items: stretch; }
     .dice-zone { display: grid; gap: 12px; place-items: center; }
     .dice-button {
-      width: min(260px, 100%);
+      width: min(130px, 100%);
       aspect-ratio: 1;
-      border-radius: 38px;
+      border-radius: 24px;
       position: relative;
       display: grid;
       place-items: center;
-      background:
-        radial-gradient(circle at 26% 24%, rgba(255,255,255,.95), transparent 18%),
-        conic-gradient(from 20deg, #ffafcc, #ffd6a5, #fdffb6, #caffbf, #9bf6ff, #bdb2ff, #ffc6ff, #ffafcc);
+      background: transparent;
       transform-style: preserve-3d;
-      box-shadow: 0 26px 50px rgba(144, 96, 158, .26), inset 0 -16px 30px rgba(63, 35, 70, .14), inset 0 14px 22px rgba(255,255,255,.38);
-    }
-    .dice-button::before {
-      content: '';
-      position: absolute;
-      inset: 16px;
-      border-radius: 28px;
-      background: rgba(255,255,255,.42);
-      border: 1px solid rgba(255,255,255,.62);
+      box-shadow: none;
+      padding: 0;
     }
     .dice-face {
       position: relative;
       z-index: 1;
-      width: 118px;
-      height: 118px;
-      border-radius: 26px;
+      width: 59px;
+      height: 59px;
+      border-radius: 13px;
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       grid-template-rows: repeat(3, 1fr);
-      gap: 10px;
-      padding: 18px;
-      background: rgba(255,255,255,.9);
-      box-shadow: inset 0 -10px 22px rgba(123,107,131,.12), 0 12px 24px rgba(95,75,102,.16);
+      gap: 5px;
+      padding: 9px;
+      background: linear-gradient(135deg, rgba(255,175,204,.95), rgba(189,224,254,.95));
+      box-shadow: inset 0 -5px 11px rgba(123,107,131,.16), 0 8px 18px rgba(95,75,102,.18);
     }
     .pip { border-radius: 50%; background: linear-gradient(135deg, #f472b6, #8b5cf6); box-shadow: inset 0 -2px 4px rgba(0,0,0,.12); opacity: 0; }
     .dice-face[data-value="1"] .pip:nth-child(5),
@@ -177,6 +168,13 @@
       100% { transform: rotate(0) scale(1); }
     }
     .dice-caption { margin: 0; text-align: center; font-weight: 850; }
+    .news-feed { width: 100%; overflow: hidden; border-radius: 22px; padding: 12px 0; background: rgba(255,255,255,.5); border: 1px solid var(--line); }
+    .news-feed h3 { margin: 0 14px 8px; font-size: 16px; }
+    .news-marquee { overflow: hidden; white-space: nowrap; }
+    .news-track { display: inline-flex; gap: 34px; min-width: 100%; padding-left: 100%; color: #5d4164; font-weight: 900; animation: newsScroll 24s linear infinite; }
+    .news-track:hover { animation-play-state: paused; }
+    .news-item { display: inline-flex; align-items: center; }
+    @keyframes newsScroll { from { transform: translateX(0); } to { transform: translateX(-100%); } }
 
     .task-text { margin: 12px 0 16px; font-size: 20px; font-weight: 850; line-height: 1.35; }
     .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; align-items: center; }
@@ -266,8 +264,19 @@
 
     .admin { display: grid; gap: 16px; }
     .admin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-    .player-row { display: grid; gap: 10px; }
+    .player-accordion { padding: 0; overflow: hidden; }
+    .player-summary { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px; border-radius: 22px; background: rgba(255,255,255,.42); box-shadow: none; text-align: left; }
+    .player-summary::after { content: '⌄'; font-size: 22px; transition: transform .24s ease; }
+    .player-accordion.open .player-summary::after { transform: rotate(180deg); }
+    .player-details { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .28s ease; }
+    .player-accordion.open .player-details { grid-template-rows: 1fr; }
+    .player-details-inner { min-height: 0; overflow: hidden; padding: 0 14px; }
+    .player-accordion.open .player-details-inner { padding-bottom: 14px; }
+    .player-meta { margin: 8px 0 12px; }
     .player-tools { display: grid; grid-template-columns: minmax(120px, 180px) repeat(3, max-content); gap: 10px; align-items: end; }
+    .ticket-admin { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(280px, 1.2fr); gap: 16px; }
+    .ticket-registry { max-height: 440px; overflow: auto; padding-right: 4px; }
+    .ticket-row { display: grid; grid-template-columns: 1fr max-content; gap: 10px; align-items: center; }
 
     .bottom-nav {
       position: fixed;
@@ -294,7 +303,7 @@
     .toast { position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px); transform: translateX(-50%); max-width: min(680px, calc(100% - 24px)); padding: 14px 18px; border-radius: 18px; background: #3b2342; border: 1px solid rgba(255,255,255,.24); color: white; box-shadow: 0 20px 60px rgba(97,70,120,.35); z-index: 30; }
 
     @media (max-width: 800px) {
-      .stats-grid, .game-grid, .raffle-hero, .admin-grid { grid-template-columns: 1fr; }
+      .stats-grid, .game-grid, .raffle-hero, .admin-grid, .ticket-admin { grid-template-columns: 1fr; }
       .player-tools { grid-template-columns: 1fr; }
       .app { padding: 12px; }
       .card { padding: 16px; border-radius: 26px; }
@@ -350,6 +359,10 @@
             </span>
           </button>
           <p id="diceHint" class="dice-caption muted">После броска кубик заморозится до проверки задания.</p>
+          <div class="news-feed" aria-live="polite">
+            <h3>Лента новостей игры</h3>
+            <div class="news-marquee"><div id="newsTrack" class="news-track">Загружаем новости...</div></div>
+          </div>
         </section>
 
         <section class="card">
@@ -426,6 +439,22 @@
       <section class="card">
         <h3>Игроки и управление</h3>
         <div id="allUsers" class="list"></div>
+      </section>
+
+      <section class="card ticket-admin">
+        <div>
+          <h3>Подарить Красочку</h3>
+          <p class="muted">Введите Telegram ID игрока, чтобы вручную начислить следующий порядковый номер активной Красочки.</p>
+          <form id="grantTicketForm">
+            <input id="grantTicketTgId" type="text" inputmode="numeric" placeholder="Telegram ID игрока">
+            <div class="actions"><button type="submit">Начислить билет вручную</button></div>
+          </form>
+        </div>
+        <div>
+          <h3>Реестр Красочек</h3>
+          <p class="muted">Все выданные билеты по порядку с владельцами и статусами.</p>
+          <div id="ticketRegistry" class="list ticket-registry"></div>
+        </div>
       </section>
 
       <section class="card">

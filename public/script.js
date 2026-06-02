@@ -30,6 +30,7 @@ const els = {
   rollBtn: document.getElementById('rollBtn'),
   diceFace: document.getElementById('diceFace'),
   diceHint: document.getElementById('diceHint'),
+  newsTrack: document.getElementById('newsTrack'),
   taskText: document.getElementById('taskText'),
   taskStatus: document.getElementById('taskStatus'),
   submitForm: document.getElementById('submitForm'),
@@ -45,6 +46,9 @@ const els = {
   pendingUsers: document.getElementById('pendingUsers'),
   pendingSubmissions: document.getElementById('pendingSubmissions'),
   allUsers: document.getElementById('allUsers'),
+  ticketRegistry: document.getElementById('ticketRegistry'),
+  grantTicketForm: document.getElementById('grantTicketForm'),
+  grantTicketTgId: document.getElementById('grantTicketTgId'),
   ticketsExport: document.getElementById('ticketsExport'),
   drawWinnerBtn: document.getElementById('drawWinnerBtn'),
   refreshExportBtn: document.getElementById('refreshExportBtn'),
@@ -71,6 +75,7 @@ let isRolling = false;
 let raffleLoadedAt = 0;
 let rafflePollingTimer = null;
 let lastRaffleWinnerId = null;
+let newsPollingTimer = null;
 
 function isOwnerId(id) {
   return String(id || '').trim() === OWNER_TG_ID;
@@ -171,6 +176,34 @@ function renderPalette(tickets = []) {
   }
 }
 
+
+function renderNews(events = []) {
+  if (!els.newsTrack) return;
+  const messages = events.map((event) => String(event.message || '').trim()).filter(Boolean);
+  if (!messages.length) messages.push('Пока тихо — первые новости появятся после одобрения работ.');
+  els.newsTrack.innerHTML = '';
+  const repeated = messages.length < 4 ? [...messages, ...messages, ...messages] : messages;
+  for (const message of repeated) {
+    const item = document.createElement('span');
+    item.className = 'news-item';
+    item.textContent = message;
+    els.newsTrack.append(item);
+  }
+}
+
+async function loadNews() {
+  const data = await api('/api/news?limit=20');
+  renderNews(data.events || []);
+}
+
+function startNewsPolling() {
+  if (newsPollingTimer) return;
+  loadNews().catch((error) => console.warn('News loading error:', error.message));
+  newsPollingTimer = window.setInterval(() => {
+    if (state?.user && canEnterApp(state.user)) loadNews().catch((error) => console.warn('News polling error:', error.message));
+  }, 6000);
+}
+
 function renderTask(submission) {
   els.submitForm.classList.add('hidden');
   els.submitBtn.disabled = false;
@@ -225,6 +258,7 @@ function render() {
   els.waitingScreen.classList.add('hidden');
   els.bottomNav.classList.remove('hidden');
   els.adminTabBtn.classList.toggle('hidden', !adminAccess);
+  startNewsPolling();
 
   els.username.textContent = user.username || `ID ${user.tg_id}`;
   els.currentCell.textContent = `${user.current_cell}/100`;
@@ -440,16 +474,18 @@ function stopRafflePolling() {
 
 async function loadAdminPanel() {
   const adminParam = `admin_tg_id=${encodeURIComponent(tgId)}`;
-  const [pendingUsers, users, submissions, exportData] = await Promise.all([
+  const [pendingUsers, users, submissions, exportData, ticketData] = await Promise.all([
     api(`/api/admin/pending-users?${adminParam}`),
     api(`/api/admin/users?${adminParam}`),
     api(`/api/admin/submissions?${adminParam}`),
-    api(`/api/admin/tickets-export?${adminParam}`)
+    api(`/api/admin/tickets-export?${adminParam}`),
+    api(`/api/admin/tickets?${adminParam}`)
   ]);
 
   renderPendingUsers(pendingUsers.users);
   renderAllUsers(users.users);
   renderPendingSubmissions(submissions.submissions);
+  renderTicketRegistry(ticketData.tickets || []);
   els.ticketsExport.value = exportData.text || '';
 }
 
@@ -530,6 +566,7 @@ function renderPendingSubmissions(submissions) {
       const ticketNumbers = result.issuedTickets.map((ticket) => `№${ticket.ticket_number}`).join(', ');
       showToast(`Работа одобрена. Выданы Красочки: ${ticketNumbers}`);
       await loadAdminPanel();
+      await loadNews().catch(() => {});
       if (submission.tg_id === tgId) await loadState();
     });
 
@@ -559,18 +596,29 @@ function renderAllUsers(users) {
   els.allUsers.innerHTML = users.length ? '' : '<p class="muted">Игроков пока нет.</p>';
   for (const user of users) {
     const item = document.createElement('article');
-    item.className = 'item player-row';
+    item.className = 'item player-accordion';
+    const playerName = user.username ? `@${String(user.username).replace(/^@/, '')}` : 'Без ника';
     item.innerHTML = `
-      <div>
-        <strong>${escapeHtml(user.username || 'Без ника')}</strong>
-        <p class="muted">TG ID: ${escapeHtml(user.tg_id)} · роль: ${escapeHtml(user.role)} · клетка: ${user.current_cell}/100 · Красочек: ${user.tickets_count || 0} · ${Number(user.is_approved) === 1 ? 'доступ открыт' : 'исключен/ожидает'} · кубик: ${Number(user.dice_frozen) === 1 ? 'заморожен' : 'готов'}</p>
-      </div>
-      <div class="player-tools">
-        <label class="muted">Номер клетки
-          <input type="number" min="0" max="100" value="${Number(user.current_cell || 0)}" data-cell-input="${escapeHtml(user.tg_id)}">
-        </label>
+      <button class="player-summary" type="button" aria-expanded="false">
+        <strong>${escapeHtml(playerName)} (${escapeHtml(user.tg_id)}) — Клетка ${Number(user.current_cell || 0)}</strong>
+      </button>
+      <div class="player-details">
+        <div class="player-details-inner">
+          <p class="muted player-meta">Роль: ${escapeHtml(user.role)} · Красочек: ${user.tickets_count || 0} · ${Number(user.is_approved) === 1 ? 'доступ открыт' : 'исключен/ожидает'} · кубик: ${Number(user.dice_frozen) === 1 ? 'заморожен' : 'готов'}</p>
+          <div class="player-tools">
+            <label class="muted">Номер клетки
+              <input type="number" min="0" max="100" value="${Number(user.current_cell || 0)}" data-cell-input="${escapeHtml(user.tg_id)}">
+            </label>
+          </div>
+        </div>
       </div>
     `;
+
+    const summary = item.querySelector('.player-summary');
+    summary.addEventListener('click', () => {
+      const isOpen = item.classList.toggle('open');
+      summary.setAttribute('aria-expanded', String(isOpen));
+    });
 
     const tools = item.querySelector('.player-tools');
 
@@ -626,6 +674,58 @@ function renderAllUsers(users) {
   }
 }
 
+function renderTicketRegistry(tickets = []) {
+  els.ticketRegistry.innerHTML = tickets.length ? '' : '<p class="muted">Красочек пока нет.</p>';
+  for (const ticket of tickets) {
+    const item = document.createElement('article');
+    item.className = 'item ticket-row';
+    const owner = ticket.username ? `@${String(ticket.username).replace(/^@/, '')}` : `ID ${ticket.tg_id}`;
+    item.innerHTML = `
+      <div>
+        <strong>Красочка №${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong>
+        <p class="muted">Владелец: ${escapeHtml(owner)} (${escapeHtml(ticket.tg_id)}) · статус: ${escapeHtml(ticket.status)} · клетка: ${Number(ticket.current_cell || 0)}</p>
+      </div>
+    `;
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'danger';
+    remove.textContent = 'Отобрать';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`Отобрать Красочку №${ticket.ticket_number}?`)) return;
+      await api('/api/admin/remove-ticket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_tg_id: tgId, ticket_number: ticket.ticket_number })
+      });
+      showToast('Красочка удалена из реестра');
+      await loadAdminPanel();
+      await loadState().catch(() => {});
+      await loadRaffle(true).catch(() => {});
+    });
+
+    item.append(remove);
+    els.ticketRegistry.append(item);
+  }
+}
+
+async function grantTicket(event) {
+  event.preventDefault();
+  const targetTgId = els.grantTicketTgId.value.trim();
+  if (!targetTgId) return showToast('Введите Telegram ID игрока');
+
+  const result = await api('/api/admin/grant-ticket', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ admin_tg_id: tgId, tg_id: targetTgId })
+  });
+  els.grantTicketTgId.value = '';
+  showToast(`Начислена Красочка №${result.ticket.ticket_number}`);
+  await loadAdminPanel();
+  await loadNews().catch(() => {});
+  if (targetTgId === tgId) await loadState();
+}
+
 async function refreshExport() {
   const exportData = await api(`/api/admin/tickets-export?admin_tg_id=${encodeURIComponent(tgId)}`);
   els.ticketsExport.value = exportData.text || '';
@@ -670,11 +770,13 @@ async function globalReset() {
   lastRaffleWinnerId = null;
   await loadState();
   await loadRaffle(true).catch(() => {});
+  await loadNews().catch(() => {});
 }
 
 els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
 els.submitForm.addEventListener('submit', submitWork);
+els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
 els.drawWinnerBtn.addEventListener('click', () => drawNextWinner().catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));

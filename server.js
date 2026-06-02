@@ -97,12 +97,14 @@ async function initDb() {
 
   await ensureAccumulatingTicketsTable();
   await ensureRaffleResultsTable();
+  await ensureNewsEventsTable();
 
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_player_status ON submissions(tg_id, status, task_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_images ON submissions(status, image_name)');
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_tg_id ON tickets(tg_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_status_random ON tickets(status, ticket_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_place ON raffle_results(place_number)');
+  await run('CREATE INDEX IF NOT EXISTS idx_news_events_created ON news_events(created_at, id)');
 
   await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
     VALUES (?, 'Owner', 0, 1, 0, 'admin')
@@ -167,6 +169,19 @@ async function ensureRaffleResultsTable() {
     username TEXT DEFAULT '',
     drawn_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (ticket_number) REFERENCES tickets(ticket_number),
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+}
+
+
+async function ensureNewsEventsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS news_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message TEXT NOT NULL,
+    event_type TEXT DEFAULT 'system',
+    tg_id TEXT DEFAULT '',
+    ticket_number INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id)
   )`);
 }
@@ -258,6 +273,61 @@ async function requireAdmin(tgId) {
   }
   await createOrRefreshApplication(normalized, 'Owner');
   return requireApproved(normalized);
+}
+
+
+function formatUserHandle(username, tgId = '') {
+  const cleanUsername = String(username || '').trim().replace(/^@+/, '');
+  return cleanUsername ? `@${cleanUsername}` : `ID ${tgId || '—'}`;
+}
+
+async function addNewsEvent(message, { eventType = 'system', tgId = '', ticketNumber = null } = {}) {
+  const normalizedMessage = String(message || '').trim();
+  if (!normalizedMessage) return null;
+  const result = await run(
+    'INSERT INTO news_events (message, event_type, tg_id, ticket_number) VALUES (?, ?, ?, ?)',
+    [normalizedMessage, eventType, String(tgId || ''), ticketNumber]
+  );
+  return get('SELECT id, message, event_type, tg_id, ticket_number, created_at FROM news_events WHERE id = ?', [result.id]);
+}
+
+async function getNewsEvents(limit = 30) {
+  const safeLimit = Math.max(1, Math.min(80, Number(limit) || 30));
+  return all(`SELECT id, message, event_type, tg_id, ticket_number, created_at
+    FROM news_events
+    ORDER BY id DESC
+    LIMIT ?`, [safeLimit]);
+}
+
+async function addApprovalNewsEvents(user, issuedTickets = []) {
+  const handle = formatUserHandle(user?.username, user?.tg_id);
+  const standardTicket = issuedTickets.find((ticket) => ticket.type === 'standard') || issuedTickets[0];
+  if (standardTicket) {
+    await addNewsEvent(`🎨 Красочка №${standardTicket.ticket_number} досталась ${handle}!`, {
+      eventType: 'ticket_issued',
+      tgId: user.tg_id,
+      ticketNumber: standardTicket.ticket_number
+    });
+  }
+
+  const currentCell = Number(user?.current_cell || 0);
+  const milestones = [
+    [50, `🎉 ${handle} на 50-й клеточке! Поздравляем с экватором!`],
+    [70, `🔥 ${handle} дошел до 70-й клетки! Финиш близко!`],
+    [100, `🏆 УРА! ${handle} дошел до ФИНАЛА (100 клетка) и получает 2 бонусные Красочки!`]
+  ];
+
+  for (const [cell, message] of milestones) {
+    if (currentCell < cell) continue;
+    const eventType = `cell_${cell}`;
+    const existing = await get('SELECT id FROM news_events WHERE tg_id = ? AND event_type = ? LIMIT 1', [user.tg_id, eventType]);
+    if (existing) continue;
+    await addNewsEvent(message, {
+      eventType,
+      tgId: user.tg_id,
+      ticketNumber: standardTicket?.ticket_number || null
+    });
+  }
 }
 
 async function getActiveSubmission(tgId) {
@@ -367,9 +437,6 @@ async function drawLiveRaffleWinner() {
       VALUES (?, ?, ?, ?)`, [placeNumber, winner.ticket_number, winner.tg_id, winner.username || '']);
 
     await run("UPDATE tickets SET status = 'winner' WHERE ticket_number = ?", [winner.ticket_number]);
-    const burnt = await run(`UPDATE tickets
-      SET status = 'burnt'
-      WHERE tg_id = ? AND ticket_number <> ? AND status = 'active'`, [winner.tg_id, winner.ticket_number]);
 
     await run('COMMIT');
 
@@ -380,7 +447,7 @@ async function drawLiveRaffleWinner() {
       tg_id: winner.tg_id,
       username: winner.username || '',
       type: winner.type,
-      burnt_tickets: burnt.changes || 0,
+      burnt_tickets: 0,
       drawn_at: new Date().toISOString()
     };
   } catch (error) {
@@ -439,6 +506,15 @@ app.get('/api/raffle', async (_req, res, next) => {
 app.get('/api/raffle/status', async (_req, res, next) => {
   try {
     res.json(await getRaffleStatus());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/news', async (req, res, next) => {
+  try {
+    const events = await getNewsEvents(req.query.limit);
+    res.json({ events });
   } catch (error) {
     next(error);
   }
@@ -622,7 +698,7 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
     const submissionId = Number(req.body.submission_id);
     if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
 
-    const submission = await get(`SELECT s.id, s.tg_id, s.cell, u.current_cell
+    const submission = await get(`SELECT s.id, s.tg_id, s.cell, u.current_cell, u.username
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
       WHERE s.id = ? AND s.status = 'pending' AND s.image_name IS NOT NULL`, [submissionId]);
@@ -632,11 +708,12 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
     await run('UPDATE users SET dice_frozen = 0 WHERE tg_id = ?', [submission.tg_id]);
 
     const issuedTickets = [await issueTicket(submission.tg_id, 'standard')];
-    const userAfterApproval = await get('SELECT current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
+    const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
     if (Number(userAfterApproval.current_cell) >= 100) {
       issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
       issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
     }
+    await addApprovalNewsEvents(userAfterApproval, issuedTickets);
 
     res.json({ ok: true, issuedTickets, is_finalist: Number(userAfterApproval.current_cell) >= 100 });
   } catch (error) {
@@ -656,6 +733,52 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
       SET status = 'rejected', admin_comment = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status = 'pending' AND image_name IS NOT NULL`, [comment, submissionId]);
     if (result.changes === 0) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/tickets', async (req, res, next) => {
+  try {
+    await requireAdmin(req.query.admin_tg_id);
+    const tickets = await all(`SELECT t.ticket_number, t.type, t.status, t.created_at,
+        u.username, u.tg_id, u.current_cell
+      FROM tickets t
+      JOIN users u ON u.tg_id = t.tg_id
+      ORDER BY t.ticket_number ASC`);
+    res.json({ tickets });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/grant-ticket', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await get('SELECT tg_id, username FROM users WHERE tg_id = ?', [tgId]);
+    if (!user) throw Object.assign(new Error('Игрок с таким Telegram ID не найден'), { status: 404 });
+    const ticket = await issueTicket(tgId, 'standard');
+    await addNewsEvent(`🎨 Красочка №${ticket.ticket_number} досталась ${formatUserHandle(user.username, user.tg_id)}!`, {
+      eventType: 'manual_ticket',
+      tgId: user.tg_id,
+      ticketNumber: ticket.ticket_number
+    });
+    res.json({ ok: true, ticket });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/remove-ticket', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const ticketNumber = Number(req.body.ticket_number);
+    if (!Number.isInteger(ticketNumber) || ticketNumber < 1) throw Object.assign(new Error('Некорректный номер Красочки'), { status: 400 });
+    await run('DELETE FROM raffle_results WHERE ticket_number = ?', [ticketNumber]);
+    const result = await run('DELETE FROM tickets WHERE ticket_number = ?', [ticketNumber]);
+    if (result.changes === 0) throw Object.assign(new Error('Красочка не найдена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
     next(error);
@@ -706,7 +829,8 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM submissions');
     await run('DELETE FROM raffle_results');
     await run('DELETE FROM tickets');
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?)', ['submissions', 'tickets', 'raffle_results']);
+    await run('DELETE FROM news_events');
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events']);
     await run('UPDATE users SET current_cell = 0, dice_frozen = 0');
 
     await fs.promises.mkdir(UPLOADS_DIR, { recursive: true });
