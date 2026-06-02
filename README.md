@@ -1,50 +1,54 @@
 # Telegram Coloring Battle
 
-Легковесная Telegram WebApp игра-бродилка на 100 клеток для небольшой аудитории до 50 игроков.
+Легковесная Telegram WebApp игра-бродилка на 100 клеток для деплоя на Railway.app.
 
 ## Стек
 
-- Frontend: HTML, CSS, Vanilla JS.
-- Backend: Node.js без Express и других HTTP-фреймворков.
-- Database: встроенный `node:sqlite` (`DatabaseSync`) и файл SQLite.
+- Frontend: `public/index.html` + `public/script.js`, Vanilla JS.
+- Backend: Node.js + Express.
+- Database: SQLite через `sqlite3`.
+- Uploads: Multer, изображения сохраняются в Railway Volume.
 
-## Быстрый старт
+## Railway Volume paths
+
+Все динамические данные хранятся в `/data`:
+
+- База данных: `/data/game.db`.
+- Загруженные изображения: `/data/uploads`.
+- Express раздает изображения по URL `/uploads/<file>`.
+
+Папка `/data/uploads` создается автоматически при старте сервера.
+
+## Запуск
 
 ```bash
+npm install
 npm start
 ```
-
-По умолчанию сервер слушает `http://localhost:3000` и хранит базу в `./game.sqlite`.
 
 ## Переменные окружения
 
 | Переменная | Назначение |
 | --- | --- |
-| `PORT` | Порт HTTP-сервера, по умолчанию `3000`. |
-| `DB_PATH` | Путь к SQLite-файлу, по умолчанию `./game.sqlite`. |
-| `BOT_TOKEN` | Токен Telegram-бота для проверки `initData`. В production обязателен. |
-| `ADMIN_TG_IDS` | Список Telegram ID админов через запятую для первичного назначения роли `admin`. |
-| `DEV_AUTH` | Если `1`, разрешает локальный вход через `?tg_id=...&username=...` без Telegram. |
+| `PORT` | Порт сервера, Railway задает автоматически. |
+| `ADMIN_TG_IDS` | Telegram ID администраторов через запятую, например `123,456`. |
 
-## Локальная проверка без Telegram
+## Локальная проверка
 
-```bash
-DEV_AUTH=1 ADMIN_TG_IDS=100 npm start
-```
+Для теста вне Telegram можно открыть страницу с query-параметрами:
 
 - Игрок: `http://localhost:3000/?tg_id=200&username=player`
-- Админ: `http://localhost:3000/?tg_id=100&username=admin`
+- Админ: `http://localhost:3000/?tg_id=100&username=admin`, если `ADMIN_TG_IDS=100`.
 
-## Основные API
+## API
 
-Все игровые endpoint'ы читают Telegram WebApp `initData` из заголовка `X-Telegram-Init-Data`. Для локальной разработки при `DEV_AUTH=1` можно передавать `tg_id` и `username` в query string.
-
-- `GET /api/me` — регистрация/проверка пользователя, возврат состояния игрока.
-- `POST /api/roll` — бросок кубика, движение по полю, выдача нового задания.
-- `POST /api/submit` — сдача работы по активному заданию.
-- `GET /api/admin/pending-users` — список заявок на вход.
-- `POST /api/admin/users/:id/approve` — одобрение игрока.
-- `POST /api/admin/tasks/:historyId/approve` — одобрение сданной работы.
-- `POST /api/admin/tasks/:historyId/reject` — отклонение с комментарием.
-- `GET /api/admin/submissions` — лента работ на проверке.
+- `GET /api/me/:tg_id?username=...` — регистрация/получение состояния игрока.
+- `POST /api/roll` — бросок кубика и выдача задания.
+- `POST /api/submit` — загрузка фото работы через `multipart/form-data` поле `work_image`.
+- `GET /api/check-status/:tg_id` — polling статуса последней сдачи.
+- `GET /api/admin/pending-users?admin_tg_id=...` — заявки на вход.
+- `POST /api/admin/approve-user` — одобрение игрока.
+- `GET /api/admin/submissions?admin_tg_id=...` — нерешенные работы.
+- `POST /api/admin/approve-submission` — одобрение работы и разморозка кубика.
+- `POST /api/admin/reject-submission` — отклонение работы с комментарием.
 - `POST /api/admin/reset` — глобальный сброс прогресса и истории.

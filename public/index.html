@@ -4,59 +4,88 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Coloring Battle</title>
-  <link rel="stylesheet" href="/styles.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root { --bg:#0f172a; --panel:#17223a; --panel2:#21304e; --text:#f8fafc; --muted:#a8b3c7; --accent:#67e8f9; --good:#86efac; --warn:#fde68a; --bad:#fca5a5; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at top,#25406e,var(--bg)); color:var(--text); font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,input { font:inherit; }
+    button { border:0; border-radius:14px; padding:12px 16px; font-weight:800; color:#07111f; background:var(--accent); cursor:pointer; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .app { width:min(1120px,100%); margin:0 auto; padding:18px; }
+    .top { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+    .card { background:linear-gradient(145deg,rgba(255,255,255,.09),rgba(255,255,255,.035)); border:1px solid rgba(255,255,255,.12); border-radius:24px; padding:18px; box-shadow:0 18px 50px rgba(0,0,0,.24); }
+    .hidden { display:none!important; }
+    .muted { color:var(--muted); }
+    .notice { color:var(--warn); font-weight:800; }
+    .success { color:var(--good); font-weight:900; }
+    .danger { background:var(--bad); }
+    .ghost { background:rgba(255,255,255,.14); color:var(--text); }
+    .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:12px; }
+    .stats strong { display:block; font-size:26px; }
+    .board { display:grid; grid-template-columns:repeat(10,minmax(42px,1fr)); gap:8px; min-width:520px; }
+    .board-wrap { overflow:auto; }
+    .cell { aspect-ratio:1; display:grid; place-items:center; border-radius:14px; background:var(--panel2); color:var(--muted); font-weight:900; position:relative; }
+    .cell.active { background:linear-gradient(135deg,var(--accent),var(--good)); color:#06111d; }
+    .cell.active::after { content:"★"; position:absolute; right:6px; top:4px; }
+    .controls,.task-form,.row,.actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .task-form { align-items:stretch; flex-direction:column; margin-top:12px; }
+    input[type="file"], textarea { width:100%; color:var(--text); background:rgba(0,0,0,.22); border:1px solid rgba(255,255,255,.14); border-radius:14px; padding:12px; }
+    .admin-grid { display:grid; grid-template-columns:1fr 1.4fr; gap:16px; }
+    .list { display:grid; gap:10px; }
+    .item { background:rgba(0,0,0,.2); border-radius:16px; padding:12px; }
+    .item img { max-width:180px; max-height:180px; border-radius:12px; display:block; margin:8px 0; }
+    .toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); z-index:10; background:#fff; color:#0f172a; border-radius:18px; padding:14px 18px; box-shadow:0 16px 50px rgba(0,0,0,.35); font-weight:900; max-width:92vw; }
+    @media (max-width:780px) { .top,.controls { align-items:stretch; flex-direction:column; } .stats,.admin-grid { grid-template-columns:1fr; } }
+  </style>
 </head>
 <body>
   <main class="app">
-    <header class="hero">
+    <header class="top">
       <div>
-        <p class="eyebrow">Telegram WebApp</p>
         <h1>Coloring Battle</h1>
-        <p>Игра-бродилка на 100 клеток: бросайте кубик, выполняйте задания и ждите одобрения администратора.</p>
+        <p class="muted">Telegram WebApp игра-бродилка на 100 клеток.</p>
       </div>
       <button id="refreshBtn" class="ghost">Обновить</button>
     </header>
 
-    <section id="lockedScreen" class="card hidden">
-      <h2>Добро пожаловать!</h2>
+    <section id="waitingScreen" class="card hidden">
+      <h2>Заявка создана</h2>
       <p>Ваш Telegram ID:</p>
-      <code id="myTgId">—</code>
+      <h3 id="waitingTgId">—</h3>
       <p class="notice">Отправьте этот ID администратору для получения доступа.</p>
     </section>
 
     <section id="gameScreen" class="hidden">
       <div class="stats">
-        <div class="card"><span>Игрок</span><strong id="username">—</strong></div>
-        <div class="card"><span>Клетка</span><strong id="cell">0 / 100</strong></div>
-        <div class="card"><span>Выполнено</span><strong id="completed">0</strong></div>
+        <div class="card"><span class="muted">Игрок</span><strong id="username">—</strong></div>
+        <div class="card"><span class="muted">Клетка</span><strong id="currentCell">0 / 100</strong></div>
+        <div class="card"><span class="muted">Кубик</span><strong id="diceState">Готов</strong></div>
       </div>
 
-      <section class="card board-wrap">
-        <div id="board" class="board" aria-label="Игровое поле на 100 клеток"></div>
+      <section class="card board-wrap"><div id="board" class="board"></div></section>
+
+      <section class="card" style="margin-top:12px">
+        <div class="controls">
+          <button id="rollBtn">Бросить кубик</button>
+          <span id="rollInfo" class="muted">Получите задание после броска.</span>
+        </div>
       </section>
 
-      <section class="card controls">
-        <button id="rollBtn" class="primary">Бросить кубик</button>
-        <p id="rollHint" class="muted">Кубик доступен, когда нет задания на проверке.</p>
-      </section>
-
-      <section id="taskCard" class="card task hidden">
-        <p class="eyebrow">Текущая карточка задания</p>
+      <section id="taskCard" class="card hidden" style="margin-top:12px">
         <h2 id="taskTitle">Задание</h2>
         <p id="taskText"></p>
-        <p id="taskMeta" class="muted"></p>
-        <form id="submitForm" class="submit-form">
-          <label for="submission">Ссылка на фото или текст подтверждения</label>
-          <textarea id="submission" rows="4" placeholder="https://... или короткий текст"></textarea>
-          <button class="primary" type="submit">Сдать работу</button>
-        </form>
         <p id="taskStatus" class="notice"></p>
+        <form id="submitForm" class="task-form">
+          <label for="workImage">Фото выполненной работы</label>
+          <input id="workImage" name="work_image" type="file" accept="image/*" required>
+          <button id="submitBtn" type="submit">Сдать работу</button>
+        </form>
       </section>
     </section>
 
-    <section id="adminScreen" class="card admin hidden">
-      <div class="admin-head">
+    <section id="adminPanel" class="card hidden" style="margin-top:16px">
+      <div class="top">
         <h2>Админ-панель</h2>
         <button id="resetBtn" class="danger">Глобальный сброс</button>
       </div>
@@ -66,14 +95,14 @@
           <div id="pendingUsers" class="list"></div>
         </section>
         <section>
-          <h3>Работы на проверке</h3>
-          <div id="submissions" class="list"></div>
+          <h3>Нерешенные задания</h3>
+          <div id="pendingSubmissions" class="list"></div>
         </section>
       </div>
     </section>
 
     <div id="toast" class="toast hidden"></div>
   </main>
-  <script src="/app.js" type="module"></script>
+  <script src="/script.js"></script>
 </body>
 </html>

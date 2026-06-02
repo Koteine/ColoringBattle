@@ -1,16 +1,19 @@
 {
   "name": "telegram-coloring-battle",
   "version": "1.0.0",
-  "description": "Lightweight Telegram WebApp board game for 50 players",
+  "description": "Telegram WebApp board game optimized for Railway with Express, SQLite and Multer uploads",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "NODE_ENV=development node --watch server.js",
     "test": "node --test"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=20.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^2.0.2",
+    "sqlite3": "^5.1.7"
+  }
 }

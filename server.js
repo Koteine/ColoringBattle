@@ -1,324 +1,342 @@
-import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { existsSync, mkdirSync } from 'node:fs';
-import { dirname, extname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import express from 'express';
+import multer from 'multer';
+import sqlite3 from 'sqlite3';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PUBLIC_DIR = join(__dirname, 'public');
-const PORT = Number(process.env.PORT || 3000);
-const DB_PATH = resolve(process.env.DB_PATH || join(__dirname, 'game.sqlite'));
-const BOT_TOKEN = process.env.BOT_TOKEN || '';
-const DEV_AUTH = process.env.DEV_AUTH === '1' || process.env.NODE_ENV === 'development';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PORT = process.env.PORT || 3000;
+const DATA_DIR = '/data';
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const DB_PATH = path.join(DATA_DIR, 'game.db');
 const ADMIN_TG_IDS = new Set((process.env.ADMIN_TG_IDS || '').split(',').map((id) => id.trim()).filter(Boolean));
 
-if (!existsSync(dirname(DB_PATH))) mkdirSync(dirname(DB_PATH), { recursive: true });
-const db = new DatabaseSync(DB_PATH);
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-const jsonHeaders = { 'Content-Type': 'application/json; charset=utf-8' };
-const mimeTypes = {
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon'
-};
+const app = express();
+const db = new sqlite3.Database(DB_PATH);
 
-function initDatabase() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      tg_id TEXT NOT NULL UNIQUE,
-      username TEXT DEFAULT '',
-      current_cell INTEGER NOT NULL DEFAULT 0 CHECK (current_cell BETWEEN 0 AND 100),
-      completed_tasks INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'banned')),
-      role TEXT NOT NULL DEFAULT 'player' CHECK (role IN ('player', 'admin')),
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/uploads', express.static(UPLOADS_DIR));
+app.use(express.static(path.join(__dirname, 'public')));
 
-    CREATE TABLE IF NOT EXISTS tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      text TEXT NOT NULL,
-      difficulty INTEGER NOT NULL DEFAULT 1 CHECK (difficulty BETWEEN 1 AND 5)
-    );
-
-    CREATE TABLE IF NOT EXISTS user_tasks_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-      cell INTEGER NOT NULL CHECK (cell BETWEEN 0 AND 100),
-      dice INTEGER NOT NULL CHECK (dice BETWEEN 1 AND 6),
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
-      submission TEXT DEFAULT '',
-      admin_comment TEXT DEFAULT '',
-      submitted_at TEXT,
-      reviewed_at TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);
-    CREATE INDEX IF NOT EXISTS idx_history_user_status ON user_tasks_history(user_id, status);
-    CREATE INDEX IF NOT EXISTS idx_history_submitted ON user_tasks_history(status, submitted_at);
-  `);
-
-  const count = db.prepare('SELECT COUNT(*) AS count FROM tasks').get().count;
-  if (count === 0) seedTasks();
-}
-
-function runTransaction(callback) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const result = callback();
-    db.exec('COMMIT');
-    return result;
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-}
-
-function seedTasks() {
-  const sampleTasks = [
-    'Сделайте фото предмета вокруг себя, в котором есть красный цвет.',
-    'Нарисуйте простую звезду и отправьте фото.',
-    'Напишите 3 добрых слова другому игроку.',
-    'Сделайте фото своей чашки или бутылки воды.',
-    'Найдите вокруг себя круглый предмет и пришлите фото.',
-    'Напишите короткий девиз своей команды.',
-    'Сделайте мини-коллаж из 3 цветов и отправьте ссылку/фото.',
-    'Сфотографируйте что-то синее.',
-    'Придумайте название для клетки, на которой стоите.',
-    'Напишите, какой суперсилой хотели бы обладать сегодня.',
-    'Сделайте фото предмета, который начинается на букву К.',
-    'Нарисуйте смайлик и отправьте подтверждение.',
-    'Напишите 5 слов, связанных с летом.',
-    'Сфотографируйте тень любого предмета.',
-    'Опишите свой день одним предложением.',
-    'Сделайте фото чего-то мягкого.',
-    'Найдите предмет с цифрой и отправьте фото.',
-    'Придумайте смешное правило для игры.',
-    'Напишите короткое пожелание всем участникам.',
-    'Сделайте фото своего рабочего места или игрового уголка.'
-  ];
-  const insert = db.prepare('INSERT INTO tasks (text, difficulty) VALUES (?, ?)');
-  runTransaction(() => {
-    for (let i = 0; i < 120; i += 1) insert.run(`${sampleTasks[i % sampleTasks.length]} #${i + 1}`, (i % 5) + 1);
-  });
-}
-
-initDatabase();
-
-function sendJson(res, status, payload) {
-  res.writeHead(status, jsonHeaders);
-  res.end(JSON.stringify(payload));
-}
-
-function parseBody(req) {
-  return new Promise((resolveBody, reject) => {
-    let raw = '';
-    req.on('data', (chunk) => {
-      raw += chunk;
-      if (raw.length > 1024 * 1024) reject(new Error('Payload is too large'));
-    });
-    req.on('end', () => {
-      if (!raw) return resolveBody({});
-      try { resolveBody(JSON.parse(raw)); } catch { reject(new Error('Invalid JSON body')); }
-    });
-  });
-}
-
-function verifyTelegramInitData(initData) {
-  if (!BOT_TOKEN) throw new Error('BOT_TOKEN is required for Telegram auth');
-  const params = new URLSearchParams(initData);
-  const hash = params.get('hash');
-  if (!hash) throw new Error('Missing Telegram hash');
-  params.delete('hash');
-  const dataCheckString = [...params.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join('\n');
-  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(BOT_TOKEN).digest();
-  const calculatedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-  if (!crypto.timingSafeEqual(Buffer.from(calculatedHash), Buffer.from(hash))) throw new Error('Invalid Telegram hash');
-  const user = JSON.parse(params.get('user') || '{}');
-  if (!user.id) throw new Error('Telegram user is missing');
-  return { tg_id: String(user.id), username: user.username || user.first_name || `user_${user.id}` };
-}
-
-function getAuthIdentity(req, url) {
-  const initData = req.headers['x-telegram-init-data'];
-  if (initData) return verifyTelegramInitData(initData);
-  if (DEV_AUTH && url.searchParams.get('tg_id')) {
-    return { tg_id: String(url.searchParams.get('tg_id')), username: url.searchParams.get('username') || `dev_${url.searchParams.get('tg_id')}` };
-  }
-  throw new Error('Telegram authorization data is missing');
-}
-
-function upsertAndGetUser(identity) {
-  const isAdmin = ADMIN_TG_IDS.has(identity.tg_id);
-  db.prepare(`
-    INSERT INTO users (tg_id, username, status, role)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(tg_id) DO UPDATE SET username = excluded.username, updated_at = CURRENT_TIMESTAMP
-  `).run(identity.tg_id, identity.username, isAdmin ? 'active' : 'pending', isAdmin ? 'admin' : 'player');
-  return db.prepare('SELECT * FROM users WHERE tg_id = ?').get(identity.tg_id);
-}
-
-function requireActive(user) {
-  if (user.status === 'banned') throw Object.assign(new Error('Пользователь заблокирован'), { status: 403 });
-  if (user.status !== 'active') throw Object.assign(new Error('Доступ еще не одобрен администратором'), { status: 403 });
-}
-
-function requireAdmin(user) {
-  requireActive(user);
-  if (user.role !== 'admin') throw Object.assign(new Error('Нужны права администратора'), { status: 403 });
-}
-
-function buildPlayerState(user) {
-  const activeTask = db.prepare(`
-    SELECT h.id AS history_id, h.cell, h.dice, h.status, h.submission, h.submitted_at, h.admin_comment,
-           t.id AS task_id, t.text, t.difficulty
-    FROM user_tasks_history h
-    JOIN tasks t ON t.id = h.task_id
-    WHERE h.user_id = ? AND h.status IN ('pending', 'rejected')
-      AND NOT EXISTS (
-        SELECT 1 FROM user_tasks_history newer
-        WHERE newer.user_id = h.user_id AND newer.id > h.id
-      )
-    ORDER BY h.id DESC LIMIT 1
-  `).get(user.id) || null;
-  return { user, activeTask };
-}
-
-function chooseTaskForUser(userId) {
-  const tasks = db.prepare(`
-    SELECT id, text, difficulty FROM tasks
-    WHERE id NOT IN (SELECT task_id FROM user_tasks_history WHERE user_id = ?)
-    ORDER BY random() LIMIT 1
-  `).get(userId);
-  if (!tasks) throw Object.assign(new Error('Пул заданий для игрока исчерпан'), { status: 409 });
-  return tasks;
-}
-
-async function handleApi(req, res, url) {
-  const identity = getAuthIdentity(req, url);
-  const user = upsertAndGetUser(identity);
-  const path = url.pathname;
-
-  if (req.method === 'GET' && path === '/api/me') return sendJson(res, 200, buildPlayerState(user));
-
-  requireActive(user);
-
-  if (req.method === 'POST' && path === '/api/roll') {
-    const pending = db.prepare("SELECT id FROM user_tasks_history WHERE user_id = ? AND status IN ('pending', 'rejected') LIMIT 1").get(user.id);
-    if (pending) throw Object.assign(new Error('Кубик заблокирован: сначала сдайте или дождитесь проверки задания'), { status: 409 });
-    const dice = crypto.randomInt(1, 7);
-    const nextCell = Math.min(100, user.current_cell + dice);
-    const task = chooseTaskForUser(user.id);
-    const historyId = runTransaction(() => {
-      db.prepare('UPDATE users SET current_cell = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(nextCell, user.id);
-      const result = db.prepare('INSERT INTO user_tasks_history (user_id, task_id, cell, dice) VALUES (?, ?, ?, ?)').run(user.id, task.id, nextCell, dice);
-      return result.lastInsertRowid;
-    });
-    return sendJson(res, 200, { dice, current_cell: nextCell, task: { history_id: historyId, ...task } });
-  }
-
-  if (req.method === 'POST' && path === '/api/submit') {
-    const body = await parseBody(req);
-    const submission = String(body.submission || '').trim();
-    if (submission.length < 3) throw Object.assign(new Error('Добавьте ссылку на фото или текстовое подтверждение'), { status: 400 });
-    const active = db.prepare("SELECT id FROM user_tasks_history WHERE user_id = ? AND status IN ('pending', 'rejected') ORDER BY id DESC LIMIT 1").get(user.id);
-    if (!active) throw Object.assign(new Error('Нет активного задания для сдачи'), { status: 409 });
-    db.prepare("UPDATE user_tasks_history SET status = 'pending', submission = ?, admin_comment = '', submitted_at = CURRENT_TIMESTAMP WHERE id = ?").run(submission, active.id);
-    return sendJson(res, 200, { ok: true });
-  }
-
-  if (path.startsWith('/api/admin/')) requireAdmin(user);
-
-  if (req.method === 'GET' && path === '/api/admin/pending-users') {
-    const users = db.prepare("SELECT id, tg_id, username, created_at FROM users WHERE status = 'pending' ORDER BY created_at ASC").all();
-    return sendJson(res, 200, { users });
-  }
-
-  const approveUser = path.match(/^\/api\/admin\/users\/(\d+)\/approve$/);
-  if (req.method === 'POST' && approveUser) {
-    db.prepare("UPDATE users SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(Number(approveUser[1]));
-    return sendJson(res, 200, { ok: true });
-  }
-
-  if (req.method === 'GET' && path === '/api/admin/submissions') {
-    const submissions = db.prepare(`
-      SELECT h.id AS history_id, h.cell, h.dice, h.submission, h.submitted_at, u.username, u.tg_id, t.text AS task_text
-      FROM user_tasks_history h
-      JOIN users u ON u.id = h.user_id
-      JOIN tasks t ON t.id = h.task_id
-      WHERE h.status = 'pending' AND h.submitted_at IS NOT NULL
-      ORDER BY h.submitted_at ASC
-    `).all();
-    return sendJson(res, 200, { submissions });
-  }
-
-  const approveTask = path.match(/^\/api\/admin\/tasks\/(\d+)\/approve$/);
-  if (req.method === 'POST' && approveTask) {
-    runTransaction(() => {
-      const row = db.prepare("SELECT user_id FROM user_tasks_history WHERE id = ? AND status = 'pending' AND submitted_at IS NOT NULL").get(Number(approveTask[1]));
-      if (!row) throw Object.assign(new Error('Задание не найдено или уже проверено'), { status: 404 });
-      db.prepare("UPDATE user_tasks_history SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(Number(approveTask[1]));
-      db.prepare('UPDATE users SET completed_tasks = completed_tasks + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(row.user_id);
-    });
-    return sendJson(res, 200, { ok: true });
-  }
-
-  const rejectTask = path.match(/^\/api\/admin\/tasks\/(\d+)\/reject$/);
-  if (req.method === 'POST' && rejectTask) {
-    const body = await parseBody(req);
-    const comment = String(body.comment || '').trim();
-    if (!comment) throw Object.assign(new Error('Укажите комментарий для отклонения'), { status: 400 });
-    db.prepare("UPDATE user_tasks_history SET status = 'rejected', admin_comment = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'").run(comment, Number(rejectTask[1]));
-    return sendJson(res, 200, { ok: true });
-  }
-
-  if (req.method === 'POST' && path === '/api/admin/reset') {
-    runTransaction(() => {
-      db.prepare('DELETE FROM user_tasks_history').run();
-      db.prepare('UPDATE users SET current_cell = 0, completed_tasks = 0, updated_at = CURRENT_TIMESTAMP').run();
-    });
-    return sendJson(res, 200, { ok: true });
-  }
-
-  sendJson(res, 404, { error: 'Endpoint not found' });
-}
-
-async function serveStatic(req, res, url) {
-  const requested = url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname);
-  const filePath = resolve(join(PUBLIC_DIR, requested));
-  if (!filePath.startsWith(PUBLIC_DIR)) return sendJson(res, 403, { error: 'Forbidden' });
-  try {
-    const data = await readFile(filePath);
-    res.writeHead(200, { 'Content-Type': mimeTypes[extname(filePath)] || 'application/octet-stream' });
-    res.end(data);
-  } catch {
-    const data = await readFile(join(PUBLIC_DIR, 'index.html'));
-    res.writeHead(200, { 'Content-Type': mimeTypes['.html'] });
-    res.end(data);
-  }
-}
-
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  try {
-    if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
-    else await serveStatic(req, res, url);
-  } catch (error) {
-    const status = error.status || (error.message.includes('auth') || error.message.includes('Telegram') ? 401 : 500);
-    sendJson(res, status, { error: error.message || 'Server error' });
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+  filename: (req, file, cb) => {
+    const tgId = String(req.body.tg_id || 'unknown').replace(/\D/g, '') || 'unknown';
+    const extension = path.extname(file.originalname).toLowerCase() || '.jpg';
+    cb(null, `${tgId}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}${extension}`);
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Telegram board game is running on http://localhost:${PORT}`);
-  if (!BOT_TOKEN && !DEV_AUTH) console.warn('BOT_TOKEN is not set. Set BOT_TOKEN for production Telegram WebApp auth.');
+const upload = multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Можно загружать только изображения'));
+    cb(null, true);
+  }
+});
+
+function run(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function onRun(error) {
+      if (error) reject(error);
+      else resolve({ id: this.lastID, changes: this.changes });
+    });
+  });
+}
+
+function get(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (error, row) => (error ? reject(error) : resolve(row)));
+  });
+}
+
+function all(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (error, rows) => (error ? reject(error) : resolve(rows)));
+  });
+}
+
+async function initDb() {
+  await run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER,
+    tg_id TEXT PRIMARY KEY,
+    username TEXT DEFAULT '',
+    current_cell INTEGER DEFAULT 0,
+    is_approved INTEGER DEFAULT 0,
+    dice_frozen INTEGER DEFAULT 0,
+    role TEXT DEFAULT 'player',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    text_task TEXT NOT NULL
+  )`);
+
+  await run(`CREATE TABLE IF NOT EXISTS submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id TEXT NOT NULL,
+    cell INTEGER NOT NULL,
+    task_id INTEGER NOT NULL,
+    image_name TEXT,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    admin_comment TEXT DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id),
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+  )`);
+
+  await run('CREATE INDEX IF NOT EXISTS idx_submissions_tg_status ON submissions(tg_id, status)');
+  await run('CREATE INDEX IF NOT EXISTS idx_submissions_status_image ON submissions(status, image_name)');
+
+  const row = await get('SELECT COUNT(*) AS count FROM tasks');
+  if (row.count === 0) await seedTasks();
+}
+
+async function seedTasks() {
+  const tasks = [
+    'Сфотографируйте предмет красного цвета.',
+    'Нарисуйте простую звезду и загрузите фото.',
+    'Сфотографируйте круглый предмет рядом с вами.',
+    'Сделайте фото предмета, который начинается на букву К.',
+    'Найдите и сфотографируйте что-то синее.',
+    'Сделайте фото своей чашки или бутылки воды.',
+    'Сфотографируйте тень любого предмета.',
+    'Нарисуйте смайлик и загрузите фото.',
+    'Сделайте мини-коллаж из трех цветов.',
+    'Сфотографируйте предмет с цифрой.',
+    'Покажите на фото что-то мягкое.',
+    'Сфотографируйте рабочее место или игровой уголок.',
+    'Нарисуйте флаг своей команды.',
+    'Сделайте фото любого зеленого предмета.',
+    'Сфотографируйте вещь необычной формы.',
+    'Нарисуйте домик и загрузите фото.',
+    'Сделайте фото предмета, который помещается в ладони.',
+    'Сфотографируйте что-то блестящее.',
+    'Нарисуйте маршрут из трех стрелок.',
+    'Сделайте фото своего любимого цвета.'
+  ];
+
+  for (let cycle = 0; cycle < 6; cycle += 1) {
+    for (const task of tasks) await run('INSERT INTO tasks (text_task) VALUES (?)', [`${task} #${cycle + 1}`]);
+  }
+}
+
+function normalizeTgId(value) {
+  const tgId = String(value || '').trim();
+  if (!tgId) throw new Error('Не передан Telegram ID');
+  return tgId;
+}
+
+async function ensureUser(tgId, username = '') {
+  const role = ADMIN_TG_IDS.has(String(tgId)) ? 'admin' : 'player';
+  const approved = role === 'admin' ? 1 : 0;
+
+  await run(`INSERT INTO users (tg_id, username, is_approved, role)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(tg_id) DO UPDATE SET
+      username = CASE WHEN excluded.username != '' THEN excluded.username ELSE users.username END,
+      role = CASE WHEN excluded.role = 'admin' THEN 'admin' ELSE users.role END,
+      is_approved = CASE WHEN excluded.role = 'admin' THEN 1 ELSE users.is_approved END`,
+    [String(tgId), String(username || ''), approved, role]);
+
+  return get('SELECT * FROM users WHERE tg_id = ?', [String(tgId)]);
+}
+
+async function requireApproved(tgId) {
+  const user = await get('SELECT * FROM users WHERE tg_id = ?', [String(tgId)]);
+  if (!user || user.is_approved !== 1) throw Object.assign(new Error('Пользователь еще не одобрен администратором'), { status: 403 });
+  return user;
+}
+
+async function requireAdmin(tgId) {
+  const user = await requireApproved(tgId);
+  if (user.role !== 'admin') throw Object.assign(new Error('Доступ только для администратора'), { status: 403 });
+  return user;
+}
+
+async function pickTask(tgId) {
+  const fresh = await get(`SELECT id, text_task FROM tasks
+    WHERE id NOT IN (
+      SELECT task_id FROM submissions
+      WHERE tg_id = ? AND status IN ('approved', 'pending')
+    )
+    ORDER BY RANDOM()
+    LIMIT 1`, [String(tgId)]);
+
+  if (fresh) return fresh;
+  return get('SELECT id, text_task FROM tasks ORDER BY RANDOM() LIMIT 1');
+}
+
+app.get('/api/me/:tg_id', async (req, res, next) => {
+  try {
+    const user = await ensureUser(normalizeTgId(req.params.tg_id), req.query.username);
+    const activeSubmission = await get(`SELECT s.*, t.text_task FROM submissions s
+      JOIN tasks t ON t.id = s.task_id
+      WHERE s.tg_id = ? AND s.status IN ('pending', 'rejected')
+      ORDER BY s.id DESC LIMIT 1`, [user.tg_id]);
+    res.json({ user, activeSubmission });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/roll', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    if (user.dice_frozen === 1) throw Object.assign(new Error('Кубик заморожен до проверки задания'), { status: 409 });
+
+    const dice = crypto.randomInt(1, 7);
+    const newCell = Math.min(100, Number(user.current_cell || 0) + dice);
+    const task = await pickTask(tgId);
+    if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
+
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1 WHERE tg_id = ?', [newCell, tgId]);
+    const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, newCell, task.id, 'pending']);
+
+    res.json({ dice, current_cell: newCell, task, submission_id: submission.id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/submit', upload.single('work_image'), async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    await requireApproved(tgId);
+    if (!req.file) throw Object.assign(new Error('Загрузите изображение выполненной работы'), { status: 400 });
+
+    const current = await get(`SELECT id FROM submissions
+      WHERE tg_id = ? AND status IN ('pending', 'rejected')
+      ORDER BY id DESC LIMIT 1`, [tgId]);
+    if (!current) throw Object.assign(new Error('Нет активного задания для сдачи'), { status: 409 });
+
+    await run(`UPDATE submissions
+      SET image_name = ?, status = 'pending', admin_comment = '', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?`, [req.file.filename, current.id]);
+
+    res.json({ ok: true, image_name: req.file.filename, image_url: `/uploads/${req.file.filename}` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/check-status/:tg_id', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.params.tg_id);
+    const user = await get('SELECT tg_id, dice_frozen FROM users WHERE tg_id = ?', [tgId]);
+    const latest = await get(`SELECT s.*, t.text_task FROM submissions s
+      JOIN tasks t ON t.id = s.task_id
+      WHERE s.tg_id = ?
+      ORDER BY s.id DESC LIMIT 1`, [tgId]);
+    res.json({ dice_frozen: user?.dice_frozen ?? 0, submission: latest || null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/pending-users', async (req, res, next) => {
+  try {
+    await requireAdmin(req.query.admin_tg_id);
+    const users = await all(`SELECT tg_id, username, created_at FROM users
+      WHERE is_approved = 0
+      ORDER BY created_at ASC`);
+    res.json({ users });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/approve-user', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    await run('UPDATE users SET is_approved = 1 WHERE tg_id = ?', [tgId]);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/submissions', async (req, res, next) => {
+  try {
+    await requireAdmin(req.query.admin_tg_id);
+    const submissions = await all(`SELECT s.id, s.tg_id, s.cell, s.image_name, s.status, s.admin_comment,
+        u.username, t.text_task
+      FROM submissions s
+      JOIN users u ON u.tg_id = s.tg_id
+      JOIN tasks t ON t.id = s.task_id
+      WHERE s.status = 'pending' AND s.image_name IS NOT NULL
+      ORDER BY s.updated_at ASC`);
+    res.json({ submissions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/approve-submission', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const submissionId = Number(req.body.submission_id);
+    const submission = await get('SELECT tg_id FROM submissions WHERE id = ? AND status = ?', [submissionId, 'pending']);
+    if (!submission) throw Object.assign(new Error('Сдача не найдена или уже проверена'), { status: 404 });
+
+    await run("UPDATE submissions SET status = 'approved', admin_comment = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [submissionId]);
+    await run('UPDATE users SET dice_frozen = 0 WHERE tg_id = ?', [submission.tg_id]);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/reject-submission', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const submissionId = Number(req.body.submission_id);
+    const comment = String(req.body.admin_comment || '').trim();
+    if (!comment) throw Object.assign(new Error('Добавьте комментарий для отклонения'), { status: 400 });
+
+    const result = await run("UPDATE submissions SET status = 'rejected', admin_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'", [comment, submissionId]);
+    if (result.changes === 0) throw Object.assign(new Error('Сдача не найдена или уже проверена'), { status: 404 });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/reset', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    await run('DELETE FROM submissions');
+    await run('UPDATE users SET current_cell = 0, dice_frozen = 0');
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.use((error, _req, res, _next) => {
+  console.error(error);
+  res.status(error.status || 500).json({ error: error.message || 'Ошибка сервера' });
+});
+
+initDb().then(() => {
+  app.listen(PORT, () => console.log(`Coloring Battle server started on port ${PORT}`));
+}).catch((error) => {
+  console.error('Database initialization failed:', error);
+  process.exit(1);
 });
