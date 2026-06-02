@@ -7,29 +7,38 @@ if (tgApp) {
 const query = new URLSearchParams(window.location.search);
 const tgUser = tgApp?.initDataUnsafe?.user;
 const tgId = String(tgUser?.id || query.get('tg_id') || '').trim();
-const OWNER_TG_ID = document.body?.dataset?.ownerTgId || '391995937';
-const tgUsername = String(tgUser?.username || tgUser?.first_name || query.get('username') || `user_${tgId}`).trim();
+const OWNER_TG_ID = document.body?.dataset?.ownerTgId || '341995937';
+const tgUsername = String(tgUser?.username || tgUser?.first_name || query.get('username') || (tgId ? `user_${tgId}` : '')).trim();
 
 const els = {
-  connectionBadge: document.getElementById('connectionBadge'),
+  welcomeScreen: document.getElementById('welcomeScreen'),
+  welcomeText: document.getElementById('welcomeText'),
+  applyBtn: document.getElementById('applyBtn'),
   waitingScreen: document.getElementById('waitingScreen'),
   waitingTgId: document.getElementById('waitingTgId'),
   gameScreen: document.getElementById('gameScreen'),
+  paletteScreen: document.getElementById('paletteScreen'),
+  raffleScreen: document.getElementById('raffleScreen'),
   adminPanel: document.getElementById('adminPanel'),
+  bottomNav: document.getElementById('bottomNav'),
+  adminTabBtn: document.getElementById('adminTabBtn'),
   username: document.getElementById('username'),
   currentCell: document.getElementById('currentCell'),
   diceState: document.getElementById('diceState'),
   routeRunner: document.getElementById('routeRunner'),
   routeFill: document.getElementById('routeFill'),
   rollBtn: document.getElementById('rollBtn'),
+  diceFace: document.getElementById('diceFace'),
   diceHint: document.getElementById('diceHint'),
   taskText: document.getElementById('taskText'),
   taskStatus: document.getElementById('taskStatus'),
   submitForm: document.getElementById('submitForm'),
   workImage: document.getElementById('workImage'),
   submitBtn: document.getElementById('submitBtn'),
-  ticketsLine: document.getElementById('ticketsLine'),
   finalistLine: document.getElementById('finalistLine'),
+  paletteGrid: document.getElementById('paletteGrid'),
+  totalTickets: document.getElementById('totalTickets'),
+  finalistsList: document.getElementById('finalistsList'),
   pendingUsers: document.getElementById('pendingUsers'),
   pendingSubmissions: document.getElementById('pendingSubmissions'),
   allUsers: document.getElementById('allUsers'),
@@ -39,16 +48,30 @@ const els = {
   toast: document.getElementById('toast')
 };
 
+const paintGradients = [
+  'linear-gradient(135deg, #ffafcc, #ffc8dd)',
+  'linear-gradient(135deg, #bde0fe, #a2d2ff)',
+  'linear-gradient(135deg, #caffbf, #9bf6ff)',
+  'linear-gradient(135deg, #fdffb6, #ffd6a5)',
+  'linear-gradient(135deg, #cdb4db, #bdb2ff)',
+  'linear-gradient(135deg, #f8c8dc, #f9dcc4)',
+  'linear-gradient(135deg, #d0f4de, #e4c1f9)',
+  'linear-gradient(135deg, #fbc4ab, #ffdab9)'
+];
+
 let state = null;
+let activeTab = 'game';
 let pollingTimer = null;
 let lastSubmissionStatus = '';
+let isRolling = false;
+let raffleLoadedAt = 0;
 
 function isOwnerId(id) {
   return String(id || '').trim() === OWNER_TG_ID;
 }
 
 function hasAdminAccess(user) {
-  return isOwnerId(tgId) || isOwnerId(user?.tg_id) || user?.role === 'admin';
+  return isOwnerId(tgId) || isOwnerId(user?.tg_id);
 }
 
 function canEnterApp(user) {
@@ -65,7 +88,7 @@ function escapeHtml(value) {
   }[char]));
 }
 
-function showToast(message, duration = 3200) {
+function showToast(message, duration = 3400) {
   els.toast.textContent = message;
   els.toast.classList.remove('hidden');
   window.clearTimeout(showToast.timer);
@@ -90,11 +113,55 @@ function drawProgress(cell) {
   els.routeRunner.style.left = `${percent}%`;
 }
 
-function renderTickets(tickets = []) {
-  const numbers = tickets.map((ticket) => `№${ticket.ticket_number}${ticket.type === 'bonus' ? '★' : ''}`);
-  els.ticketsLine.textContent = numbers.length
-    ? `Мои Красочки: ${numbers.join(', ')} (Всего: ${numbers.length} шт.)`
-    : 'Мои Красочки: пока нет (Всего: 0 шт.)';
+function showGate(screen) {
+  els.welcomeScreen.classList.toggle('hidden', screen !== 'welcome');
+  els.waitingScreen.classList.toggle('hidden', screen !== 'waiting');
+  els.gameScreen.classList.add('hidden');
+  els.paletteScreen.classList.add('hidden');
+  els.raffleScreen.classList.add('hidden');
+  els.adminPanel.classList.add('hidden');
+  els.bottomNav.classList.add('hidden');
+}
+
+function setActiveTab(tab) {
+  const adminAllowed = hasAdminAccess(state?.user);
+  activeTab = tab === 'admin' && !adminAllowed ? 'game' : tab;
+
+  els.gameScreen.classList.toggle('hidden', activeTab !== 'game');
+  els.paletteScreen.classList.toggle('hidden', activeTab !== 'palette');
+  els.raffleScreen.classList.toggle('hidden', activeTab !== 'raffle');
+  els.adminPanel.classList.toggle('hidden', activeTab !== 'admin' || !adminAllowed);
+
+  document.querySelectorAll('.nav-btn').forEach((button) => {
+    button.classList.toggle('active', button.dataset.tab === activeTab);
+  });
+
+  if (activeTab === 'raffle') loadRaffle(false).catch((error) => showToast(error.message));
+  if (activeTab === 'admin' && adminAllowed) loadAdminPanel().catch((error) => showToast(error.message));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function updateDiceFace(value) {
+  els.diceFace.dataset.value = String(Math.max(1, Math.min(6, Number(value || 1))));
+}
+
+function renderPalette(tickets = []) {
+  if (!tickets.length) {
+    els.paletteGrid.innerHTML = '<div class="empty-state">Палитра пока пустая. Выполните первое задание, чтобы получить Красочку.</div>';
+    return;
+  }
+
+  els.paletteGrid.innerHTML = '';
+  for (const [index, ticket] of tickets.entries()) {
+    const card = document.createElement('article');
+    card.className = 'paint-card';
+    card.style.background = paintGradients[index % paintGradients.length];
+    card.innerHTML = `
+      <span>Красочка №${escapeHtml(ticket.ticket_number)}</span>
+      <small>${ticket.type === 'bonus' ? 'Финишная бонусная' : 'За выполненное задание'}</small>
+    `;
+    els.paletteGrid.append(card);
+  }
 }
 
 function renderTask(submission) {
@@ -129,76 +196,111 @@ function renderTask(submission) {
 }
 
 function render() {
-  if (!state?.user) return;
-  const { user, activeSubmission, tickets, is_finalist: isFinalist } = state;
+  if (state?.needs_application || !state?.user) {
+    showGate('welcome');
+    els.welcomeText.textContent = tgId
+      ? `Ваш Telegram ID: ${tgId}. Нажмите кнопку, чтобы отправить заявку администратору.`
+      : 'Откройте WebApp из Telegram или добавьте ?tg_id=... для теста.';
+    els.applyBtn.disabled = !tgId;
+    return;
+  }
 
+  const { user, activeSubmission, tickets, is_finalist: isFinalist } = state;
   const adminAccess = hasAdminAccess(user);
 
   if (!canEnterApp(user)) {
-    els.waitingScreen.classList.remove('hidden');
-    els.gameScreen.classList.add('hidden');
-    els.adminPanel.classList.add('hidden');
+    showGate('waiting');
     els.waitingTgId.textContent = user.tg_id;
     return;
   }
 
+  els.welcomeScreen.classList.add('hidden');
   els.waitingScreen.classList.add('hidden');
-  els.gameScreen.classList.remove('hidden');
+  els.bottomNav.classList.remove('hidden');
+  els.adminTabBtn.classList.toggle('hidden', !adminAccess);
+
   els.username.textContent = user.username || `ID ${user.tg_id}`;
   els.currentCell.textContent = `${user.current_cell}/100`;
-  els.diceState.textContent = Number(user.dice_frozen) === 1 ? 'Ожидание проверки' : 'Готов';
+  els.diceState.textContent = Number(user.dice_frozen) === 1 ? 'Ждёт проверку' : 'Готов';
   drawProgress(user.current_cell);
   renderTask(activeSubmission);
-  renderTickets(tickets);
+  renderPalette(tickets);
 
   const frozen = Number(user.dice_frozen) === 1;
   const finished = Number(user.current_cell) >= 100;
-  els.rollBtn.disabled = frozen || finished;
-  els.rollBtn.classList.toggle('wait', frozen);
-  els.rollBtn.textContent = frozen ? '⏳ Ожидание проверки...' : finished ? '🏁 Финиш!' : '🎲 Бросить кубик';
+  els.rollBtn.disabled = frozen || finished || isRolling;
+  els.rollBtn.classList.toggle('frozen', frozen || finished);
   els.diceHint.textContent = finished
     ? 'Вы достигли 100-й клетки. Поздравляем!'
     : frozen
-      ? 'Администратор проверяет работу. Статус обновляется каждые 10 секунд.'
-      : 'После броска кубик заморозится до проверки задания.';
+      ? (els.taskStatus.textContent || 'Кубик заморожен до проверки задания.')
+      : 'Нажмите на кубик: он прокрутится и покажет выпавшее число.';
   els.finalistLine.classList.toggle('hidden', !isFinalist);
 
-  if (adminAccess) {
-    els.adminPanel.classList.remove('hidden');
-    loadAdminPanel().catch((error) => showToast(error.message));
-  } else {
-    els.adminPanel.classList.add('hidden');
-  }
+  if (!adminAccess && activeTab === 'admin') activeTab = 'game';
+  setActiveTab(activeTab);
 }
 
 async function loadState() {
   if (!tgId) {
-    els.waitingScreen.classList.remove('hidden');
-    els.waitingTgId.textContent = 'не найден';
-    showToast('Откройте WebApp из Telegram или добавьте ?tg_id=... для теста');
+    state = { user: null, needs_application: true, tickets: [] };
+    render();
     return;
   }
 
-  els.connectionBadge.textContent = tgApp ? 'Telegram WebApp активен' : 'Тестовый режим';
   state = await api(`/api/me/${encodeURIComponent(tgId)}?username=${encodeURIComponent(tgUsername)}`);
   lastSubmissionStatus = state.activeSubmission?.status || lastSubmissionStatus;
   render();
   startPolling();
 }
 
-async function rollDice() {
+async function applyForGame() {
+  if (!tgId) return showToast('Не найден Telegram ID');
+  els.applyBtn.disabled = true;
   try {
-    els.rollBtn.disabled = true;
-    const result = await api('/api/roll', {
+    state = await api('/api/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tg_id: tgId, username: tgUsername })
+    });
+    showToast(hasAdminAccess(state.user) ? 'Админский доступ открыт' : 'Заявка отправлена');
+    render();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    els.applyBtn.disabled = false;
+  }
+}
+
+async function rollDice() {
+  if (isRolling || els.rollBtn.disabled) return;
+  isRolling = true;
+  els.rollBtn.disabled = true;
+  els.rollBtn.classList.add('rolling');
+
+  const spinTimer = window.setInterval(() => updateDiceFace(Math.floor(Math.random() * 6) + 1), 120);
+  const animationDone = new Promise((resolve) => window.setTimeout(resolve, 1500));
+
+  try {
+    const resultPromise = api('/api/roll', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tg_id: tgId })
     });
+    const result = await resultPromise;
+    await animationDone;
+    updateDiceFace(result.dice);
     showToast(`Выпало ${result.dice}. Вы перешли на клетку ${result.current_cell}.`);
     await loadState();
   } catch (error) {
+    await animationDone;
     showToast(error.message);
     await loadState().catch(() => {});
+  } finally {
+    window.clearInterval(spinTimer);
+    els.rollBtn.classList.remove('rolling');
+    isRolling = false;
+    render();
   }
 }
 
@@ -230,13 +332,16 @@ function startPolling() {
 
 async function checkStatus() {
   try {
-    if (!state?.user || !canEnterApp(state.user)) return;
+    if (!state?.user || !canEnterApp(state.user)) {
+      await loadState();
+      return;
+    }
     const data = await api(`/api/check-status/${encodeURIComponent(tgId)}`);
     const submission = data.submission;
     if (!submission) return;
 
     if (submission.status === 'approved' && lastSubmissionStatus !== 'approved') {
-      showToast('Работа одобрена! Красочка выдана, кубик снова доступен.', 5000);
+      showToast('Работа одобрена! Красочка добавлена в палитру, кубик снова доступен.', 5200);
       lastSubmissionStatus = 'approved';
       await loadState();
     } else if (submission.status === 'rejected' && lastSubmissionStatus !== 'rejected') {
@@ -246,6 +351,24 @@ async function checkStatus() {
     }
   } catch (error) {
     console.warn('Polling error:', error.message);
+  }
+}
+
+async function loadRaffle(force = true) {
+  const now = Date.now();
+  if (!force && now - raffleLoadedAt < 15000) return;
+  const data = await api('/api/raffle');
+  raffleLoadedAt = now;
+  els.totalTickets.textContent = data.total_tickets || 0;
+  els.finalistsList.innerHTML = data.finalists.length ? '' : '<div class="empty-state">Пока никто не дошёл до 100 клетки.</div>';
+  for (const finalist of data.finalists) {
+    const item = document.createElement('article');
+    item.className = 'item';
+    item.innerHTML = `
+      <strong>${escapeHtml(finalist.username || finalist.tg_id)}</strong>
+      <p class="muted">TG ID: ${escapeHtml(finalist.tg_id)} · клетка ${finalist.current_cell}/100 · Красочек: ${finalist.tickets_count || 0}</p>
+    `;
+    els.finalistsList.append(item);
   }
 }
 
@@ -271,10 +394,14 @@ function renderPendingUsers(users) {
     item.className = 'item';
     item.innerHTML = `<strong>${escapeHtml(user.username || 'Без ника')}</strong><p class="muted">TG ID: ${escapeHtml(user.tg_id)}</p>`;
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = 'Одобрить';
-    button.addEventListener('click', async () => {
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const approve = document.createElement('button');
+    approve.type = 'button';
+    approve.className = 'success';
+    approve.textContent = 'Одобрить';
+    approve.addEventListener('click', async () => {
       await api('/api/admin/approve-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -284,7 +411,23 @@ function renderPendingUsers(users) {
       await loadAdminPanel();
     });
 
-    item.append(button);
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.className = 'danger';
+    reject.textContent = 'Отклонить';
+    reject.addEventListener('click', async () => {
+      if (!window.confirm(`Отклонить заявку ${user.username || user.tg_id}?`)) return;
+      await api('/api/admin/reject-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_tg_id: tgId, tg_id: user.tg_id })
+      });
+      showToast('Заявка отклонена');
+      await loadAdminPanel();
+    });
+
+    actions.append(approve, reject);
+    item.append(actions);
     els.pendingUsers.append(item);
   }
 }
@@ -377,6 +520,7 @@ function renderAllUsers(users) {
       });
       showToast('Клетка изменена');
       await loadAdminPanel();
+      await loadRaffle(true).catch(() => {});
       if (user.tg_id === tgId) await loadState();
     });
 
@@ -399,7 +543,7 @@ function renderAllUsers(users) {
     remove.type = 'button';
     remove.className = 'danger';
     remove.textContent = 'Исключить';
-    remove.disabled = user.tg_id === '391995937';
+    remove.disabled = user.tg_id === OWNER_TG_ID;
     remove.addEventListener('click', async () => {
       if (!window.confirm(`Исключить игрока ${user.username || user.tg_id}?`)) return;
       await api('/api/admin/remove-user', {
@@ -430,12 +574,18 @@ async function globalReset() {
     body: JSON.stringify({ admin_tg_id: tgId })
   });
   showToast('Глобальный сброс выполнен');
+  raffleLoadedAt = 0;
   await loadState();
+  await loadRaffle(true).catch(() => {});
 }
 
+els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
 els.submitForm.addEventListener('submit', submitWork);
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
+document.querySelectorAll('.nav-btn').forEach((button) => {
+  button.addEventListener('click', () => setActiveTab(button.dataset.tab));
+});
 
 loadState().catch((error) => showToast(error.message));
