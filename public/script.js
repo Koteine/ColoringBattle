@@ -34,6 +34,8 @@ const els = {
   taskText: document.getElementById('taskText'),
   taskStatus: document.getElementById('taskStatus'),
   submitForm: document.getElementById('submitForm'),
+  submitStepTitle: document.getElementById('submitStepTitle'),
+  submitStepHint: document.getElementById('submitStepHint'),
   workImage: document.getElementById('workImage'),
   submitBtn: document.getElementById('submitBtn'),
   finalistLine: document.getElementById('finalistLine'),
@@ -227,6 +229,15 @@ function startNewsPolling() {
   }, 6000);
 }
 
+function configureSubmitStep({ fieldName, title, hint, buttonText }) {
+  els.workImage.name = fieldName;
+  els.workImage.dataset.fieldName = fieldName;
+  els.submitStepTitle.textContent = title;
+  els.submitStepHint.textContent = hint;
+  els.submitBtn.textContent = buttonText;
+  els.submitForm.classList.remove('hidden');
+}
+
 function renderTask(submission) {
   els.submitForm.classList.add('hidden');
   els.submitBtn.disabled = false;
@@ -241,20 +252,41 @@ function renderTask(submission) {
   els.taskText.classList.remove('muted');
   els.taskText.textContent = submission.text_task;
 
-  if (submission.status === 'pending' && !submission.image_name) {
-    els.taskStatus.textContent = 'Задание получено. Загрузите фото выполненной работы.';
-    els.submitForm.classList.remove('hidden');
-    return;
-  }
-
-  if (submission.status === 'pending' && submission.image_name) {
-    els.taskStatus.textContent = 'Фото отправлено. Ожидание проверки администратором...';
-    return;
-  }
-
   if (submission.status === 'rejected') {
-    els.taskStatus.textContent = `Работа отклонена: ${submission.admin_comment || 'без комментария'}. Исправьте и отправьте новое фото.`;
-    els.submitForm.classList.remove('hidden');
+    els.taskStatus.textContent = `Работа отклонена: ${submission.admin_comment || 'без комментария'}. Загрузите новую пару фото, начиная с Фото ДО.`;
+    configureSubmitStep({
+      fieldName: 'photo_before',
+      title: 'Шаг 1: Зафиксируй начало работы',
+      hint: 'Повторно загрузите Фото ДО — незакрашенную страницу перед новой попыткой. После этого Фото ПОСЛЕ нужно будет отправить заново.',
+      buttonText: 'Отправить Фото ДО'
+    });
+    return;
+  }
+
+  if (submission.status === 'pending' && !submission.photo_before) {
+    els.taskStatus.textContent = 'Задание получено. Сначала загрузите Фото ДО. Кубик останется замороженным.';
+    configureSubmitStep({
+      fieldName: 'photo_before',
+      title: 'Шаг 1: Зафиксируй начало работы',
+      hint: 'Загрузите Фото ДО — незакрашенную страницу перед началом раскрашивания.',
+      buttonText: 'Отправить Фото ДО'
+    });
+    return;
+  }
+
+  if (submission.status === 'pending' && !submission.photo_after) {
+    els.taskStatus.textContent = 'Фото ДО сохранено. Теперь раскрасьте страницу и загрузите Фото ПОСЛЕ.';
+    configureSubmitStep({
+      fieldName: 'photo_after',
+      title: 'Шаг 2: Раскрашивание',
+      hint: 'Загрузите Фото ПОСЛЕ — готовую раскрашенную страницу. Только после этого работа уйдет на проверку.',
+      buttonText: 'Отправить Фото ПОСЛЕ'
+    });
+    return;
+  }
+
+  if (submission.status === 'pending') {
+    els.taskStatus.textContent = 'Фото ДО и Фото ПОСЛЕ отправлены. Ожидание проверки администратором...';
   }
 }
 
@@ -372,15 +404,16 @@ async function submitWork(event) {
   event.preventDefault();
   if (!els.workImage.files[0]) return showToast('Выберите картинку для отправки');
 
+  const fieldName = els.workImage.dataset.fieldName || els.workImage.name || 'photo_before';
   const formData = new FormData();
   formData.append('tg_id', tgId);
-  formData.append('work_image', els.workImage.files[0]);
+  formData.append(fieldName, els.workImage.files[0]);
 
   try {
     els.submitBtn.disabled = true;
-    await api('/api/submit', { method: 'POST', body: formData });
+    const result = await api('/api/submit', { method: 'POST', body: formData });
     els.workImage.value = '';
-    showToast('Фото отправлено на проверку');
+    showToast(result.uploaded_stage === 'before' ? 'Фото ДО сохранено. Переходите к раскрашиванию.' : 'Фото ПОСЛЕ отправлено на проверку.');
     await loadState();
   } catch (error) {
     showToast(error.message);
@@ -757,14 +790,24 @@ function renderPendingUsers(users) {
 function renderPendingSubmissions(submissions) {
   els.pendingSubmissions.innerHTML = submissions.length ? '' : '<p class="muted">Работ на проверке нет.</p>';
   for (const submission of submissions) {
+    const beforeUrl = `/uploads/${encodeURIComponent(submission.photo_before)}`;
+    const afterUrl = `/uploads/${encodeURIComponent(submission.photo_after)}`;
+    const playerName = submission.username || submission.tg_id;
     const item = document.createElement('article');
     item.className = 'item';
     item.innerHTML = `
-      <strong>${escapeHtml(submission.username || submission.tg_id)} — клетка ${submission.cell}</strong>
+      <strong>${escapeHtml(playerName)} — клетка ${submission.cell}</strong>
       <p>${escapeHtml(submission.text_task)}</p>
-      <a href="/uploads/${encodeURIComponent(submission.image_name)}" target="_blank" rel="noopener">
-        <img src="/uploads/${encodeURIComponent(submission.image_name)}" alt="Работа игрока">
-      </a>
+      <div class="comparison-grid">
+        <a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener">
+          <strong>Фото ДО</strong>
+          <img src="${beforeUrl}" alt="Фото ДО игрока ${escapeHtml(playerName)}">
+        </a>
+        <a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener">
+          <strong>Фото ПОСЛЕ</strong>
+          <img src="${afterUrl}" alt="Фото ПОСЛЕ игрока ${escapeHtml(playerName)}">
+        </a>
+      </div>
       <label class="muted">Комментарий для отклонения
         <input type="text" data-comment="${submission.id}" placeholder="Что исправить?">
       </label>
@@ -796,7 +839,7 @@ function renderPendingSubmissions(submissions) {
     reject.textContent = 'Отклонить';
     reject.addEventListener('click', async () => {
       const comment = item.querySelector(`[data-comment="${submission.id}"]`).value.trim();
-      if (!comment) return showToast('Введите комментарий для отклонения');
+      if (!comment) return showToast('Добавьте комментарий для игрока');
       await api('/api/admin/reject-submission', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

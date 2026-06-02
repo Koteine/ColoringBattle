@@ -85,13 +85,27 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
 
     const imagePath = '/tmp/coloring-test.png';
     await writeFile(imagePath, Buffer.from('89504e470d0a1a0a', 'hex'));
+    const beforeForm = new FormData();
+    beforeForm.append('tg_id', '200');
+    beforeForm.append('photo_before', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'before.png');
+
+    const beforeResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: beforeForm });
+    const beforeSubmit = await beforeResponse.json();
+    assert.equal(beforeResponse.ok, true);
+    assert.equal(beforeSubmit.uploaded_stage, 'before');
+    assert.equal(existsSync(`${DATA_UPLOADS}/${beforeSubmit.image_name}`), true);
+
+    const feedBeforeAfter = await jsonRequest(server.baseUrl, '/api/admin/submissions?admin_tg_id=341995937');
+    assert.equal(feedBeforeAfter.submissions.length, 0);
+
     const form = new FormData();
     form.append('tg_id', '200');
-    form.append('work_image', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'work.png');
+    form.append('photo_after', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'after.png');
 
     const submitResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: form });
     const submit = await submitResponse.json();
     assert.equal(submitResponse.ok, true);
+    assert.equal(submit.uploaded_stage, 'after');
     assert.equal(existsSync(`${DATA_UPLOADS}/${submit.image_name}`), true);
 
     const checkPending = await jsonRequest(server.baseUrl, '/api/check-status/200');
@@ -99,6 +113,8 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
 
     const feed = await jsonRequest(server.baseUrl, '/api/admin/submissions?admin_tg_id=341995937');
     assert.equal(feed.submissions.length, 1);
+    assert.ok(feed.submissions[0].photo_before);
+    assert.ok(feed.submissions[0].photo_after);
 
     await jsonRequest(server.baseUrl, '/api/admin/approve-submission', {
       method: 'POST',
@@ -118,9 +134,15 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
       body: JSON.stringify({ tg_id: '200' })
     });
 
+    const secondBeforeForm = new FormData();
+    secondBeforeForm.append('tg_id', '200');
+    secondBeforeForm.append('photo_before', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'before-2.png');
+    const secondBeforeSubmitResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: secondBeforeForm });
+    assert.equal(secondBeforeSubmitResponse.ok, true);
+
     const secondForm = new FormData();
     secondForm.append('tg_id', '200');
-    secondForm.append('work_image', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'work-2.png');
+    secondForm.append('photo_after', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'after-2.png');
     const secondSubmitResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: secondForm });
     assert.equal(secondSubmitResponse.ok, true);
 
