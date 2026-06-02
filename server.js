@@ -96,6 +96,7 @@ async function initDb() {
   )`);
 
   await ensureAccumulatingTicketsTable();
+  await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
   await ensureNewsEventsTable();
 
@@ -104,6 +105,7 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_tg_id ON tickets(tg_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_status_random ON tickets(status, ticket_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_place ON raffle_results(place_number)');
+  await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_ticket ON raffle_results(ticket_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_news_events_created ON news_events(created_at, id)');
 
   await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
@@ -123,7 +125,7 @@ async function ensureAccumulatingTicketsTable() {
     ticket_number INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_id TEXT NOT NULL,
     type TEXT DEFAULT 'standard' CHECK(type IN ('standard', 'bonus')),
-    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'burnt')),
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched')),
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id)
   )`;
@@ -139,8 +141,8 @@ async function ensureAccumulatingTicketsTable() {
   const columns = await all('PRAGMA table_info(tickets)');
   const hasStatus = columns.some((column) => column.name === 'status');
 
-  if (hasProperPrimaryKey && !hasTgIdUniqueness) {
-    if (!hasStatus) await run("ALTER TABLE tickets ADD COLUMN status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'burnt'))");
+  if (hasProperPrimaryKey && !hasTgIdUniqueness && sql.includes("'scratched'")) {
+    if (!hasStatus) await run("ALTER TABLE tickets ADD COLUMN status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched'))");
     await run("UPDATE tickets SET status = 'active' WHERE status IS NULL OR status = ''");
     return;
   }
@@ -148,7 +150,7 @@ async function ensureAccumulatingTicketsTable() {
   await run('ALTER TABLE tickets RENAME TO tickets_old');
   await run(desiredSql);
   const statusExpression = hasStatus
-    ? "CASE WHEN status IN ('active', 'winner', 'burnt') THEN status ELSE 'active' END"
+    ? "CASE WHEN status IN ('active', 'winner', 'scratched') THEN status WHEN status = 'burnt' THEN 'scratched' ELSE 'active' END"
     : "'active'";
   await run(`INSERT INTO tickets (ticket_number, tg_id, type, status, created_at)
     SELECT ticket_number, tg_id, COALESCE(type, 'standard'),
@@ -160,11 +162,27 @@ async function ensureAccumulatingTicketsTable() {
   await run('DROP TABLE tickets_old');
 }
 
+
+async function ensureRaffleConfigTable() {
+  await run(`CREATE TABLE IF NOT EXISTS raffle_config (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    raffle_start TEXT DEFAULT '',
+    raffle_end TEXT DEFAULT '',
+    total_prizes INTEGER DEFAULT 0,
+    remaining_prizes INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  await run(`INSERT INTO raffle_config (id, raffle_start, raffle_end, total_prizes, remaining_prizes)
+    VALUES (1, '', '', 0, 0)
+    ON CONFLICT(id) DO NOTHING`);
+}
+
 async function ensureRaffleResultsTable() {
   await run(`CREATE TABLE IF NOT EXISTS raffle_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     place_number INTEGER NOT NULL UNIQUE,
-    ticket_number INTEGER NOT NULL,
+    ticket_number INTEGER NOT NULL UNIQUE,
     tg_id TEXT NOT NULL,
     username TEXT DEFAULT '',
     drawn_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -389,8 +407,38 @@ function buildUniqueWinnerDraw(tickets) {
   return { winners, burnedTickets };
 }
 
+async function getRaffleConfig() {
+  return get(`SELECT id, raffle_start, raffle_end, total_prizes, remaining_prizes, updated_at
+    FROM raffle_config WHERE id = 1`);
+}
+
+function normalizeRaffleDate(value, label) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const timestamp = Date.parse(raw);
+  if (Number.isNaN(timestamp)) {
+    throw Object.assign(new Error(`Некорректная дата/время: ${label}`), { status: 400 });
+  }
+  return new Date(timestamp).toISOString();
+}
+
+function buildRaffleWindow(config) {
+  const startMs = config?.raffle_start ? Date.parse(config.raffle_start) : NaN;
+  const endMs = config?.raffle_end ? Date.parse(config.raffle_end) : NaN;
+  const nowMs = Date.now();
+  const configured = Number.isFinite(startMs) && Number.isFinite(endMs) && Number(config?.total_prizes || 0) > 0;
+  return {
+    server_now: new Date(nowMs).toISOString(),
+    is_configured: configured,
+    is_before_start: configured && nowMs <= startMs,
+    is_active: configured && nowMs > startMs && nowMs < endMs,
+    is_finished: configured && nowMs >= endMs
+  };
+}
+
 async function getRaffleStatus() {
-  const [results, latestWinner, stats] = await Promise.all([
+  const [config, results, latestWinner, stats] = await Promise.all([
+    getRaffleConfig(),
     all(`SELECT id, place_number, ticket_number, tg_id, username, drawn_at
       FROM raffle_results
       ORDER BY place_number ASC`),
@@ -402,54 +450,83 @@ async function getRaffleStatus() {
         COUNT(*) AS total_tickets,
         SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_tickets,
         SUM(CASE WHEN status = 'winner' THEN 1 ELSE 0 END) AS winner_tickets,
-        SUM(CASE WHEN status = 'burnt' THEN 1 ELSE 0 END) AS burnt_tickets
+        SUM(CASE WHEN status = 'scratched' THEN 1 ELSE 0 END) AS scratched_tickets
       FROM tickets`)
   ]);
 
   return {
+    config,
+    ...buildRaffleWindow(config),
     results,
     latest_winner: latestWinner || null,
     total_tickets: stats?.total_tickets || 0,
     active_tickets: stats?.active_tickets || 0,
     winner_tickets: stats?.winner_tickets || 0,
-    burnt_tickets: stats?.burnt_tickets || 0
+    scratched_tickets: stats?.scratched_tickets || 0,
+    remaining_prizes: Number(config?.remaining_prizes || 0)
   };
 }
 
-async function drawLiveRaffleWinner() {
+async function scratchTicket({ tgId, ticketNumber }) {
+  const user = await requireApproved(tgId);
   await run('BEGIN IMMEDIATE TRANSACTION');
   try {
-    const winner = await get(`SELECT t.ticket_number, t.tg_id, t.type, u.username
-      FROM tickets t
-      JOIN users u ON u.tg_id = t.tg_id
-      WHERE t.status = 'active'
-      ORDER BY RANDOM()
-      LIMIT 1`);
-
-    if (!winner) {
-      await run('COMMIT');
-      return null;
+    const config = await getRaffleConfig();
+    const windowState = buildRaffleWindow(config);
+    if (!windowState.is_active) {
+      throw Object.assign(new Error('Лотерея сейчас недоступна: проверьте время старта и финиша'), { status: 403 });
     }
 
-    const nextPlace = await get('SELECT COALESCE(MAX(place_number), 0) + 1 AS place_number FROM raffle_results');
-    const placeNumber = Number(nextPlace.place_number || 1);
-    const inserted = await run(`INSERT INTO raffle_results (place_number, ticket_number, tg_id, username)
-      VALUES (?, ?, ?, ?)`, [placeNumber, winner.ticket_number, winner.tg_id, winner.username || '']);
+    const ticket = await get(`SELECT ticket_number, tg_id, type, status
+      FROM tickets
+      WHERE ticket_number = ? AND tg_id = ?`, [ticketNumber, tgId]);
+    if (!ticket) throw Object.assign(new Error('Красочка не найдена у текущего игрока'), { status: 404 });
+    if (ticket.status !== 'active') throw Object.assign(new Error('Эта Красочка уже стерта'), { status: 400 });
 
-    await run("UPDATE tickets SET status = 'winner' WHERE ticket_number = ?", [winner.ticket_number]);
+    const counters = await get(`SELECT
+        COUNT(*) AS active_tickets,
+        (SELECT remaining_prizes FROM raffle_config WHERE id = 1) AS remaining_prizes
+      FROM tickets
+      WHERE status = 'active'`);
+    const activeTickets = Number(counters?.active_tickets || 0);
+    const remainingPrizes = Number(counters?.remaining_prizes || 0);
+    if (activeTickets <= 0) throw Object.assign(new Error('Активных Красочек не осталось'), { status: 400 });
 
+    const wins = remainingPrizes > 0 && (remainingPrizes >= activeTickets || crypto.randomInt(activeTickets) < remainingPrizes);
+
+    if (wins) {
+      const place = await get('SELECT COALESCE(MAX(place_number), 0) + 1 AS place_number FROM raffle_results');
+      const placeNumber = Number(place?.place_number || 1);
+      await run("UPDATE tickets SET status = 'winner' WHERE ticket_number = ? AND status = 'active'", [ticketNumber]);
+      await run(`UPDATE raffle_config
+        SET remaining_prizes = MAX(remaining_prizes - 1, 0), updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1`, []);
+      const inserted = await run(`INSERT INTO raffle_results (place_number, ticket_number, tg_id, username)
+        VALUES (?, ?, ?, ?)`, [placeNumber, ticketNumber, tgId, user.username || '']);
+      await run('COMMIT');
+
+      await addNewsEvent(`🎉 Юзер ${formatUserHandle(user.username, user.tg_id)} нашел МОНЕТКУ и выиграл приз!`, {
+        eventType: 'scratch_win',
+        tgId: user.tg_id,
+        ticketNumber
+      });
+
+      return {
+        result: 'win',
+        winner: {
+          id: inserted.id,
+          place_number: placeNumber,
+          ticket_number: ticketNumber,
+          tg_id: tgId,
+          username: user.username || '',
+          drawn_at: new Date().toISOString()
+        }
+      };
+    }
+
+    await run("UPDATE tickets SET status = 'scratched' WHERE ticket_number = ? AND status = 'active'", [ticketNumber]);
     await run('COMMIT');
-
-    return {
-      id: inserted.id,
-      place_number: placeNumber,
-      ticket_number: winner.ticket_number,
-      tg_id: winner.tg_id,
-      username: winner.username || '',
-      type: winner.type,
-      burnt_tickets: 0,
-      drawn_at: new Date().toISOString()
-    };
+    return { result: 'lose' };
   } catch (error) {
     await run('ROLLBACK').catch(() => {});
     throw error;
@@ -506,6 +583,60 @@ app.get('/api/raffle', async (_req, res, next) => {
 app.get('/api/raffle/status', async (_req, res, next) => {
   try {
     res.json(await getRaffleStatus());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/raffle/scratch-ticket', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const ticketNumber = Number(req.body.ticket_number);
+    if (!Number.isInteger(ticketNumber) || ticketNumber < 1) {
+      throw Object.assign(new Error('Некорректный номер Красочки'), { status: 400 });
+    }
+    res.json({ ok: true, ...(await scratchTicket({ tgId, ticketNumber })), ...(await getRaffleStatus()) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/raffle-config', async (req, res, next) => {
+  try {
+    await requireAdmin(req.query.admin_tg_id);
+    res.json(await getRaffleStatus());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/raffle-config', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const raffleStart = normalizeRaffleDate(req.body.raffle_start, 'raffle_start');
+    const raffleEnd = normalizeRaffleDate(req.body.raffle_end, 'raffle_end');
+    const totalPrizes = Number(req.body.total_prizes);
+    if (!Number.isInteger(totalPrizes) || totalPrizes < 0) {
+      throw Object.assign(new Error('Количество призов должно быть целым числом от 0'), { status: 400 });
+    }
+    if (raffleStart && raffleEnd && Date.parse(raffleStart) >= Date.parse(raffleEnd)) {
+      throw Object.assign(new Error('Дата старта должна быть раньше даты окончания'), { status: 400 });
+    }
+
+    const current = await getRaffleConfig();
+    const usedPrizes = await get('SELECT COUNT(*) AS count FROM raffle_results');
+    const previouslyUsed = Number(usedPrizes?.count || 0);
+    const datesChanged = raffleStart !== current.raffle_start || raffleEnd !== current.raffle_end;
+    const totalChanged = totalPrizes !== Number(current.total_prizes || 0);
+    const remaining = datesChanged || totalChanged
+      ? Math.max(0, totalPrizes - previouslyUsed)
+      : Math.min(Number(current.remaining_prizes || 0), totalPrizes);
+
+    await run(`UPDATE raffle_config
+      SET raffle_start = ?, raffle_end = ?, total_prizes = ?, remaining_prizes = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1`, [raffleStart, raffleEnd, totalPrizes, remaining]);
+
+    res.json({ ok: true, ...(await getRaffleStatus()) });
   } catch (error) {
     next(error);
   }
@@ -808,19 +939,8 @@ app.get('/api/admin/tickets-export', async (req, res, next) => {
   }
 });
 
-app.post('/api/admin/draw-winner', async (req, res, next) => {
-  try {
-    await requireAdmin(req.body.admin_tg_id);
-    const winner = await drawLiveRaffleWinner();
-    if (!winner) {
-      res.json({ ok: true, winner: null, message: 'Активных Красочек для розыгрыша больше нет', ...(await getRaffleStatus()) });
-      return;
-    }
-
-    res.json({ ok: true, winner, ...(await getRaffleStatus()) });
-  } catch (error) {
-    next(error);
-  }
+app.post('/api/admin/draw-winner', async (_req, res) => {
+  res.status(410).json({ error: 'Ручной розыгрыш администратором отключен. Используйте скретч-карты игроков.' });
 });
 
 app.post('/api/admin/global-reset', async (req, res, next) => {

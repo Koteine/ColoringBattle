@@ -40,9 +40,13 @@ const els = {
   paletteGrid: document.getElementById('paletteGrid'),
   totalTickets: document.getElementById('totalTickets'),
   activeTickets: document.getElementById('activeTickets'),
-  magicPalette: document.getElementById('magicPalette'),
+  remainingPrizes: document.getElementById('remainingPrizes'),
+  raffleStatusPanel: document.getElementById('raffleStatusPanel'),
+  raffleCountdown: document.getElementById('raffleCountdown'),
+  countdownTime: document.getElementById('countdownTime'),
   winnerReveal: document.getElementById('winnerReveal'),
-  raffleLog: document.getElementById('raffleLog'),
+  scratchGrid: document.getElementById('scratchGrid'),
+  winnersList: document.getElementById('winnersList'),
   pendingUsers: document.getElementById('pendingUsers'),
   pendingSubmissions: document.getElementById('pendingSubmissions'),
   allUsers: document.getElementById('allUsers'),
@@ -50,9 +54,14 @@ const els = {
   grantTicketForm: document.getElementById('grantTicketForm'),
   grantTicketTgId: document.getElementById('grantTicketTgId'),
   ticketsExport: document.getElementById('ticketsExport'),
-  drawWinnerBtn: document.getElementById('drawWinnerBtn'),
+  raffleConfigForm: document.getElementById('raffleConfigForm'),
+  raffleStartInput: document.getElementById('raffleStartInput'),
+  raffleEndInput: document.getElementById('raffleEndInput'),
+  totalPrizesInput: document.getElementById('totalPrizesInput'),
+  raffleConfigHint: document.getElementById('raffleConfigHint'),
   refreshExportBtn: document.getElementById('refreshExportBtn'),
   globalResetBtn: document.getElementById('globalResetBtn'),
+  confettiLayer: document.getElementById('confettiLayer'),
   toast: document.getElementById('toast')
 };
 
@@ -76,6 +85,8 @@ let raffleLoadedAt = 0;
 let rafflePollingTimer = null;
 let lastRaffleWinnerId = null;
 let newsPollingTimer = null;
+let countdownTimer = null;
+const scratchers = new Map();
 
 function isOwnerId(id) {
   return String(id || '').trim() === OWNER_TG_ID;
@@ -400,31 +411,211 @@ function formatWinnerName(winner) {
   return username ? `@${username.replace(/^@/, '')}` : `ID ${winner?.tg_id || '—'}`;
 }
 
-function renderRaffleLog(results = []) {
-  els.raffleLog.innerHTML = results.length ? '' : '<div class="empty-state">Победителей пока нет. Ждём первый розыгрыш!</div>';
+function formatCountdown(ms) {
+  const safe = Math.max(0, ms);
+  const days = Math.floor(safe / 86_400_000);
+  const hours = Math.floor((safe % 86_400_000) / 3_600_000);
+  const minutes = Math.floor((safe % 3_600_000) / 60_000);
+  const seconds = Math.floor((safe % 60_000) / 1000);
+  return days > 0 ? `${days}д ${hours}ч ${minutes}м` : `${hours}ч ${minutes}м ${seconds}с`;
+}
+
+function toDatetimeLocal(iso) {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function updateCountdown(config) {
+  window.clearInterval(countdownTimer);
+  countdownTimer = null;
+  const startMs = Date.parse(config?.raffle_start || '');
+  if (!Number.isFinite(startMs)) return;
+  const tick = () => {
+    const left = startMs - Date.now();
+    els.countdownTime.textContent = formatCountdown(left);
+    if (left <= 0) loadRaffle(true, true).catch((error) => console.warn('Raffle reload after countdown:', error.message));
+  };
+  tick();
+  countdownTimer = window.setInterval(tick, 1000);
+}
+
+function renderWinners(results = []) {
+  els.winnersList.innerHTML = results.length ? '' : '<div class="empty-state">Пока монетку никто не нашел.</div>';
   for (const winner of results) {
     const item = document.createElement('article');
     item.className = 'item winner-row';
     item.innerHTML = `
-      <strong>${escapeHtml(winner.place_number)}-е место: №${escapeHtml(winner.ticket_number)} — ${escapeHtml(formatWinnerName(winner))}</strong>
-      <span class="muted">${escapeHtml(new Date(winner.drawn_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))}</span>
+      <strong>🪙 ${escapeHtml(formatWinnerName(winner))} — Красочка №${escapeHtml(winner.ticket_number)}</strong>
+      <span class="muted">${escapeHtml(new Date(winner.drawn_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span>
     `;
-    els.raffleLog.append(item);
+    els.winnersList.append(item);
   }
 }
 
-function animateRaffleWinner(winner) {
-  if (!winner) return;
-  const blobs = [...els.magicPalette.querySelectorAll('.paint-blob')];
-  const blob = blobs[(Number(winner.place_number || 1) - 1) % blobs.length];
-  blobs.forEach((item) => item.classList.remove('erasing'));
-  void blob.offsetWidth;
-  blob.classList.add('erasing');
+function cardResultMarkup(ticket) {
+  if (ticket.status === 'winner') {
+    return '<div><div class="coin">🪙</div><p>МОНЕТКА!</p></div>';
+  }
+  if (ticket.status === 'scratched') return '<div>😢<p>Пусто</p></div>';
+  return '<div><div class="coin">?</div><p>Что внутри?</p></div>';
+}
 
-  els.winnerReveal.classList.remove('show');
-  els.winnerReveal.textContent = `Красочка №${winner.ticket_number} — ${formatWinnerName(winner)}!`;
-  void els.winnerReveal.offsetWidth;
-  window.setTimeout(() => els.winnerReveal.classList.add('show'), 420);
+function renderScratchCards(tickets = [], raffleActive = false) {
+  if (!tickets.length) {
+    els.scratchGrid.innerHTML = '<div class="empty-state">У вас пока нет Красочек для скретч-лотереи.</div>';
+    return;
+  }
+
+  els.scratchGrid.innerHTML = '';
+  scratchers.clear();
+  for (const ticket of tickets) {
+    const card = document.createElement('article');
+    const revealed = ticket.status !== 'active';
+    card.className = `scratch-card ${revealed ? 'revealed' : ''} ${ticket.status === 'winner' ? 'won' : ''} ${ticket.status === 'scratched' ? 'lost' : ''}`;
+    card.dataset.ticketNumber = ticket.ticket_number;
+    card.innerHTML = `
+      <div class="scratch-prize">${cardResultMarkup(ticket)}</div>
+      <canvas aria-label="Скретч-слой Красочки №${escapeHtml(ticket.ticket_number)}"></canvas>
+      <div class="scratch-label">Красочка №${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</div>
+    `;
+    els.scratchGrid.append(card);
+    if (!revealed && raffleActive) setupScratchCanvas(card, ticket);
+    if (!raffleActive && !revealed) card.querySelector('.scratch-label').textContent = 'Ждем старта лотереи';
+  }
+}
+
+function setupScratchCanvas(card, ticket) {
+  const canvas = card.querySelector('canvas');
+  const ctx = canvas.getContext('2d');
+  let drawing = false;
+  let submitted = false;
+  let lastCheck = 0;
+
+  const paintCover = () => {
+    const rect = card.getBoundingClientRect();
+    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.round(rect.width * ratio);
+    canvas.height = Math.round(rect.height * ratio);
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const gradient = ctx.createLinearGradient(0, 0, rect.width, rect.height);
+    gradient.addColorStop(0, '#c6ccd8');
+    gradient.addColorStop(.45, '#f1f3f7');
+    gradient.addColorStop(1, '#9ca3af');
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = 'rgba(55,33,63,.72)';
+    ctx.font = '900 18px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Сотри меня', rect.width / 2, rect.height / 2 - 6);
+    ctx.font = '800 13px system-ui, sans-serif';
+    ctx.fillText('найди монетку', rect.width / 2, rect.height / 2 + 18);
+  };
+
+  const scratchAt = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const pointer = event.touches?.[0] || event;
+    const x = pointer.clientX - rect.left;
+    const y = pointer.clientY - rect.top;
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.arc(x, y, Math.max(24, rect.width * .12), 0, Math.PI * 2);
+    ctx.fill();
+  };
+
+  const scratchedPercent = () => {
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let transparent = 0;
+    for (let index = 3; index < pixels.length; index += 16) {
+      if (pixels[index] < 32) transparent += 1;
+    }
+    return transparent / (pixels.length / 16);
+  };
+
+  const maybeSubmit = async () => {
+    if (submitted || Date.now() - lastCheck < 180) return;
+    lastCheck = Date.now();
+    if (scratchedPercent() < .5) return;
+    submitted = true;
+    card.classList.add('revealed');
+    try {
+      const data = await api('/api/raffle/scratch-ticket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tg_id: tgId, ticket_number: ticket.ticket_number })
+      });
+      const prize = card.querySelector('.scratch-prize');
+      if (data.result === 'win') {
+        card.classList.add('won');
+        prize.innerHTML = '<div><div class="coin">🪙</div><p>МОНЕТКА!</p></div>';
+        showToast('🎉 Вы нашли монетку и выиграли приз!', 5200);
+        launchConfetti();
+        await loadNews().catch(() => {});
+      } else {
+        card.classList.add('lost');
+        prize.innerHTML = '<div>😢<p>Пусто</p></div>';
+        showToast('В этой Красочке пусто. Попробуйте следующую!');
+      }
+      await loadState().catch(() => {});
+      await loadRaffle(true, true);
+    } catch (error) {
+      submitted = false;
+      card.classList.remove('revealed');
+      showToast(error.message);
+    }
+  };
+
+  const start = (event) => {
+    if (submitted) return;
+    drawing = true;
+    scratchAt(event);
+    event.preventDefault();
+  };
+  const move = (event) => {
+    if (!drawing || submitted) return;
+    scratchAt(event);
+    maybeSubmit();
+    event.preventDefault();
+  };
+  const stop = () => {
+    drawing = false;
+    maybeSubmit();
+  };
+
+  paintCover();
+  if (window.PointerEvent) {
+    canvas.addEventListener('pointerdown', start);
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerup', stop);
+    canvas.addEventListener('pointercancel', stop);
+  } else {
+    canvas.addEventListener('touchstart', start, { passive: false });
+    canvas.addEventListener('touchmove', move, { passive: false });
+    canvas.addEventListener('touchend', stop);
+    canvas.addEventListener('mousedown', start);
+    canvas.addEventListener('mousemove', move);
+    canvas.addEventListener('mouseup', stop);
+  }
+  scratchers.set(ticket.ticket_number, { paintCover });
+}
+
+function launchConfetti() {
+  const colors = ['#ffafcc', '#bde0fe', '#ffd166', '#caffbf', '#cdb4db', '#fb6f92'];
+  for (let i = 0; i < 72; i += 1) {
+    const piece = document.createElement('span');
+    piece.className = 'confetti-piece';
+    piece.style.left = `${Math.random() * 100}%`;
+    piece.style.background = colors[i % colors.length];
+    piece.style.animationDelay = `${Math.random() * .35}s`;
+    piece.style.transform = `rotate(${Math.random() * 180}deg)`;
+    els.confettiLayer.append(piece);
+    window.setTimeout(() => piece.remove(), 2200);
+  }
 }
 
 async function loadRaffle(force = true, animateNew = false) {
@@ -435,26 +626,29 @@ async function loadRaffle(force = true, animateNew = false) {
 
   els.totalTickets.textContent = data.total_tickets || 0;
   els.activeTickets.textContent = data.active_tickets || 0;
-  renderRaffleLog(data.results || []);
+  els.remainingPrizes.textContent = data.remaining_prizes || 0;
+  renderWinners(data.results || []);
+
+  els.raffleCountdown.classList.toggle('hidden', !data.is_before_start);
+  if (data.is_before_start) updateCountdown(data.config);
+  else window.clearInterval(countdownTimer);
+
+  if (!data.is_configured) {
+    els.winnerReveal.textContent = 'Лотерея еще не настроена администратором.';
+  } else if (data.is_before_start) {
+    els.winnerReveal.textContent = 'Подготовьте Красочки — скоро можно будет стирать!';
+  } else if (data.is_active) {
+    els.winnerReveal.textContent = 'Лотерея идет! Стирайте Красочки и ищите золотую монетку.';
+  } else {
+    els.winnerReveal.textContent = 'Окно лотереи закрыто.';
+  }
+
+  renderScratchCards(state?.tickets || [], Boolean(data.is_active));
 
   const latest = data.latest_winner || null;
-  if (!latest) {
-    els.winnerReveal.textContent = 'Ждём первую Красочку!';
-    els.winnerReveal.classList.add('show');
-    lastRaffleWinnerId = null;
-    return;
-  }
-
-  if (lastRaffleWinnerId === null) {
+  if (latest && latest.id !== lastRaffleWinnerId) {
     lastRaffleWinnerId = latest.id;
-    els.winnerReveal.textContent = `Красочка №${latest.ticket_number} — ${formatWinnerName(latest)}!`;
-    els.winnerReveal.classList.add('show');
-    return;
-  }
-
-  if (latest.id !== lastRaffleWinnerId) {
-    lastRaffleWinnerId = latest.id;
-    if (animateNew) animateRaffleWinner(latest);
+    if (animateNew) launchConfetti();
   }
 }
 
@@ -474,12 +668,13 @@ function stopRafflePolling() {
 
 async function loadAdminPanel() {
   const adminParam = `admin_tg_id=${encodeURIComponent(tgId)}`;
-  const [pendingUsers, users, submissions, exportData, ticketData] = await Promise.all([
+  const [pendingUsers, users, submissions, exportData, ticketData, raffleConfig] = await Promise.all([
     api(`/api/admin/pending-users?${adminParam}`),
     api(`/api/admin/users?${adminParam}`),
     api(`/api/admin/submissions?${adminParam}`),
     api(`/api/admin/tickets-export?${adminParam}`),
-    api(`/api/admin/tickets?${adminParam}`)
+    api(`/api/admin/tickets?${adminParam}`),
+    api(`/api/admin/raffle-config?${adminParam}`)
   ]);
 
   renderPendingUsers(pendingUsers.users);
@@ -487,7 +682,17 @@ async function loadAdminPanel() {
   renderPendingSubmissions(submissions.submissions);
   renderTicketRegistry(ticketData.tickets || []);
   els.ticketsExport.value = exportData.text || '';
+  renderRaffleConfig(raffleConfig);
 }
+
+function renderRaffleConfig(data) {
+  const config = data?.config || {};
+  els.raffleStartInput.value = toDatetimeLocal(config.raffle_start);
+  els.raffleEndInput.value = toDatetimeLocal(config.raffle_end);
+  els.totalPrizesInput.value = Number(config.total_prizes || 0);
+  els.raffleConfigHint.textContent = `Осталось призов: ${Number(config.remaining_prizes || 0)} · выдано побед: ${Number(data?.winner_tickets || 0)} · статус: ${data?.is_active ? 'идет сейчас' : data?.is_before_start ? 'ждет старта' : data?.is_finished ? 'завершена' : 'не настроена'}`;
+}
+
 
 function renderPendingUsers(users) {
   els.pendingUsers.innerHTML = users.length ? '' : '<p class="muted">Новых заявок нет.</p>';
@@ -732,30 +937,22 @@ async function refreshExport() {
   showToast('Выгрузка обновлена');
 }
 
-async function drawNextWinner() {
-  if (!tgId) return showToast('Не найден Telegram ID администратора');
-  els.drawWinnerBtn.disabled = true;
-  try {
-    const data = await api('/api/admin/draw-winner', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ admin_tg_id: tgId })
-    });
-
-    if (!data.winner) {
-      showToast(data.message || 'Активных Красочек больше нет');
-    } else {
-      showToast(`${data.winner.place_number}-е место: Красочка №${data.winner.ticket_number} — ${formatWinnerName(data.winner)}`);
-      lastRaffleWinnerId = data.winner.id - 1;
-      await loadRaffle(true, true);
-    }
-
-    await loadAdminPanel().catch(() => {});
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    els.drawWinnerBtn.disabled = false;
-  }
+async function saveRaffleConfig(event) {
+  event.preventDefault();
+  const payload = {
+    admin_tg_id: tgId,
+    raffle_start: els.raffleStartInput.value ? new Date(els.raffleStartInput.value).toISOString() : '',
+    raffle_end: els.raffleEndInput.value ? new Date(els.raffleEndInput.value).toISOString() : '',
+    total_prizes: els.totalPrizesInput.value
+  };
+  const data = await api('/api/admin/raffle-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  renderRaffleConfig(data);
+  showToast('Настройки лотереи сохранены');
+  await loadRaffle(true).catch(() => {});
 }
 
 async function globalReset() {
@@ -768,6 +965,7 @@ async function globalReset() {
   showToast('Глобальный сброс выполнен');
   raffleLoadedAt = 0;
   lastRaffleWinnerId = null;
+  scratchers.clear();
   await loadState();
   await loadRaffle(true).catch(() => {});
   await loadNews().catch(() => {});
@@ -777,7 +975,7 @@ els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
 els.submitForm.addEventListener('submit', submitWork);
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
-els.drawWinnerBtn.addEventListener('click', () => drawNextWinner().catch((error) => showToast(error.message)));
+els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
 document.querySelectorAll('.nav-btn').forEach((button) => {
