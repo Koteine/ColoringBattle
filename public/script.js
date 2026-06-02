@@ -51,6 +51,9 @@ const els = {
   pendingSubmissions: document.getElementById('pendingSubmissions'),
   allUsers: document.getElementById('allUsers'),
   ticketRegistry: document.getElementById('ticketRegistry'),
+  taskAdminForm: document.getElementById('taskAdminForm'),
+  taskAdminText: document.getElementById('taskAdminText'),
+  taskAdminList: document.getElementById('taskAdminList'),
   grantTicketForm: document.getElementById('grantTicketForm'),
   grantTicketTgId: document.getElementById('grantTicketTgId'),
   ticketsExport: document.getElementById('ticketsExport'),
@@ -87,6 +90,15 @@ let lastRaffleWinnerId = null;
 let newsPollingTimer = null;
 let countdownTimer = null;
 const scratchers = new Map();
+const rainbowCovers = [
+  ['#ff2d55', '#ff7a8a'],
+  ['#ff8c00', '#ffd166'],
+  ['#ffe14d', '#fff59d'],
+  ['#23c552', '#9bf6a3'],
+  ['#38bdf8', '#a5f3fc'],
+  ['#2563eb', '#93c5fd'],
+  ['#8b5cf6', '#d8b4fe']
+];
 
 function isOwnerId(id) {
   return String(id || '').trim() === OWNER_TG_ID;
@@ -465,7 +477,7 @@ function cardResultMarkup(ticket) {
 
 function renderScratchCards(tickets = [], raffleActive = false) {
   if (!tickets.length) {
-    els.scratchGrid.innerHTML = '<div class="empty-state">У вас пока нет Красочек для скретч-лотереи.</div>';
+    els.scratchGrid.innerHTML = '<div class="empty-state">У вас пока нет Красочек.</div>';
     return;
   }
 
@@ -478,12 +490,12 @@ function renderScratchCards(tickets = [], raffleActive = false) {
     card.dataset.ticketNumber = ticket.ticket_number;
     card.innerHTML = `
       <div class="scratch-prize">${cardResultMarkup(ticket)}</div>
-      <canvas aria-label="Скретч-слой Красочки №${escapeHtml(ticket.ticket_number)}"></canvas>
+      <canvas aria-label="Защитный слой Красочки №${escapeHtml(ticket.ticket_number)}"></canvas>
       <div class="scratch-label">Красочка №${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</div>
     `;
     els.scratchGrid.append(card);
     if (!revealed && raffleActive) setupScratchCanvas(card, ticket);
-    if (!raffleActive && !revealed) card.querySelector('.scratch-label').textContent = 'Ждем старта лотереи';
+    if (!raffleActive && !revealed) card.querySelector('.scratch-label').textContent = 'Ждем старта Красочек';
   }
 }
 
@@ -502,10 +514,11 @@ function setupScratchCanvas(card, ticket) {
     canvas.style.width = `${rect.width}px`;
     canvas.style.height = `${rect.height}px`;
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const [coverStart, coverEnd] = rainbowCovers[Math.floor(Math.random() * rainbowCovers.length)];
     const gradient = ctx.createLinearGradient(0, 0, rect.width, rect.height);
-    gradient.addColorStop(0, '#c6ccd8');
-    gradient.addColorStop(.45, '#f1f3f7');
-    gradient.addColorStop(1, '#9ca3af');
+    gradient.addColorStop(0, coverStart);
+    gradient.addColorStop(.5, coverEnd);
+    gradient.addColorStop(1, coverStart);
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, rect.width, rect.height);
@@ -524,7 +537,7 @@ function setupScratchCanvas(card, ticket) {
     const y = pointer.clientY - rect.top;
     ctx.globalCompositeOperation = 'destination-out';
     ctx.beginPath();
-    ctx.arc(x, y, Math.max(24, rect.width * .12), 0, Math.PI * 2);
+    ctx.arc(x, y, Math.max(12, rect.width * .06), 0, Math.PI * 2);
     ctx.fill();
   };
 
@@ -634,13 +647,13 @@ async function loadRaffle(force = true, animateNew = false) {
   else window.clearInterval(countdownTimer);
 
   if (!data.is_configured) {
-    els.winnerReveal.textContent = 'Лотерея еще не настроена администратором.';
+    els.winnerReveal.textContent = 'Красочки еще не настроены администратором.';
   } else if (data.is_before_start) {
     els.winnerReveal.textContent = 'Подготовьте Красочки — скоро можно будет стирать!';
   } else if (data.is_active) {
-    els.winnerReveal.textContent = 'Лотерея идет! Стирайте Красочки и ищите золотую монетку.';
+    els.winnerReveal.textContent = 'Стирайте Красочки и ищите золотую монетку.';
   } else {
-    els.winnerReveal.textContent = 'Окно лотереи закрыто.';
+    els.winnerReveal.textContent = 'Окно Красочек закрыто.';
   }
 
   renderScratchCards(state?.tickets || [], Boolean(data.is_active));
@@ -668,19 +681,21 @@ function stopRafflePolling() {
 
 async function loadAdminPanel() {
   const adminParam = `admin_tg_id=${encodeURIComponent(tgId)}`;
-  const [pendingUsers, users, submissions, exportData, ticketData, raffleConfig] = await Promise.all([
+  const [pendingUsers, users, submissions, exportData, ticketData, raffleConfig, taskData] = await Promise.all([
     api(`/api/admin/pending-users?${adminParam}`),
     api(`/api/admin/users?${adminParam}`),
     api(`/api/admin/submissions?${adminParam}`),
     api(`/api/admin/tickets-export?${adminParam}`),
     api(`/api/admin/tickets?${adminParam}`),
-    api(`/api/admin/raffle-config?${adminParam}`)
+    api(`/api/admin/raffle-config?${adminParam}`),
+    api(`/api/admin/tasks?${adminParam}`)
   ]);
 
   renderPendingUsers(pendingUsers.users);
   renderAllUsers(users.users);
   renderPendingSubmissions(submissions.submissions);
   renderTicketRegistry(ticketData.tickets || []);
+  renderAdminTasks(taskData.tasks || []);
   els.ticketsExport.value = exportData.text || '';
   renderRaffleConfig(raffleConfig);
 }
@@ -914,6 +929,47 @@ function renderTicketRegistry(tickets = []) {
   }
 }
 
+function renderAdminTasks(tasks = []) {
+  els.taskAdminList.innerHTML = tasks.length ? '' : '<p class="muted">Заданий пока нет.</p>';
+  for (const task of tasks) {
+    const item = document.createElement('article');
+    item.className = 'item task-row';
+    item.innerHTML = `<p>${escapeHtml(task.text_task)}</p>`;
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'danger';
+    remove.textContent = 'Удалить';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm('Удалить это задание?')) return;
+      await api('/api/admin/remove-task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_tg_id: tgId, task_id: task.id })
+      });
+      showToast('Задание удалено');
+      await loadAdminPanel();
+    });
+
+    item.append(remove);
+    els.taskAdminList.append(item);
+  }
+}
+
+async function addAdminTask(event) {
+  event.preventDefault();
+  const textTask = els.taskAdminText.value.trim();
+  if (!textTask) return showToast('Введите текст задания');
+  await api('/api/admin/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ admin_tg_id: tgId, text_task: textTask })
+  });
+  els.taskAdminText.value = '';
+  showToast('Задание добавлено');
+  await loadAdminPanel();
+}
+
 async function grantTicket(event) {
   event.preventDefault();
   const targetTgId = els.grantTicketTgId.value.trim();
@@ -951,7 +1007,7 @@ async function saveRaffleConfig(event) {
     body: JSON.stringify(payload)
   });
   renderRaffleConfig(data);
-  showToast('Настройки лотереи сохранены');
+  showToast('Настройки сохранены');
   await loadRaffle(true).catch(() => {});
 }
 
@@ -974,6 +1030,7 @@ async function globalReset() {
 els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
 els.submitForm.addEventListener('submit', submitWork);
+els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catch((error) => showToast(error.message)));
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
