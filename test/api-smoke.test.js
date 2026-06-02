@@ -18,7 +18,7 @@ async function startServer() {
   const port = 3400 + Math.floor(Math.random() * 1000);
   const child = spawn(process.execPath, ['server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), ADMIN_TG_IDS: '100' },
+    env: { ...process.env, PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
@@ -59,15 +59,22 @@ async function jsonRequest(baseUrl, path, options = {}) {
 test('approval, roll, image submit, polling status and admin approval flow', async () => {
   const server = await startServer();
   try {
-    const pending = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
+    const firstVisit = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
+    assert.equal(firstVisit.needs_application, true);
+    assert.equal(firstVisit.user, null);
+
+    const pending = await jsonRequest(server.baseUrl, '/api/apply', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '200', username: 'player' })
+    });
     assert.equal(pending.user.is_approved, 0);
 
-    const pendingUsers = await jsonRequest(server.baseUrl, '/api/admin/pending-users?admin_tg_id=100');
+    const pendingUsers = await jsonRequest(server.baseUrl, '/api/admin/pending-users?admin_tg_id=341995937');
     assert.equal(pendingUsers.users.length, 1);
 
     await jsonRequest(server.baseUrl, '/api/admin/approve-user', {
       method: 'POST',
-      body: JSON.stringify({ admin_tg_id: '100', tg_id: '200' })
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '200' })
     });
 
     const roll = await jsonRequest(server.baseUrl, '/api/roll', {
@@ -90,17 +97,38 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     const checkPending = await jsonRequest(server.baseUrl, '/api/check-status/200');
     assert.equal(checkPending.submission.status, 'pending');
 
-    const feed = await jsonRequest(server.baseUrl, '/api/admin/submissions?admin_tg_id=100');
+    const feed = await jsonRequest(server.baseUrl, '/api/admin/submissions?admin_tg_id=341995937');
     assert.equal(feed.submissions.length, 1);
 
     await jsonRequest(server.baseUrl, '/api/admin/approve-submission', {
       method: 'POST',
-      body: JSON.stringify({ admin_tg_id: '100', submission_id: feed.submissions[0].id })
+      body: JSON.stringify({ admin_tg_id: '341995937', submission_id: feed.submissions[0].id })
     });
 
     const checkApproved = await jsonRequest(server.baseUrl, '/api/check-status/200');
     assert.equal(checkApproved.submission.status, 'approved');
     assert.equal(checkApproved.dice_frozen, 0);
+    assert.equal(checkApproved.tickets.length, 1);
+
+    await jsonRequest(server.baseUrl, '/api/roll', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '200' })
+    });
+
+    const secondForm = new FormData();
+    secondForm.append('tg_id', '200');
+    secondForm.append('work_image', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'work-2.png');
+    const secondSubmitResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: secondForm });
+    assert.equal(secondSubmitResponse.ok, true);
+
+    const secondFeed = await jsonRequest(server.baseUrl, '/api/admin/submissions?admin_tg_id=341995937');
+    await jsonRequest(server.baseUrl, '/api/admin/approve-submission', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', submission_id: secondFeed.submissions[0].id })
+    });
+
+    const checkAccumulated = await jsonRequest(server.baseUrl, '/api/check-status/200');
+    assert.equal(checkAccumulated.tickets.length, 2);
   } finally {
     await server.close();
   }
