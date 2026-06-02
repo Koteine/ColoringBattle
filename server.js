@@ -478,7 +478,7 @@ async function scratchTicket({ tgId, ticketNumber }) {
     const config = await getRaffleConfig();
     const windowState = buildRaffleWindow(config);
     if (!windowState.is_active) {
-      throw Object.assign(new Error('Лотерея сейчас недоступна: проверьте время старта и финиша'), { status: 403 });
+      throw Object.assign(new Error('Красочки сейчас недоступны: проверьте время старта и финиша'), { status: 403 });
     }
 
     const ticket = await get(`SELECT ticket_number, tg_id, type, status
@@ -827,6 +827,48 @@ app.get('/api/admin/submissions', async (req, res, next) => {
   }
 });
 
+app.get('/api/admin/tasks', async (req, res, next) => {
+  try {
+    await requireAdmin(req.query.admin_tg_id);
+    const tasks = await all(`SELECT id, text_task
+      FROM tasks
+      ORDER BY id DESC`);
+    res.json({ tasks });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/tasks', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const textTask = String(req.body.text_task || '').trim();
+    if (!textTask) throw Object.assign(new Error('Введите текст задания'), { status: 400 });
+    const result = await run('INSERT INTO tasks (text_task) VALUES (?)', [textTask]);
+    const task = await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]);
+    res.status(201).json({ ok: true, task });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/remove-task', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const taskId = Number(req.body.task_id);
+    if (!Number.isInteger(taskId) || taskId < 1) throw Object.assign(new Error('Некорректный ID задания'), { status: 400 });
+    const usage = await get('SELECT COUNT(*) AS count FROM submissions WHERE task_id = ?', [taskId]);
+    if (Number(usage?.count || 0) > 0) {
+      throw Object.assign(new Error('Нельзя удалить задание, которое уже назначено игрокам'), { status: 400 });
+    }
+    const result = await run('DELETE FROM tasks WHERE id = ?', [taskId]);
+    if (result.changes === 0) throw Object.assign(new Error('Задание не найдено'), { status: 404 });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/admin/approve-submission', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
@@ -944,7 +986,7 @@ app.get('/api/admin/tickets-export', async (req, res, next) => {
 });
 
 app.post('/api/admin/draw-winner', async (_req, res) => {
-  res.status(410).json({ error: 'Ручной розыгрыш администратором отключен. Используйте скретч-карты игроков.' });
+  res.status(410).json({ error: 'Ручной выбор победителя администратором отключен. Используйте Красочки игроков.' });
 });
 
 app.post('/api/admin/global-reset', async (req, res, next) => {

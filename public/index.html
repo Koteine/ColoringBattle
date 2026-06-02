@@ -310,6 +310,9 @@
     .ticket-admin { display: grid; grid-template-columns: minmax(240px, .8fr) minmax(280px, 1.2fr); gap: 16px; }
     .ticket-registry { max-height: 440px; overflow: auto; padding-right: 4px; }
     .ticket-row { display: grid; grid-template-columns: 1fr max-content; gap: 10px; align-items: center; }
+    .task-admin-form { display: grid; gap: 10px; }
+    .task-admin-list { max-height: 360px; overflow: auto; padding-right: 4px; }
+    .task-row { display: grid; grid-template-columns: 1fr max-content; gap: 10px; align-items: start; }
 
     .bottom-nav {
       position: fixed;
@@ -422,23 +425,23 @@
     <section id="raffleScreen" class="screen hidden" data-screen="raffle">
       <section class="card raffle-hero">
         <div>
-          <span class="soft-chip">🎟 Скретч-лотерея</span>
+          <span class="soft-chip">🎨 Мои Красочки</span>
           <p id="totalTickets" class="big-number">0</p>
           <p class="muted">Красочек выдано · еще не стерто: <strong id="activeTickets">0</strong> · призов осталось: <strong id="remainingPrizes">0</strong></p>
         </div>
         <div id="raffleStatusPanel" class="raffle-status-panel" aria-live="polite">
           <div id="raffleCountdown" class="countdown-card hidden">
-            <strong>Лотерея скоро начнется</strong>
+            <strong>Красочки скоро откроются</strong>
             <span id="countdownTime" class="countdown-time">—</span>
-            <p class="muted">До старта скретч-карт</p>
+            <p class="muted">До старта Красочек</p>
           </div>
           <div id="winnerReveal" class="winner-reveal show">Стирайте Красочки и ищите монетку!</div>
         </div>
       </section>
 
       <section class="card">
-        <h2>Мои скретч-карты</h2>
-        <p class="muted">Проведите пальцем или мышкой по серому слою. После стирания 50% площади результат честно определит сервер.</p>
+        <h2>Мои Красочки</h2>
+        <p class="muted">Стирай защитный цветной слой со своих Красочек, чтобы узнать результат! Счастливчики определятся случайным образом</p>
         <div id="scratchGrid" class="scratch-grid"></div>
       </section>
 
@@ -476,6 +479,22 @@
         <div class="admin-accordion-panel">
           <div class="admin-accordion-inner admin-section-body">
             <div id="allUsers" class="list"></div>
+          </div>
+        </div>
+      </section>
+
+
+      <section class="card admin-accordion">
+        <button class="admin-accordion-toggle" type="button" aria-expanded="false">Управление квестами</button>
+        <div class="admin-accordion-panel">
+          <div class="admin-accordion-inner admin-section-body">
+            <form id="taskAdminForm" class="task-admin-form">
+              <label class="muted">Новое задание
+                <textarea id="taskAdminText" placeholder="Напишите задание для игроков"></textarea>
+              </label>
+              <div class="actions"><button type="submit">Добавить задание в игру</button></div>
+            </form>
+            <div id="taskAdminList" class="list task-admin-list"></div>
           </div>
         </div>
       </section>
