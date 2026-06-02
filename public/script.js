@@ -7,6 +7,7 @@ if (tgApp) {
 const query = new URLSearchParams(window.location.search);
 const tgUser = tgApp?.initDataUnsafe?.user;
 const tgId = String(tgUser?.id || query.get('tg_id') || '').trim();
+const OWNER_TG_ID = document.body?.dataset?.ownerTgId || '391995937';
 const tgUsername = String(tgUser?.username || tgUser?.first_name || query.get('username') || `user_${tgId}`).trim();
 
 const els = {
@@ -41,6 +42,18 @@ const els = {
 let state = null;
 let pollingTimer = null;
 let lastSubmissionStatus = '';
+
+function isOwnerId(id) {
+  return String(id || '').trim() === OWNER_TG_ID;
+}
+
+function hasAdminAccess(user) {
+  return isOwnerId(tgId) || isOwnerId(user?.tg_id) || user?.role === 'admin';
+}
+
+function canEnterApp(user) {
+  return hasAdminAccess(user) || Number(user?.is_approved) === 1;
+}
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (char) => ({
@@ -119,7 +132,9 @@ function render() {
   if (!state?.user) return;
   const { user, activeSubmission, tickets, is_finalist: isFinalist } = state;
 
-  if (Number(user.is_approved) !== 1) {
+  const adminAccess = hasAdminAccess(user);
+
+  if (!canEnterApp(user)) {
     els.waitingScreen.classList.remove('hidden');
     els.gameScreen.classList.add('hidden');
     els.adminPanel.classList.add('hidden');
@@ -148,7 +163,7 @@ function render() {
       : 'После броска кубик заморозится до проверки задания.';
   els.finalistLine.classList.toggle('hidden', !isFinalist);
 
-  if (user.role === 'admin') {
+  if (adminAccess) {
     els.adminPanel.classList.remove('hidden');
     loadAdminPanel().catch((error) => showToast(error.message));
   } else {
@@ -215,7 +230,7 @@ function startPolling() {
 
 async function checkStatus() {
   try {
-    if (!state?.user || Number(state.user.is_approved) !== 1) return;
+    if (!state?.user || !canEnterApp(state.user)) return;
     const data = await api(`/api/check-status/${encodeURIComponent(tgId)}`);
     const submission = data.submission;
     if (!submission) return;
