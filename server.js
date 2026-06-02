@@ -87,6 +87,8 @@ async function initDb() {
     cell INTEGER NOT NULL,
     task_id INTEGER NOT NULL,
     image_name TEXT,
+    photo_before TEXT,
+    photo_after TEXT,
     status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
     admin_comment TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -95,6 +97,7 @@ async function initDb() {
     FOREIGN KEY (task_id) REFERENCES tasks(id)
   )`);
 
+  await ensureSubmissionPhotoColumns();
   await ensureAccumulatingTicketsTable();
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
@@ -102,6 +105,7 @@ async function initDb() {
 
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_player_status ON submissions(tg_id, status, task_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_images ON submissions(status, image_name)');
+  await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_photos ON submissions(status, photo_before, photo_after)');
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_tg_id ON tickets(tg_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_tickets_status_random ON tickets(status, ticket_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_place ON raffle_results(place_number)');
@@ -121,6 +125,22 @@ async function initDb() {
 
   const taskCount = await get('SELECT COUNT(*) AS count FROM tasks');
   if (taskCount.count === 0) await seedTasks();
+}
+
+async function ensureSubmissionPhotoColumns() {
+  const columns = await all('PRAGMA table_info(submissions)');
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has('photo_before')) {
+    await run('ALTER TABLE submissions ADD COLUMN photo_before TEXT');
+  }
+  if (!columnNames.has('photo_after')) {
+    await run('ALTER TABLE submissions ADD COLUMN photo_after TEXT');
+  }
+
+  await run(`UPDATE submissions
+    SET photo_after = COALESCE(photo_after, image_name)
+    WHERE image_name IS NOT NULL AND (photo_after IS NULL OR photo_after = '')`);
 }
 
 async function ensureAccumulatingTicketsTable() {
@@ -676,24 +696,52 @@ app.post('/api/roll', async (req, res, next) => {
   }
 });
 
-app.post('/api/submit', upload.single('work_image'), async (req, res, next) => {
+app.post('/api/submit', upload.fields([
+  { name: 'photo_before', maxCount: 1 },
+  { name: 'photo_after', maxCount: 1 },
+  { name: 'work_image', maxCount: 1 }
+]), async (req, res, next) => {
+  const uploadedFiles = Object.values(req.files || {}).flat();
   try {
     const tgId = normalizeTgId(req.body.tg_id);
     await requireApproved(tgId);
-    if (!req.file) throw Object.assign(new Error('Загрузите фото выполненной работы'), { status: 400 });
+
+    const photoBefore = req.files?.photo_before?.[0];
+    const photoAfter = req.files?.photo_after?.[0] || req.files?.work_image?.[0];
+    if ((photoBefore && photoAfter) || (!photoBefore && !photoAfter)) {
+      throw Object.assign(new Error('Загрузите ровно одно фото: ДО или ПОСЛЕ'), { status: 400 });
+    }
 
     const active = await getActiveSubmission(tgId);
     if (!active) throw Object.assign(new Error('Сначала бросьте кубик и получите задание'), { status: 400 });
-    if (active.status === 'pending' && active.image_name) throw Object.assign(new Error('Работа уже ожидает проверки'), { status: 400 });
+    if (active.status === 'pending' && active.photo_before && active.photo_after) {
+      throw Object.assign(new Error('Пара фото уже ожидает проверки'), { status: 400 });
+    }
 
-    await run(`UPDATE submissions
-      SET image_name = ?, status = 'pending', admin_comment = '', updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`, [req.file.filename, active.id]);
+    let uploadedStage = 'before';
+    let filename = photoBefore?.filename;
+
+    if (photoBefore) {
+      await run(`UPDATE submissions
+        SET photo_before = ?, photo_after = NULL, image_name = NULL, status = 'pending', admin_comment = '', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`, [photoBefore.filename, active.id]);
+    } else {
+      if (!active.photo_before) {
+        throw Object.assign(new Error('Сначала загрузите фото ДО'), { status: 400 });
+      }
+      uploadedStage = 'after';
+      filename = photoAfter.filename;
+      await run(`UPDATE submissions
+        SET photo_after = ?, image_name = ?, status = 'pending', admin_comment = '', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`, [photoAfter.filename, photoAfter.filename, active.id]);
+    }
 
     const submission = await getActiveSubmission(tgId);
-    res.json({ ok: true, image_name: req.file.filename, submission });
+    res.json({ ok: true, uploaded_stage: uploadedStage, image_name: filename, submission });
   } catch (error) {
-    if (req.file) await fs.promises.rm(path.join(UPLOADS_DIR, req.file.filename), { force: true }).catch(() => {});
+    for (const file of uploadedFiles) {
+      await fs.promises.rm(path.join(UPLOADS_DIR, file.filename), { force: true }).catch(() => {});
+    }
     next(error);
   }
 });
@@ -814,12 +862,12 @@ app.post('/api/admin/reset-dice', async (req, res, next) => {
 app.get('/api/admin/submissions', async (req, res, next) => {
   try {
     await requireAdmin(req.query.admin_tg_id);
-    const submissions = await all(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.image_name, s.status, s.admin_comment,
+    const submissions = await all(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.image_name, s.photo_before, s.photo_after, s.status, s.admin_comment,
         u.username, t.text_task
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
       JOIN tasks t ON t.id = s.task_id
-      WHERE s.status = 'pending' AND s.image_name IS NOT NULL
+      WHERE s.status = 'pending' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
       ORDER BY s.updated_at ASC, s.id ASC`);
     res.json({ submissions });
   } catch (error) {
@@ -878,7 +926,7 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
     const submission = await get(`SELECT s.id, s.tg_id, s.cell, u.current_cell, u.username
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
-      WHERE s.id = ? AND s.status = 'pending' AND s.image_name IS NOT NULL`, [submissionId]);
+      WHERE s.id = ? AND s.status = 'pending' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL`, [submissionId]);
     if (!submission) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
 
     await run("UPDATE submissions SET status = 'approved', admin_comment = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [submissionId]);
@@ -908,7 +956,7 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
 
     const result = await run(`UPDATE submissions
       SET status = 'rejected', admin_comment = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'pending' AND image_name IS NOT NULL`, [comment, submissionId]);
+      WHERE id = ? AND status = 'pending' AND photo_before IS NOT NULL AND photo_after IS NOT NULL`, [comment, submissionId]);
     if (result.changes === 0) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {

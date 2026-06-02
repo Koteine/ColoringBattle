@@ -284,6 +284,13 @@
     .list { display: grid; gap: 12px; }
     .item { border: 1px solid var(--line); border-radius: 22px; padding: 14px; background: rgba(255,255,255,.58); }
     .item img { max-width: 220px; max-height: 220px; border-radius: 18px; object-fit: cover; border: 1px solid var(--line); }
+    .submit-step { display: grid; gap: 10px; padding: 14px; border: 1px dashed var(--line); border-radius: 22px; background: rgba(255,255,255,.42); }
+    .submit-step h3 { margin: 0; }
+    .submit-step p { margin: 0; }
+    .comparison-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .comparison-photo { display: grid; gap: 8px; }
+    .comparison-photo strong { color: var(--ink); }
+    .comparison-photo img { width: 100%; max-width: none; height: 240px; }
 
     .admin { display: grid; gap: 14px; }
     .admin-title-card { text-align: center; }
@@ -405,9 +412,11 @@
           <h2>Текущее задание</h2>
           <p id="taskText" class="task-text muted">Бросьте кубик, чтобы получить задание.</p>
           <p id="taskStatus" class="muted"></p>
-          <form id="submitForm" class="hidden">
-            <input id="workImage" name="work_image" type="file" accept="image/*">
-            <div class="actions"><button id="submitBtn" type="submit">Отправить фото</button></div>
+          <form id="submitForm" class="submit-step hidden">
+            <h3 id="submitStepTitle">Шаг 1: Зафиксируй начало работы</h3>
+            <p id="submitStepHint" class="muted">Загрузите фото ДО — незакрашенную страницу перед началом.</p>
+            <input id="workImage" name="photo_before" type="file" accept="image/*">
+            <div class="actions"><button id="submitBtn" type="submit">Отправить Фото ДО</button></div>
           </form>
           <div id="finalistLine" class="finalist hidden">🏁 Финалист! Финишные бонусные Красочки выданы.</div>
         </section>
