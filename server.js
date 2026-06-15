@@ -106,6 +106,7 @@ async function initDb() {
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
   await ensureReactionLogsTable();
+  await ensureMapConfigTable();
   await ensureAccumulatingTicketsTable();
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
@@ -134,6 +135,53 @@ async function initDb() {
       role = 'admin'`, [OWNER_TG_ID]);
 
   await seedTasks();
+  await loadMapConfig();
+}
+
+
+async function ensureMapConfigTable() {
+  await run(`CREATE TABLE IF NOT EXISTS map_config (
+    cell INTEGER PRIMARY KEY,
+    cell_type TEXT NOT NULL CHECK(cell_type IN ('trap', 'lucky')),
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  const count = await get('SELECT COUNT(*) AS count FROM map_config');
+  if (Number(count?.count || 0) !== 14) {
+    await regenerateMapConfig();
+  }
+}
+
+function pickRandomCells(count, excluded = new Set()) {
+  const cells = [];
+  while (cells.length < count) {
+    const cell = crypto.randomInt(1, 100);
+    if (excluded.has(cell) || cells.includes(cell)) continue;
+    cells.push(cell);
+  }
+  return cells;
+}
+
+async function regenerateMapConfig() {
+  const used = new Set();
+  const trapCells = pickRandomCells(7, used);
+  trapCells.forEach((cell) => used.add(cell));
+  const luckyCells = pickRandomCells(7, used);
+
+  await run('DELETE FROM map_config');
+  for (const cell of trapCells) {
+    await run("INSERT INTO map_config (cell, cell_type) VALUES (?, 'trap')", [cell]);
+  }
+  for (const cell of luckyCells) {
+    await run("INSERT INTO map_config (cell, cell_type) VALUES (?, 'lucky')", [cell]);
+  }
+  return { trapCells, luckyCells };
+}
+
+async function loadMapConfig() {
+  const rows = await all('SELECT cell, cell_type FROM map_config');
+  TRAP_CELLS = new Set(rows.filter((row) => row.cell_type === 'trap').map((row) => Number(row.cell)));
+  LUCKY_CELLS = new Set(rows.filter((row) => row.cell_type === 'lucky').map((row) => Number(row.cell)));
 }
 
 async function ensureUserRoleColumn() {
@@ -522,15 +570,28 @@ async function getActiveSubmission(tgId) {
 }
 
 async function getPlayerTickets(tgId) {
-  return all(`SELECT t.ticket_number, t.type, t.status, t.created_at, r.place_number
-    FROM tickets t
-    LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
-    WHERE t.tg_id = ?
-    ORDER BY t.ticket_number ASC`, [tgId]);
+  return all(`WITH numbered_tickets AS (
+      SELECT t.ticket_number, t.type, t.status, t.created_at, r.place_number,
+        ROW_NUMBER() OVER (PARTITION BY t.tg_id, t.type ORDER BY t.ticket_number ASC) AS ticket_order
+      FROM tickets t
+      LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
+      WHERE t.tg_id = ?
+    ), numbered_works AS (
+      SELECT s.id, s.cell, s.photo_after, s.updated_at, task.text_task,
+        ROW_NUMBER() OVER (PARTITION BY s.tg_id ORDER BY s.id ASC) AS work_order
+      FROM submissions s
+      JOIN tasks task ON task.id = s.task_id
+      WHERE s.tg_id = ? AND s.status = 'approved'
+    )
+    SELECT nt.ticket_number, nt.type, nt.status, nt.created_at, nt.place_number,
+      nw.cell, nw.text_task, nw.photo_after
+    FROM numbered_tickets nt
+    LEFT JOIN numbered_works nw ON nt.type = 'standard' AND nw.work_order = nt.ticket_order
+    ORDER BY nt.ticket_number ASC`, [tgId, tgId]);
 }
 
-const TRAP_CELLS = new Set([13, 26, 39, 52, 65, 78, 91]);
-const LUCKY_CELLS = new Set([7, 21, 35, 49, 63, 77, 88]);
+let TRAP_CELLS = new Set([13, 26, 39, 52, 65, 78, 91]);
+let LUCKY_CELLS = new Set([7, 21, 35, 49, 63, 77, 88]);
 const LUCKY_TASK_OPTIONS = [
   'Раскрасить что угодно вне заданий',
   'Взять картинку формата менее А4'
@@ -1399,6 +1460,24 @@ app.get('/api/admin/tickets-export', async (req, res, next) => {
 
 app.post('/api/admin/draw-winner', async (_req, res) => {
   res.status(410).json({ error: 'Ручной выбор победителя администратором отключен. Используйте Красочки игроков.' });
+});
+
+app.post('/api/admin/reset-round', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    await run('DELETE FROM submissions');
+    await run('DELETE FROM tickets');
+    await run('DELETE FROM reaction_logs');
+    await regenerateMapConfig();
+    await loadMapConfig();
+    await run(`UPDATE users
+      SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
+        reactions_hearts = 0, reactions_coffee = 0`);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?)', ['submissions', 'tickets']);
+    res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/admin/global-reset', async (req, res, next) => {

@@ -77,6 +77,7 @@ const els = {
   totalPrizesInput: document.getElementById('totalPrizesInput'),
   raffleConfigHint: document.getElementById('raffleConfigHint'),
   refreshExportBtn: document.getElementById('refreshExportBtn'),
+  resetRoundBtn: document.getElementById('resetRoundBtn'),
   globalResetBtn: document.getElementById('globalResetBtn'),
   confettiLayer: document.getElementById('confettiLayer'),
   toast: document.getElementById('toast')
@@ -259,8 +260,8 @@ async function renderWorkArchive() {
 }
 
 function renderPalette(tickets = []) {
-  els.paletteGrid.classList.remove('archive-mode');
-  els.paletteHint.textContent = 'Здесь хранятся все накопленные Красочки текущего игрока.';
+  els.paletteGrid.classList.add('archive-mode');
+  els.paletteHint.textContent = 'Личный архив: все ваши Красочки с заданиями и Фото ПОСЛЕ.';
   if (!tickets.length) {
     els.paletteGrid.innerHTML = '<div class="empty-state">Палитра пока пустая. Выполните первое задание, чтобы получить Красочку.</div>';
     return;
@@ -269,11 +270,22 @@ function renderPalette(tickets = []) {
   els.paletteGrid.innerHTML = '';
   for (const [index, ticket] of tickets.entries()) {
     const card = document.createElement('article');
-    card.className = 'paint-card';
-    card.style.background = paintGradients[index % paintGradients.length];
+    card.className = 'item archive-accordion player-ticket-archive';
+    const hasWork = ticket.text_task && ticket.photo_after;
+    const afterUrl = hasWork ? `/uploads/${encodeURIComponent(ticket.photo_after)}` : '';
     card.innerHTML = `
-      <span>Красочка №${escapeHtml(ticket.ticket_number)}</span>
-      <small>${ticket.type === 'bonus' ? 'Финишная бонусная' : 'За выполненное задание'}</small>
+      <button type="button" class="archive-toggle" style="background:${paintGradients[index % paintGradients.length]}">
+        <strong>Красочка №${escapeHtml(ticket.ticket_number)}</strong>
+        <small>${ticket.type === 'bonus' ? 'Бонусная' : 'За задание'}</small>
+      </button>
+      <div class="archive-panel"><div class="archive-inner">
+        ${hasWork ? `
+          <p><strong>Квест:</strong> ${escapeHtml(ticket.text_task)}</p>
+          <a class="comparison-photo player-after-photo" href="${afterUrl}" target="_blank" rel="noopener">
+            <strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ для Красочки №${escapeHtml(ticket.ticket_number)}">
+          </a>
+        ` : '<p class="muted">Эта Красочка бонусная или выдана вручную — привязанной работы нет.</p>'}
+      </div></div>
     `;
     els.paletteGrid.append(card);
   }
@@ -645,6 +657,35 @@ async function chooseLuckyTask(choice) {
   }
 }
 
+
+async function resizeImageTo720p(file) {
+  if (!file?.type?.startsWith('image/')) return file;
+  const imageUrl = URL.createObjectURL(file);
+  try {
+    const image = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Не удалось прочитать изображение'));
+      img.src = imageUrl;
+    });
+    const maxSide = Math.max(image.naturalWidth, image.naturalHeight);
+    const scale = maxSide > 1280 ? 1280 / maxSide : 1;
+    const width = Math.round(image.naturalWidth * scale);
+    const height = Math.round(image.naturalHeight * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0, width, height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+    if (!blob) throw new Error('Не удалось сжать изображение');
+    const baseName = String(file.name || 'photo').replace(/\.[^.]+$/, '');
+    return new File([blob], `${baseName}-720p.jpg`, { type: 'image/jpeg', lastModified: Date.now() });
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
+
 async function submitWork(event) {
   event.preventDefault();
   if (!els.workImage.files[0]) return showToast('Выберите картинку для отправки');
@@ -652,10 +693,12 @@ async function submitWork(event) {
   const fieldName = els.workImage.dataset.fieldName || els.workImage.name || 'photo_before';
   const formData = new FormData();
   formData.append('tg_id', tgId);
-  formData.append(fieldName, els.workImage.files[0]);
-
   try {
     els.submitBtn.disabled = true;
+    els.submitBtn.textContent = 'Сжимаем фото...';
+    const optimizedFile = await resizeImageTo720p(els.workImage.files[0]);
+    formData.append(fieldName, optimizedFile);
+    els.submitBtn.textContent = 'Отправляем...';
     const result = await api('/api/submit', { method: 'POST', body: formData });
     els.workImage.value = '';
     showToast(result.uploaded_stage === 'before' ? 'Фото ДО сохранено. Переходите к раскрашиванию.' : 'Фото ПОСЛЕ отправлено на проверку.');
@@ -664,6 +707,7 @@ async function submitWork(event) {
     showToast(error.message);
   } finally {
     els.submitBtn.disabled = false;
+    els.submitBtn.textContent = 'Отправить фото';
   }
 }
 
@@ -1326,6 +1370,20 @@ async function saveRaffleConfig(event) {
   await loadRaffle(true).catch(() => {});
 }
 
+async function resetRound() {
+  if (!window.confirm('Точно-точно сбросить раунд?')) return;
+  await api('/api/admin/reset-round', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ admin_tg_id: tgId })
+  });
+  showToast('Раунд мягко сброшен');
+  raffleLoadedAt = 0;
+  scratchers.clear();
+  await loadState();
+  await loadLeaderboard().catch(() => {});
+}
+
 async function globalReset() {
   if (!window.confirm('ТОЧНО СБРОС? Это полностью уничтожит текущий сезон!')) return;
   await api('/api/admin/global-reset', {
@@ -1355,6 +1413,7 @@ els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catc
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
+els.resetRoundBtn?.addEventListener('click', () => resetRound().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
 els.leaderboardTable?.addEventListener('click', (event) => {
   const button = event.target.closest('[data-react]');
