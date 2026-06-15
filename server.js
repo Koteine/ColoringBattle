@@ -74,7 +74,9 @@ async function initDb() {
     is_approved INTEGER DEFAULT 0,
     dice_frozen INTEGER DEFAULT 0,
     pending_lucky_cell INTEGER DEFAULT NULL,
-    role TEXT DEFAULT 'user'
+    role TEXT DEFAULT 'user',
+    reactions_hearts INTEGER DEFAULT 0,
+    reactions_coffee INTEGER DEFAULT 0
   )`);
 
   await run(`CREATE TABLE IF NOT EXISTS tasks (
@@ -102,6 +104,8 @@ async function initDb() {
   await ensureSubmissionPhotoColumns();
   await ensureUserLuckyColumn();
   await ensureUserRoleColumn();
+  await ensureUserReactionColumns();
+  await ensureReactionLogsTable();
   await ensureAccumulatingTicketsTable();
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
@@ -115,6 +119,7 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_place ON raffle_results(place_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_ticket ON raffle_results(ticket_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_news_events_created ON news_events(created_at, id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_reaction_logs_limit ON reaction_logs(from_tg_id, to_tg_id, reacted_at)');
 
   await run('DELETE FROM users WHERE tg_id = 391995937');
 
@@ -137,6 +142,28 @@ async function ensureUserRoleColumn() {
     await run("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'");
   }
   await run("UPDATE users SET role = 'admin', is_approved = 1 WHERE tg_id = ?", [OWNER_TG_ID]);
+}
+
+
+async function ensureUserReactionColumns() {
+  const columns = await all('PRAGMA table_info(users)');
+  const columnNames = new Set(columns.map((column) => column.name));
+
+  if (!columnNames.has('reactions_hearts')) {
+    await run('ALTER TABLE users ADD COLUMN reactions_hearts INTEGER DEFAULT 0');
+  }
+  if (!columnNames.has('reactions_coffee')) {
+    await run('ALTER TABLE users ADD COLUMN reactions_coffee INTEGER DEFAULT 0');
+  }
+}
+
+async function ensureReactionLogsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS reaction_logs (
+    from_tg_id TEXT,
+    to_tg_id TEXT,
+    reaction_type TEXT,
+    reacted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
 }
 
 async function ensureUserLuckyColumn() {
@@ -720,6 +747,75 @@ app.post('/api/apply', async (req, res, next) => {
     const username = normalizeUsername(req.body.username, `user_${tgId}`);
     const user = await createOrRefreshApplication(tgId, username);
     res.json({ ok: true, user, is_admin: user.role === 'admin' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+app.get('/api/game/leaderboard', async (_req, res, next) => {
+  try {
+    const players = await all(`SELECT tg_id, username, current_cell, reactions_hearts, reactions_coffee
+      FROM users
+      WHERE is_approved = 1
+        AND tg_id <> ?
+        AND COALESCE(role, 'user') <> 'moderator'
+      ORDER BY current_cell DESC, username COLLATE NOCASE ASC, tg_id ASC`, [OWNER_TG_ID]);
+    res.json({ players });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/game/react', async (req, res, next) => {
+  try {
+    const fromTgId = normalizeTgId(req.body.from_tg_id);
+    const toTgId = normalizeTgId(req.body.to_tg_id);
+    const reactionType = String(req.body.reaction_type || '').trim();
+
+    if (!['heart', 'coffee'].includes(reactionType)) {
+      throw Object.assign(new Error('Неизвестный тип реакции'), { status: 400 });
+    }
+    if (fromTgId === toTgId) {
+      throw Object.assign(new Error('Нельзя поддерживать самого себя'), { status: 400 });
+    }
+
+    const fromUser = await requireApproved(fromTgId);
+    assertPlayableUser(fromUser);
+    const toUser = await requireApproved(toTgId);
+    assertPlayableUser(toUser);
+
+    const recentReaction = await get(`SELECT reacted_at
+      FROM reaction_logs
+      WHERE from_tg_id = ? AND to_tg_id = ? AND reacted_at >= datetime('now', '-24 hours')
+      LIMIT 1`, [fromTgId, toTgId]);
+
+    if (recentReaction) {
+      res.status(429).json({
+        success: false,
+        message: 'Вы уже поддерживали этого игрока за последние 24 часа! Можно поставить только 1 реакцию (сердце или кофе) в сутки.'
+      });
+      return;
+    }
+
+    const column = reactionType === 'heart' ? 'reactions_hearts' : 'reactions_coffee';
+    await run(`UPDATE users SET ${column} = COALESCE(${column}, 0) + 1 WHERE tg_id = ?`, [toTgId]);
+    await run('INSERT INTO reaction_logs (from_tg_id, to_tg_id, reaction_type) VALUES (?, ?, ?)', [fromTgId, toTgId, reactionType]);
+
+    const updatedUser = await get('SELECT tg_id, username, current_cell, reactions_hearts, reactions_coffee FROM users WHERE tg_id = ?', [toTgId]);
+    const newCount = Number(updatedUser?.[column] || 0);
+    let bonusTicket = null;
+
+    if (newCount > 0 && newCount % 50 === 0) {
+      bonusTicket = await issueTicket(toTgId, 'bonus');
+      const handle = formatUserHandle(updatedUser.username, updatedUser.tg_id);
+      const message = reactionType === 'heart'
+        ? `🎉 Потрясающе! ${handle} накопил ${newCount} сердечек от девчонок и получает бонусную Красочку №${bonusTicket.ticket_number}!`
+        : `☕️ Какая поддержка! ${handle} получил уже ${newCount} чашек кофе от клуба и награждается бонусной Красочкой №${bonusTicket.ticket_number}!`;
+      await addNewsEvent(message, { eventType: `reaction_${reactionType}_bonus`, tgId: toTgId, ticketNumber: bonusTicket.ticket_number });
+    }
+
+    res.json({ success: true, player: updatedUser, bonus_ticket: bonusTicket });
   } catch (error) {
     next(error);
   }
@@ -1312,6 +1408,7 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM raffle_results');
     await run('DELETE FROM tickets');
     await run('DELETE FROM news_events');
+    await run('DELETE FROM reaction_logs');
     await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);
     await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events']);
     await run(`UPDATE raffle_config

@@ -19,6 +19,7 @@ const els = {
   gameScreen: document.getElementById('gameScreen'),
   paletteScreen: document.getElementById('paletteScreen'),
   raffleScreen: document.getElementById('raffleScreen'),
+  whereScreen: document.getElementById('whereScreen'),
   adminPanel: document.getElementById('adminPanel'),
   bottomNav: document.getElementById('bottomNav'),
   adminTabBtn: document.getElementById('adminTabBtn'),
@@ -52,6 +53,8 @@ const els = {
   winnerReveal: document.getElementById('winnerReveal'),
   scratchGrid: document.getElementById('scratchGrid'),
   winnersList: document.getElementById('winnersList'),
+  topReactions: document.getElementById('topReactions'),
+  leaderboardTable: document.getElementById('leaderboardTable'),
   pendingUsers: document.getElementById('pendingUsers'),
   pendingSubmissions: document.getElementById('pendingSubmissions'),
   allUsers: document.getElementById('allUsers'),
@@ -100,6 +103,7 @@ let rafflePollingTimer = null;
 let lastRaffleWinnerId = null;
 let newsPollingTimer = null;
 let countdownTimer = null;
+let leaderboardPlayers = [];
 const scratchers = new Map();
 const trapCells = new Set([13, 26, 39, 52, 65, 78, 91]);
 const luckyCells = new Set([7, 21, 35, 49, 63, 77, 88]);
@@ -166,7 +170,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, options);
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) throw new Error(data.error || data.message || `HTTP ${response.status}`);
   return data;
 }
 
@@ -186,6 +190,7 @@ function showGate(screen) {
   els.gameScreen.classList.add('hidden');
   els.paletteScreen.classList.add('hidden');
   els.raffleScreen.classList.add('hidden');
+  els.whereScreen.classList.add('hidden');
   els.adminPanel.classList.add('hidden');
   els.bottomNav.classList.add('hidden');
 }
@@ -197,6 +202,7 @@ function setActiveTab(tab) {
   els.gameScreen.classList.toggle('hidden', activeTab !== 'game');
   els.paletteScreen.classList.toggle('hidden', activeTab !== 'palette');
   els.raffleScreen.classList.toggle('hidden', activeTab !== 'raffle');
+  els.whereScreen.classList.toggle('hidden', activeTab !== 'where');
   els.adminPanel.classList.toggle('hidden', activeTab !== 'admin' || !adminAllowed);
 
   document.querySelectorAll('.nav-btn').forEach((button) => {
@@ -205,6 +211,7 @@ function setActiveTab(tab) {
 
   if (activeTab === 'raffle') startRafflePolling(true);
   else stopRafflePolling();
+  if (activeTab === 'where') loadLeaderboard().catch((error) => showToast(error.message));
   if (activeTab === 'admin' && adminAllowed) loadAdminPanel().catch((error) => showToast(error.message));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -272,6 +279,86 @@ function renderPalette(tickets = []) {
   }
 }
 
+
+function formatHandle(username, fallbackId = '') {
+  const clean = String(username || '').replace(/^@/, '').trim();
+  return clean ? `@${clean}` : `ID ${fallbackId}`;
+}
+
+function renderLeaderboard(players = []) {
+  leaderboardPlayers = players;
+  const sortedByReactions = [...players]
+    .map((player) => ({ ...player, total_reactions: Number(player.reactions_hearts || 0) + Number(player.reactions_coffee || 0) }))
+    .filter((player) => player.total_reactions > 0)
+    .sort((a, b) => b.total_reactions - a.total_reactions || Number(b.current_cell || 0) - Number(a.current_cell || 0))
+    .slice(0, 3);
+
+  els.topReactions.innerHTML = sortedByReactions.length ? '' : '<div class="empty-state">Топ поддержки появится после первых реакций.</div>';
+  sortedByReactions.forEach((player, index) => {
+    const card = document.createElement('article');
+    card.className = 'reaction-champion';
+    card.innerHTML = `
+      <div class="place">${['🥇', '🥈', '🥉'][index]}</div>
+      <strong class="glow-name">${escapeHtml(formatHandle(player.username, player.tg_id))}</strong>
+      <p class="muted">${player.total_reactions} реакций · клетка ${Number(player.current_cell || 0)}</p>
+    `;
+    els.topReactions.append(card);
+  });
+
+  if (!players.length) {
+    els.leaderboardTable.innerHTML = '<div class="empty-state">Одобренных игроков пока нет.</div>';
+    return;
+  }
+
+  const reactionLeaders = new Set(sortedByReactions.map((player) => String(player.tg_id)));
+  els.leaderboardTable.innerHTML = `
+    <table class="where-table">
+      <thead><tr><th>#</th><th>Игрок</th><th>Клетка</th><th>Поддержка</th><th>Реакция</th></tr></thead>
+      <tbody>${players.map((player, index) => {
+        const isMe = String(player.tg_id) === String(tgId);
+        const hearts = Number(player.reactions_hearts || 0);
+        const coffee = Number(player.reactions_coffee || 0);
+        return `<tr class="${isMe ? 'is-me' : ''}" data-player-id="${escapeHtml(player.tg_id)}">
+          <td>${index + 1}</td>
+          <td><strong class="${reactionLeaders.has(String(player.tg_id)) ? 'glow-name' : ''}">${escapeHtml(formatHandle(player.username, player.tg_id))}</strong>${isMe ? ' <span class="muted">это вы</span>' : ''}</td>
+          <td>${Number(player.current_cell || 0)}/100</td>
+          <td><span class="reaction-counts"><span data-counter="heart">💖 ${hearts}</span><span data-counter="coffee">☕ ${coffee}</span></span></td>
+          <td>${isMe ? '<span class="muted">—</span>' : `<span class="reaction-actions"><button class="reaction-btn" type="button" data-react="heart" data-to-id="${escapeHtml(player.tg_id)}">💖</button><button class="reaction-btn" type="button" data-react="coffee" data-to-id="${escapeHtml(player.tg_id)}">☕</button></span>`}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+}
+
+async function loadLeaderboard() {
+  els.leaderboardTable.innerHTML = '<div class="empty-state">Загружаем игроков...</div>';
+  const data = await api('/api/game/leaderboard');
+  renderLeaderboard(data.players || []);
+}
+
+async function sendReaction(toTgId, reactionType, button) {
+  if (!tgId) return showToast('Не найден Telegram ID');
+  button.disabled = true;
+  try {
+    const data = await api('/api/game/react', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from_tg_id: tgId, to_tg_id: toTgId, reaction_type: reactionType })
+    });
+    const index = leaderboardPlayers.findIndex((player) => String(player.tg_id) === String(toTgId));
+    if (index >= 0 && data.player) {
+      leaderboardPlayers[index] = { ...leaderboardPlayers[index], ...data.player };
+      renderLeaderboard(leaderboardPlayers);
+    } else {
+      await loadLeaderboard();
+    }
+    showToast(data.bonus_ticket ? `Поддержка засчитана! Игрок получил Красочку №${data.bonus_ticket.ticket_number}.` : 'Поддержка засчитана!');
+    loadNews().catch(() => {});
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
 
 function renderNews(events = []) {
   if (!els.newsTrack) return;
@@ -1269,6 +1356,11 @@ els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).cat
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
+els.leaderboardTable?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-react]');
+  if (!button) return;
+  sendReaction(button.dataset.toId, button.dataset.react, button);
+});
 
 els.paletteGrid.addEventListener('click', (event) => {
   const button = event.target.closest('.archive-toggle');
