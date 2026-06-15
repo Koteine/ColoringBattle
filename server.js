@@ -222,7 +222,8 @@ async function ensureRaffleConfigTable() {
 }
 
 async function ensureRaffleResultsTable() {
-  await run(`CREATE TABLE IF NOT EXISTS raffle_results (
+  const existing = await get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'raffle_results'");
+  const desiredSql = `CREATE TABLE raffle_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     place_number INTEGER NOT NULL UNIQUE,
     ticket_number INTEGER NOT NULL UNIQUE,
@@ -231,7 +232,30 @@ async function ensureRaffleResultsTable() {
     drawn_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (ticket_number) REFERENCES tickets(ticket_number),
     FOREIGN KEY (tg_id) REFERENCES users(tg_id)
-  )`);
+  )`;
+
+  if (!existing) {
+    await run(desiredSql);
+    return;
+  }
+
+  const columns = await all('PRAGMA table_info(raffle_results)');
+  const columnNames = new Set(columns.map((column) => column.name));
+  const hasPlaceNumber = columnNames.has('place_number');
+  const hasTicketNumber = columnNames.has('ticket_number');
+
+  if (hasPlaceNumber && hasTicketNumber && String(existing.sql || '').toLowerCase().includes('place_number integer not null unique')) return;
+
+  await run('ALTER TABLE raffle_results RENAME TO raffle_results_old');
+  await run(desiredSql);
+  const ticketExpression = hasTicketNumber ? 'ticket_number' : 'ticket_id';
+  await run(`INSERT OR IGNORE INTO raffle_results (place_number, ticket_number, tg_id, username, drawn_at)
+    SELECT ROW_NUMBER() OVER (ORDER BY COALESCE(drawn_at, CURRENT_TIMESTAMP), id),
+      ${ticketExpression}, tg_id, COALESCE(username, ''), COALESCE(drawn_at, CURRENT_TIMESTAMP)
+    FROM raffle_results_old
+    WHERE ${ticketExpression} IS NOT NULL AND tg_id IS NOT NULL
+    ORDER BY COALESCE(drawn_at, CURRENT_TIMESTAMP), id`);
+  await run('DROP TABLE raffle_results_old');
 }
 
 
@@ -471,7 +495,11 @@ async function getActiveSubmission(tgId) {
 }
 
 async function getPlayerTickets(tgId) {
-  return all('SELECT ticket_number, type, status, created_at FROM tickets WHERE tg_id = ? ORDER BY ticket_number ASC', [tgId]);
+  return all(`SELECT t.ticket_number, t.type, t.status, t.created_at, r.place_number
+    FROM tickets t
+    LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
+    WHERE t.tg_id = ?
+    ORDER BY t.ticket_number ASC`, [tgId]);
 }
 
 const TRAP_CELLS = new Set([13, 26, 39, 52, 65, 78, 91]);
@@ -590,7 +618,8 @@ async function getRaffleStatus() {
     active_tickets: stats?.active_tickets || 0,
     winner_tickets: stats?.winner_tickets || 0,
     scratched_tickets: stats?.scratched_tickets || 0,
-    remaining_prizes: Number(config?.remaining_prizes || 0)
+    remaining_prizes: Math.max(0, Number(config?.total_prizes || 0) - Number(results?.length || 0)),
+    is_sold_out: Number(results?.length || 0) >= Number(config?.total_prizes || 0) && Number(config?.total_prizes || 0) > 0
   };
 }
 
@@ -598,11 +627,19 @@ async function scratchTicket({ tgId, ticketNumber }) {
   const user = await requireApproved(tgId);
   assertPlayableUser(user);
   await run('BEGIN IMMEDIATE TRANSACTION');
+  let winningEvent = null;
   try {
     const config = await getRaffleConfig();
     const windowState = buildRaffleWindow(config);
     if (!windowState.is_active) {
       throw Object.assign(new Error('Красочки сейчас недоступны: проверьте время старта и финиша'), { status: 403 });
+    }
+
+    const totalPrizes = Number(config?.total_prizes || 0);
+    const awarded = await get('SELECT COUNT(*) AS count FROM raffle_results');
+    const awardedCount = Number(awarded?.count || 0);
+    if (totalPrizes <= 0 || awardedCount >= totalPrizes) {
+      throw Object.assign(new Error('Лотерея завершена, все призы разыграны'), { status: 410 });
     }
 
     const ticket = await get(`SELECT ticket_number, tg_id, type, status
@@ -611,45 +648,38 @@ async function scratchTicket({ tgId, ticketNumber }) {
     if (!ticket) throw Object.assign(new Error('Красочка не найдена у текущего игрока'), { status: 404 });
     if (ticket.status !== 'active') throw Object.assign(new Error('Эта Красочка уже стерта'), { status: 400 });
 
-    const counters = await get(`SELECT
-        COUNT(*) AS active_tickets,
-        (SELECT remaining_prizes FROM raffle_config WHERE id = 1) AS remaining_prizes
-      FROM tickets
-      WHERE status = 'active'`);
+    const counters = await get(`SELECT COUNT(*) AS active_tickets FROM tickets WHERE status = 'active'`);
     const activeTickets = Number(counters?.active_tickets || 0);
-    const remainingPrizes = Number(counters?.remaining_prizes || 0);
+    const remainingPrizes = Math.max(0, totalPrizes - awardedCount);
     if (activeTickets <= 0) throw Object.assign(new Error('Активных Красочек не осталось'), { status: 400 });
 
-    const wins = remainingPrizes > 0 && (remainingPrizes >= activeTickets || crypto.randomInt(activeTickets) < remainingPrizes);
+    const wins = remainingPrizes >= activeTickets || crypto.randomInt(activeTickets) < remainingPrizes;
 
     if (wins) {
-      const place = await get('SELECT COALESCE(MAX(place_number), 0) + 1 AS place_number FROM raffle_results');
-      const placeNumber = Number(place?.place_number || 1);
+      const placeNumber = awardedCount + 1;
       await run("UPDATE tickets SET status = 'winner' WHERE ticket_number = ? AND status = 'active'", [ticketNumber]);
       await run(`UPDATE raffle_config
-        SET remaining_prizes = MAX(remaining_prizes - 1, 0), updated_at = CURRENT_TIMESTAMP
-        WHERE id = 1`, []);
+        SET remaining_prizes = MAX(total_prizes - ?, 0), updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1`, [placeNumber]);
       const inserted = await run(`INSERT INTO raffle_results (place_number, ticket_number, tg_id, username)
         VALUES (?, ?, ?, ?)`, [placeNumber, ticketNumber, tgId, user.username || '']);
+      winningEvent = {
+        id: inserted.id,
+        place_number: placeNumber,
+        ticket_number: ticketNumber,
+        tg_id: tgId,
+        username: user.username || '',
+        drawn_at: new Date().toISOString()
+      };
       await run('COMMIT');
 
-      await addNewsEvent(`🎉 Юзер ${formatUserHandle(user.username, user.tg_id)} нашел МОНЕТКУ и выиграл приз!`, {
+      await addNewsEvent(`🏆 Место №${placeNumber} — Красочка номер ${ticketNumber}, игрок ${formatUserHandle(user.username, user.tg_id)}`, {
         eventType: 'scratch_win',
         tgId: user.tg_id,
         ticketNumber
       });
 
-      return {
-        result: 'win',
-        winner: {
-          id: inserted.id,
-          place_number: placeNumber,
-          ticket_number: ticketNumber,
-          tg_id: tgId,
-          username: user.username || '',
-          drawn_at: new Date().toISOString()
-        }
-      };
+      return { result: 'win', winner: winningEvent };
     }
 
     await run("UPDATE tickets SET status = 'scratched' WHERE ticket_number = ? AND status = 'active'", [ticketNumber]);
@@ -660,6 +690,7 @@ async function scratchTicket({ tgId, ticketNumber }) {
     throw error;
   }
 }
+
 
 app.get('/api/me/:tgId', async (req, res, next) => {
   try {
@@ -1014,6 +1045,12 @@ app.post('/api/admin/change-cell', async (req, res, next) => {
     }
     const result = await run('UPDATE users SET current_cell = ?, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
+    const user = await get('SELECT tg_id, username FROM users WHERE tg_id = ?', [tgId]);
+    await addNewsEvent(`🔧 Модератор переместил игрока ${formatUserHandle(user?.username, tgId)} на клетку ${currentCell}`, {
+      eventType: 'admin_change_cell',
+      tgId,
+      ticketNumber: null
+    });
     res.json({ ok: true, current_cell: currentCell });
   } catch (error) {
     next(error);
@@ -1053,7 +1090,10 @@ app.get('/api/admin/work-archive', async (req, res, next) => {
   try {
     await requireModeratorOrAdmin(req.query.admin_tg_id);
     const rows = await all(`SELECT s.id, s.tg_id, s.cell, s.photo_before, s.photo_after, s.updated_at,
-        u.username, t.text_task
+        u.username, u.current_cell, u.dice_frozen,
+        (SELECT COUNT(*) FROM submissions approved WHERE approved.tg_id = s.tg_id AND approved.status = 'approved') AS approved_submissions_count,
+        (SELECT COUNT(*) FROM tickets active_ticket WHERE active_ticket.tg_id = s.tg_id AND active_ticket.status = 'active') AS active_tickets_count,
+        t.text_task
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
       JOIN tasks t ON t.id = s.task_id
@@ -1063,7 +1103,15 @@ app.get('/api/admin/work-archive', async (req, res, next) => {
     const byId = new Map();
     for (const row of rows) {
       if (!byId.has(row.tg_id)) {
-        const player = { tg_id: row.tg_id, username: row.username, works: [] };
+        const player = {
+          tg_id: row.tg_id,
+          username: row.username,
+          current_cell: row.current_cell,
+          dice_frozen: row.dice_frozen,
+          approved_submissions_count: row.approved_submissions_count,
+          active_tickets_count: row.active_tickets_count,
+          works: []
+        };
         byId.set(row.tg_id, player);
         players.push(player);
       }
@@ -1153,6 +1201,11 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
       issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
       issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
     }
+    await addNewsEvent(`⚡️ Модератор одобрил работу ${formatUserHandle(userAfterApproval.username, userAfterApproval.tg_id)} на ${Number(submission.cell || 0)} клетке! Выдана Красочка №${issuedTickets[0].ticket_number}`, {
+      eventType: 'admin_approve_submission',
+      tgId: userAfterApproval.tg_id,
+      ticketNumber: issuedTickets[0].ticket_number
+    });
     await addApprovalNewsEvents(userAfterApproval, issuedTickets);
 
     res.json({ ok: true, issuedTickets, is_finalist: Number(userAfterApproval.current_cell) >= 100 });
@@ -1200,7 +1253,7 @@ app.post('/api/admin/grant-ticket', async (req, res, next) => {
     const user = await get('SELECT tg_id, username FROM users WHERE tg_id = ?', [tgId]);
     if (!user) throw Object.assign(new Error('Игрок с таким Telegram ID не найден'), { status: 404 });
     const ticket = await issueTicket(tgId, 'standard');
-    await addNewsEvent(`🎨 Красочка №${ticket.ticket_number} досталась ${formatUserHandle(user.username, user.tg_id)}!`, {
+    await addNewsEvent(`🎁 Модератор вручную начислил бонусную Красочку №${ticket.ticket_number} игроку ${formatUserHandle(user.username, user.tg_id)}!`, {
       eventType: 'manual_ticket',
       tgId: user.tg_id,
       ticketNumber: ticket.ticket_number
