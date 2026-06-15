@@ -475,6 +475,7 @@
       <section class="card">
         <h2>Моя Палитра</h2>
         <p id="paletteHint" class="muted">Здесь хранятся все накопленные Красочки текущего игрока.</p>
+        <div id="pendingSubmissions" class="list"></div>
         <div id="paletteGrid" class="palette-grid"></div>
       </section>
     </section>
@@ -536,20 +537,12 @@
         </div>
       </section>
 
-      <section class="card admin-accordion">
-        <button class="admin-accordion-toggle" type="button" aria-expanded="false">Проверка работ</button>
-        <div class="admin-accordion-panel">
-          <div class="admin-accordion-inner admin-section-body">
-            <div id="pendingSubmissions" class="list"></div>
-          </div>
-        </div>
-      </section>
 
       <section class="card admin-accordion owner-only">
         <button class="admin-accordion-toggle" type="button" aria-expanded="false">Игроки и управление</button>
         <div class="admin-accordion-panel">
           <div class="admin-accordion-inner admin-section-body">
-            <form id="moderatorForm" class="task-admin-form"><label class="muted">Назначить помощника<input id="moderatorTgId" type="text" inputmode="numeric" placeholder="Telegram ID помощника"></label><div class="actions"><button type="submit">Выдать права модератора</button></div></form><div id="allUsers" class="list"></div>
+            <div id="allUsers" class="list"></div>
           </div>
         </div>
       </section>
