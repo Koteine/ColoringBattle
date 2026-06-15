@@ -1467,13 +1467,14 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await requireAdmin(req.body.admin_tg_id);
     await run('DELETE FROM submissions');
     await run('DELETE FROM tickets');
+    await run('DELETE FROM raffle_results');
     await run('DELETE FROM reaction_logs');
     await regenerateMapConfig();
     await loadMapConfig();
     await run(`UPDATE users
       SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
         reactions_hearts = 0, reactions_coffee = 0`);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?)', ['submissions', 'tickets']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?)', ['submissions', 'tickets', 'raffle_results']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
   } catch (error) {
     next(error);
