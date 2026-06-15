@@ -343,7 +343,7 @@
       min-height: 70px;
       transform: translateX(-50%);
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 8px;
       padding: 10px;
       border: 1px solid var(--line);
@@ -357,10 +357,28 @@
     .nav-btn span { font-size: 22px; line-height: 1; }
     .nav-btn.active { color: #3b2342; background: linear-gradient(135deg, rgba(255,214,165,.82), rgba(255,175,204,.76), rgba(189,224,254,.72)); }
 
+
+    .where-hero { overflow: hidden; position: relative; }
+    .where-hero::after { content: '💖 ☕ 🎨'; position: absolute; right: 18px; top: 18px; opacity: .18; font-size: 46px; transform: rotate(8deg); }
+    .top-reactions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+    .reaction-champion { border-radius: 24px; padding: 14px; background: linear-gradient(135deg, rgba(255,245,190,.78), rgba(255,202,212,.62)); border: 1px solid rgba(255,255,255,.76); box-shadow: 0 16px 36px rgba(166,120,34,.16); }
+    .reaction-champion .place { font-size: 24px; }
+    .glow-name { font-weight: 1000; color: #6d3f00; text-shadow: 0 0 8px rgba(255,213,79,.85), 0 0 18px rgba(255,175,204,.65), 0 0 28px rgba(189,224,254,.5); }
+    .where-table-wrap { overflow-x: auto; border-radius: 24px; border: 1px solid var(--line); background: rgba(255,255,255,.42); }
+    .where-table { width: 100%; border-collapse: collapse; min-width: 620px; }
+    .where-table th, .where-table td { padding: 13px 12px; text-align: left; border-bottom: 1px solid rgba(123,107,131,.14); }
+    .where-table th { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .03em; }
+    .where-table tr:last-child td { border-bottom: 0; }
+    .where-table tr.is-me { background: rgba(189,224,254,.32); }
+    .reaction-counts { display: inline-flex; gap: 10px; font-weight: 950; }
+    .reaction-actions { display: inline-flex; gap: 8px; }
+    .reaction-btn { min-width: 42px; padding: 8px 10px; border-radius: 16px; background: rgba(255,255,255,.68); border: 1px solid var(--line); box-shadow: 0 10px 20px rgba(97,70,120,.12); }
+    .reaction-btn:disabled { opacity: .55; cursor: wait; }
+
     .toast { position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px); transform: translateX(-50%); max-width: min(680px, calc(100% - 24px)); padding: 14px 18px; border-radius: 18px; background: #3b2342; border: 1px solid rgba(255,255,255,.24); color: white; box-shadow: 0 20px 60px rgba(97,70,120,.35); z-index: 30; }
 
     @media (max-width: 800px) {
-      .stats-grid, .game-grid, .raffle-hero, .ticket-admin, .lottery-form { grid-template-columns: 1fr; }
+      .stats-grid, .game-grid, .raffle-hero, .ticket-admin, .lottery-form, .top-reactions { grid-template-columns: 1fr; }
       .player-tools { grid-template-columns: 1fr; }
       .app { padding: 12px; }
       .card { padding: 16px; border-radius: 26px; }
@@ -487,6 +505,20 @@
       </section>
     </section>
 
+
+    <section id="whereScreen" class="screen hidden" data-screen="where">
+      <section class="card where-hero">
+        <span class="soft-chip">📍 Кто где</span>
+        <h2>Общий прогресс игроков</h2>
+        <p class="muted">Смотрите, кто на какой клетке, и поддерживайте друг друга сердечками или чашкой кофе раз в сутки.</p>
+        <div id="topReactions" class="top-reactions"></div>
+      </section>
+      <section class="card">
+        <h2>Таблица игроков</h2>
+        <div id="leaderboardTable" class="where-table-wrap"><div class="empty-state">Загружаем игроков...</div></div>
+      </section>
+    </section>
+
     <section id="adminPanel" class="admin hidden" data-screen="admin">
       <section class="card admin-title-card">
         <h2>Админка</h2>
@@ -594,6 +626,7 @@
     <button class="nav-btn active" type="button" data-tab="game"><span>🎲</span>Игра</button>
     <button class="nav-btn" type="button" data-tab="palette"><span>🎨</span>Моя Палитра</button>
     <button class="nav-btn" type="button" data-tab="raffle"><span>🎟</span>Розыгрыш</button>
+    <button class="nav-btn" type="button" data-tab="where"><span>📍</span>Кто где</button>
     <button id="adminTabBtn" class="nav-btn hidden" type="button" data-tab="admin"><span>🛠</span>Админка</button>
   </nav>
 
