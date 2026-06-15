@@ -56,6 +56,12 @@ const els = {
   pendingSubmissions: document.getElementById('pendingSubmissions'),
   allUsers: document.getElementById('allUsers'),
   ticketRegistry: document.getElementById('ticketRegistry'),
+  roleNotice: document.getElementById('roleNotice'),
+  gamePlayCard: document.getElementById('gamePlayCard'),
+  taskCard: document.getElementById('taskCard'),
+  paletteHint: document.getElementById('paletteHint'),
+  moderatorForm: document.getElementById('moderatorForm'),
+  moderatorTgId: document.getElementById('moderatorTgId'),
   taskAdminForm: document.getElementById('taskAdminForm'),
   taskAdminText: document.getElementById('taskAdminText'),
   taskAdminList: document.getElementById('taskAdminList'),
@@ -119,8 +125,20 @@ function isOwnerId(id) {
   return String(id || '').trim() === OWNER_TG_ID;
 }
 
+function isModerator(user) {
+  return user?.role === 'moderator';
+}
+
+function isPrivilegedUser(user) {
+  return hasAdminAccess(user) || isModerator(user);
+}
+
 function hasAdminAccess(user) {
-  return isOwnerId(tgId) || isOwnerId(user?.tg_id);
+  return isOwnerId(tgId) || isOwnerId(user?.tg_id) || user?.role === 'admin';
+}
+
+function hasStaffAccess(user) {
+  return hasAdminAccess(user) || isModerator(user);
 }
 
 function canEnterApp(user) {
@@ -173,7 +191,7 @@ function showGate(screen) {
 }
 
 function setActiveTab(tab) {
-  const adminAllowed = hasAdminAccess(state?.user);
+  const adminAllowed = hasStaffAccess(state?.user);
   activeTab = tab === 'admin' && !adminAllowed ? 'game' : tab;
 
   els.gameScreen.classList.toggle('hidden', activeTab !== 'game');
@@ -195,7 +213,37 @@ function updateDiceFace(value) {
   els.diceFace.dataset.value = String(Math.max(1, Math.min(6, Number(value || 1))));
 }
 
+async function renderWorkArchive() {
+  els.paletteGrid.classList.add('archive-mode');
+  els.paletteHint.textContent = 'Архив выполненных работ: одобренные клетки игроков с фотографиями ДО и ПОСЛЕ.';
+  els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем архив...</div>';
+  const data = await api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`);
+  if (!data.players?.length) {
+    els.paletteGrid.innerHTML = '<div class="empty-state">Одобренных работ пока нет.</div>';
+    return;
+  }
+  els.paletteGrid.innerHTML = '';
+  for (const player of data.players) {
+    const playerNode = document.createElement('article');
+    playerNode.className = 'item archive-accordion';
+    const username = player.username ? `@${String(player.username).replace(/^@/, '')}` : 'Без ника';
+    playerNode.innerHTML = `<button type="button" class="archive-toggle"><strong>${escapeHtml(username)} (ID: ${escapeHtml(player.tg_id)})</strong></button><div class="archive-panel"><div class="archive-inner"></div></div>`;
+    const inner = playerNode.querySelector('.archive-inner');
+    for (const work of player.works || []) {
+      const workNode = document.createElement('article');
+      workNode.className = 'item archive-accordion archive-work';
+      const beforeUrl = `/uploads/${encodeURIComponent(work.photo_before)}`;
+      const afterUrl = `/uploads/${encodeURIComponent(work.photo_after)}`;
+      workNode.innerHTML = `<button type="button" class="archive-toggle"><strong>Клетка ${escapeHtml(work.cell)} — ${escapeHtml(work.text_task)}</strong></button><div class="archive-panel"><div class="archive-inner archive-photos"><div class="comparison-grid"><a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a><a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a></div></div></div>`;
+      inner.append(workNode);
+    }
+    els.paletteGrid.append(playerNode);
+  }
+}
+
 function renderPalette(tickets = []) {
+  els.paletteGrid.classList.remove('archive-mode');
+  els.paletteHint.textContent = 'Здесь хранятся все накопленные Красочки текущего игрока.';
   if (!tickets.length) {
     els.paletteGrid.innerHTML = '<div class="empty-state">Палитра пока пустая. Выполните первое задание, чтобы получить Красочку.</div>';
     return;
@@ -322,7 +370,7 @@ function render() {
   }
 
   const { user, activeSubmission, tickets, is_finalist: isFinalist } = state;
-  const adminAccess = hasAdminAccess(user);
+  const adminAccess = hasStaffAccess(user);
 
   if (!canEnterApp(user)) {
     showGate('waiting');
@@ -334,25 +382,31 @@ function render() {
   els.waitingScreen.classList.add('hidden');
   els.bottomNav.classList.remove('hidden');
   els.adminTabBtn.classList.toggle('hidden', !adminAccess);
+  document.querySelectorAll('.owner-only').forEach((el) => el.classList.toggle('hidden', !hasAdminAccess(user)));
+  const roleBlocked = isPrivilegedUser(user);
+  els.roleNotice.classList.toggle('hidden', !roleBlocked);
+  els.gamePlayCard.classList.toggle('hidden', roleBlocked);
+  els.taskCard.classList.toggle('hidden', roleBlocked);
   startNewsPolling();
 
   els.username.textContent = user.username || `ID ${user.tg_id}`;
   els.currentCell.textContent = `${user.current_cell}/100`;
   els.diceState.textContent = Number(user.dice_frozen) === 1 ? 'Ждёт проверку' : 'Готов';
   drawProgress(user.current_cell);
-  renderTask(activeSubmission);
+  if (!roleBlocked) renderTask(activeSubmission);
   if (!activeSubmission && state.pendingLucky) {
     els.taskText.textContent = '🎉 Бонусная клетка! Выберите одно из двух условий.';
     els.taskText.classList.remove('muted');
     els.taskStatus.textContent = `Клетка ${state.pendingLucky.cell}: после выбора откроется стандартная форма загрузки.`;
     els.luckyChoice.classList.remove('hidden');
   }
-  renderPalette(tickets);
+  if (roleBlocked) renderWorkArchive().catch((error) => { els.paletteGrid.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`; });
+  else renderPalette(tickets);
 
   const frozen = Number(user.dice_frozen) === 1;
   const finished = Number(user.current_cell) >= 100;
-  els.rollBtn.disabled = frozen || finished || isRolling;
-  els.rollBtn.classList.toggle('frozen', frozen || finished);
+  els.rollBtn.disabled = roleBlocked || frozen || finished || isRolling;
+  els.rollBtn.classList.toggle('frozen', roleBlocked || frozen || finished);
   els.diceHint.textContent = finished
     ? 'Вы достигли 100-й клетки. Поздравляем!'
     : frozen
@@ -763,6 +817,15 @@ async function loadRaffle(force = true, animateNew = false) {
   if (!force && now - raffleLoadedAt < 2500) return;
   const data = await api('/api/raffle/status');
   raffleLoadedAt = now;
+  if (!force) {
+    renderWinners(data.results || []);
+    const latest = data.latest_winner || null;
+    if (latest && latest.id !== lastRaffleWinnerId) {
+      lastRaffleWinnerId = latest.id;
+      if (animateNew) launchConfetti();
+    }
+    return;
+  }
 
   els.totalTickets.textContent = data.total_tickets || 0;
   els.activeTickets.textContent = data.active_tickets || 0;
@@ -783,7 +846,7 @@ async function loadRaffle(force = true, animateNew = false) {
     els.winnerReveal.textContent = 'Окно Красочек закрыто.';
   }
 
-  renderScratchCards(state?.tickets || [], Boolean(data.is_active));
+  if (force) renderScratchCards(state?.tickets || [], Boolean(data.is_active));
 
   const latest = data.latest_winner || null;
   if (latest && latest.id !== lastRaffleWinnerId) {
@@ -796,7 +859,7 @@ function startRafflePolling(runImmediately = false) {
   if (runImmediately) loadRaffle(true, true).catch((error) => showToast(error.message));
   if (rafflePollingTimer) return;
   rafflePollingTimer = window.setInterval(() => {
-    if (activeTab === 'raffle') loadRaffle(true, true).catch((error) => console.warn('Raffle polling error:', error.message));
+    if (activeTab === 'raffle') loadRaffle(false, true).catch((error) => console.warn('Raffle polling error:', error.message));
   }, 3000);
 }
 
@@ -808,19 +871,19 @@ function stopRafflePolling() {
 
 async function loadAdminPanel() {
   const adminParam = `admin_tg_id=${encodeURIComponent(tgId)}`;
-  const [pendingUsers, users, submissions, exportData, ticketData, raffleConfig, taskData] = await Promise.all([
+  const submissions = await api(`/api/admin/submissions?${adminParam}`);
+  renderPendingSubmissions(submissions.submissions);
+  if (!hasAdminAccess(state?.user)) return;
+  const [pendingUsers, users, exportData, ticketData, raffleConfig, taskData] = await Promise.all([
     api(`/api/admin/pending-users?${adminParam}`),
     api(`/api/admin/users?${adminParam}`),
-    api(`/api/admin/submissions?${adminParam}`),
     api(`/api/admin/tickets-export?${adminParam}`),
     api(`/api/admin/tickets?${adminParam}`),
     api(`/api/admin/raffle-config?${adminParam}`),
     api(`/api/admin/tasks?${adminParam}`)
   ]);
-
   renderPendingUsers(pendingUsers.users);
   renderAllUsers(users.users);
-  renderPendingSubmissions(submissions.submissions);
   renderTicketRegistry(ticketData.tickets || []);
   renderAdminTasks(taskData.tasks || []);
   els.ticketsExport.value = exportData.text || '';
@@ -1107,6 +1170,20 @@ async function addAdminTask(event) {
   await loadAdminPanel();
 }
 
+async function grantModerator(event) {
+  event.preventDefault();
+  const targetTgId = els.moderatorTgId.value.trim();
+  if (!targetTgId) return showToast('Введите Telegram ID помощника');
+  await api('/api/admin/grant-moderator', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ admin_tg_id: tgId, tg_id: targetTgId })
+  });
+  els.moderatorTgId.value = '';
+  showToast('Права модератора выданы');
+  await loadAdminPanel();
+}
+
 async function grantTicket(event) {
   event.preventDefault();
   const targetTgId = els.grantTicketTgId.value.trim();
@@ -1172,11 +1249,19 @@ els.luckyChoice.addEventListener('click', (event) => {
   if (button) chooseLuckyTask(button.dataset.luckyChoice).catch((error) => showToast(error.message));
 });
 els.submitForm.addEventListener('submit', submitWork);
+els.moderatorForm?.addEventListener('submit', (event) => grantModerator(event).catch((error) => showToast(error.message)));
 els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catch((error) => showToast(error.message)));
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
 els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
+
+els.paletteGrid.addEventListener('click', (event) => {
+  const button = event.target.closest('.archive-toggle');
+  if (!button) return;
+  const section = button.closest('.archive-accordion');
+  section?.classList.toggle('open');
+});
 
 document.querySelectorAll('.admin-accordion-toggle').forEach((button) => {
   button.addEventListener('click', () => {

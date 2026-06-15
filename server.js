@@ -101,6 +101,7 @@ async function initDb() {
 
   await ensureSubmissionPhotoColumns();
   await ensureUserLuckyColumn();
+  await ensureUserRoleColumn();
   await ensureAccumulatingTicketsTable();
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
@@ -128,6 +129,14 @@ async function initDb() {
       role = 'admin'`, [OWNER_TG_ID]);
 
   await seedTasks();
+}
+
+async function ensureUserRoleColumn() {
+  const columns = await all('PRAGMA table_info(users)');
+  if (!columns.some((column) => column.name === 'role')) {
+    await run("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'");
+  }
+  await run("UPDATE users SET role = 'admin', is_approved = 1 WHERE tg_id = ?", [OWNER_TG_ID]);
 }
 
 async function ensureUserLuckyColumn() {
@@ -366,13 +375,35 @@ async function requireApproved(tgId) {
   return user;
 }
 
+function isPrivilegedRole(user) {
+  return user?.role === 'admin' || user?.role === 'moderator';
+}
+
+function assertPlayableUser(user) {
+  if (isPrivilegedRole(user) || ADMIN_TG_IDS.has(String(user?.tg_id || ''))) {
+    throw Object.assign(new Error('Игровой процесс для администратора/модератора недоступен'), { status: 403 });
+  }
+}
+
 async function requireAdmin(tgId) {
   const normalized = normalizeTgId(tgId);
   if (!ADMIN_TG_IDS.has(normalized)) {
-    throw Object.assign(new Error('Доступ только для администратора'), { status: 403 });
+    throw Object.assign(new Error('Доступ только для главного администратора'), { status: 403 });
   }
   await createOrRefreshApplication(normalized, 'Owner');
   return requireApproved(normalized);
+}
+
+async function requireModeratorOrAdmin(tgId) {
+  const normalized = normalizeTgId(tgId);
+  if (ADMIN_TG_IDS.has(normalized)) {
+    await createOrRefreshApplication(normalized, 'Owner');
+  }
+  const user = await requireApproved(normalized);
+  if (!isPrivilegedRole(user)) {
+    throw Object.assign(new Error('Доступ только для администратора или модератора'), { status: 403 });
+  }
+  return user;
 }
 
 
@@ -565,6 +596,7 @@ async function getRaffleStatus() {
 
 async function scratchTicket({ tgId, ticketNumber }) {
   const user = await requireApproved(tgId);
+  assertPlayableUser(user);
   await run('BEGIN IMMEDIATE TRANSACTION');
   try {
     const config = await getRaffleConfig();
@@ -641,11 +673,11 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     }
 
     const activeSubmission = Number(user.is_approved) === 1 ? await getActiveSubmission(tgId) : null;
-    const tickets = Number(user.is_approved) === 1 ? await getPlayerTickets(tgId) : [];
+    const tickets = Number(user.is_approved) === 1 && !isPrivilegedRole(user) ? await getPlayerTickets(tgId) : [];
     const pendingLucky = Number(user.is_approved) === 1 && user.pending_lucky_cell !== null
       ? { cell: Number(user.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
       : null;
-    res.json({ user, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin' });
+    res.json({ user, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator' });
   } catch (error) {
     next(error);
   }
@@ -761,6 +793,7 @@ app.post('/api/roll', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
+    assertPlayableUser(user);
     if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Кубик заморожен до проверки задания'), { status: 400 });
     if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
@@ -794,6 +827,7 @@ app.post('/api/reroll-task', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
+    assertPlayableUser(user);
     const active = await getActiveSubmission(tgId);
     if (!active || active.status !== 'pending' || active.photo_before || active.photo_after) {
       throw Object.assign(new Error('Сменить можно только новое задание до загрузки фото'), { status: 400 });
@@ -816,6 +850,7 @@ app.post('/api/lucky-choice', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
+    assertPlayableUser(user);
     const choice = String(req.body.choice || '').trim();
     if (!LUCKY_TASK_OPTIONS.includes(choice)) throw Object.assign(new Error('Выберите один из бонусных вариантов'), { status: 400 });
     const luckyCell = Number(user.pending_lucky_cell);
@@ -840,7 +875,8 @@ app.post('/api/submit', upload.fields([
   const uploadedFiles = Object.values(req.files || {}).flat();
   try {
     const tgId = normalizeTgId(req.body.tg_id);
-    await requireApproved(tgId);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
 
     const photoBefore = req.files?.photo_before?.[0];
     const photoAfter = req.files?.photo_after?.[0] || req.files?.work_image?.[0];
@@ -886,6 +922,7 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.params.tgId);
     const user = await requireApproved(tgId);
+    assertPlayableUser(user);
     const submission = await get(`SELECT s.*, t.text_task
       FROM submissions s
       JOIN tasks t ON t.id = s.task_id
@@ -997,7 +1034,7 @@ app.post('/api/admin/reset-dice', async (req, res, next) => {
 
 app.get('/api/admin/submissions', async (req, res, next) => {
   try {
-    await requireAdmin(req.query.admin_tg_id);
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
     const submissions = await all(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.image_name, s.photo_before, s.photo_after, s.status, s.admin_comment,
         u.username, t.text_task
       FROM submissions s
@@ -1006,6 +1043,48 @@ app.get('/api/admin/submissions', async (req, res, next) => {
       WHERE s.status = 'pending' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
       ORDER BY s.updated_at ASC, s.id ASC`);
     res.json({ submissions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+app.get('/api/admin/work-archive', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
+    const rows = await all(`SELECT s.id, s.tg_id, s.cell, s.photo_before, s.photo_after, s.updated_at,
+        u.username, t.text_task
+      FROM submissions s
+      JOIN users u ON u.tg_id = s.tg_id
+      JOIN tasks t ON t.id = s.task_id
+      WHERE s.status = 'approved' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
+      ORDER BY u.username COLLATE NOCASE ASC, u.tg_id ASC, s.cell ASC, s.updated_at DESC, s.id DESC`);
+    const players = [];
+    const byId = new Map();
+    for (const row of rows) {
+      if (!byId.has(row.tg_id)) {
+        const player = { tg_id: row.tg_id, username: row.username, works: [] };
+        byId.set(row.tg_id, player);
+        players.push(player);
+      }
+      byId.get(row.tg_id).works.push(row);
+    }
+    res.json({ players });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/grant-moderator', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    if (tgId === OWNER_TG_ID) throw Object.assign(new Error('Главный администратор уже имеет полные права'), { status: 400 });
+    await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
+      VALUES (?, ?, 0, 1, 0, 'moderator')
+      ON CONFLICT(tg_id) DO UPDATE SET is_approved = 1, dice_frozen = 0, pending_lucky_cell = NULL, role = 'moderator'`,
+      [tgId, `moderator_${tgId}`]);
+    res.json({ ok: true, user: await get('SELECT tg_id, username, role, is_approved FROM users WHERE tg_id = ?', [tgId]) });
   } catch (error) {
     next(error);
   }
@@ -1055,7 +1134,7 @@ app.post('/api/admin/remove-task', async (req, res, next) => {
 
 app.post('/api/admin/approve-submission', async (req, res, next) => {
   try {
-    await requireAdmin(req.body.admin_tg_id);
+    await requireModeratorOrAdmin(req.body.admin_tg_id);
     const submissionId = Number(req.body.submission_id);
     if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
 
@@ -1084,7 +1163,7 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
 
 app.post('/api/admin/reject-submission', async (req, res, next) => {
   try {
-    await requireAdmin(req.body.admin_tg_id);
+    await requireModeratorOrAdmin(req.body.admin_tg_id);
     const submissionId = Number(req.body.submission_id);
     const comment = String(req.body.admin_comment || '').trim();
     if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
