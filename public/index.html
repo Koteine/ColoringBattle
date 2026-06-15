@@ -186,6 +186,18 @@
     .lucky-choice h3 { margin: 0 0 8px; }
 
     .palette-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 12px; }
+    .palette-grid.archive-mode { display: grid; grid-template-columns: 1fr; }
+    .role-notice { display: grid; place-items: center; min-height: 260px; text-align: center; font-size: 20px; font-weight: 950; }
+    .archive-accordion { padding: 0; overflow: hidden; }
+    .archive-toggle { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 14px; border-radius: 22px; background: rgba(255,255,255,.56); box-shadow: none; text-align: left; }
+    .archive-toggle::before { content: '▶'; margin-right: 8px; transition: transform .22s ease; }
+    .archive-accordion.open > .archive-toggle::before { transform: rotate(90deg); }
+    .archive-panel { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .28s ease; }
+    .archive-accordion.open > .archive-panel { grid-template-rows: 1fr; }
+    .archive-inner { min-height: 0; overflow: hidden; padding: 0 12px; display: grid; gap: 10px; }
+    .archive-accordion.open > .archive-panel > .archive-inner { padding-bottom: 12px; }
+    .archive-work { margin-left: 12px; }
+    .archive-photos { margin-left: 20px; }
     .paint-card {
       min-height: 88px;
       border-radius: 24px;
@@ -394,8 +406,10 @@
         </div>
       </section>
 
+      <section id="roleNotice" class="card role-notice hidden">Режим администратора/модератора активен. Игровой процесс для данного аккаунта недоступен</section>
+
       <div class="game-grid">
-        <section class="card dice-zone">
+        <section id="gamePlayCard" class="card dice-zone">
           <button id="rollBtn" class="dice-button" type="button" aria-label="Бросить кубик">
             <span id="diceFace" class="dice-face" data-value="1" aria-hidden="true">
               <i class="pip"></i><i class="pip"></i><i class="pip"></i>
@@ -410,7 +424,7 @@
           </div>
         </section>
 
-        <section class="card">
+        <section id="taskCard" class="card">
           <h2>Текущее задание</h2>
           <p id="taskText" class="task-text muted">Бросьте кубик, чтобы получить задание.</p>
           <p id="taskStatus" class="muted"></p>
@@ -439,7 +453,7 @@
     <section id="paletteScreen" class="screen hidden" data-screen="palette">
       <section class="card">
         <h2>Моя Палитра</h2>
-        <p class="muted">Здесь хранятся все накопленные Красочки текущего игрока.</p>
+        <p id="paletteHint" class="muted">Здесь хранятся все накопленные Красочки текущего игрока.</p>
         <div id="paletteGrid" class="palette-grid"></div>
       </section>
     </section>
@@ -496,17 +510,17 @@
         </div>
       </section>
 
-      <section class="card admin-accordion">
+      <section class="card admin-accordion owner-only">
         <button class="admin-accordion-toggle" type="button" aria-expanded="false">Игроки и управление</button>
         <div class="admin-accordion-panel">
           <div class="admin-accordion-inner admin-section-body">
-            <div id="allUsers" class="list"></div>
+            <form id="moderatorForm" class="task-admin-form"><label class="muted">Назначить помощника<input id="moderatorTgId" type="text" inputmode="numeric" placeholder="Telegram ID помощника"></label><div class="actions"><button type="submit">Выдать права модератора</button></div></form><div id="allUsers" class="list"></div>
           </div>
         </div>
       </section>
 
 
-      <section class="card admin-accordion">
+      <section class="card admin-accordion owner-only">
         <button class="admin-accordion-toggle" type="button" aria-expanded="false">Управление квестами</button>
         <div class="admin-accordion-panel">
           <div class="admin-accordion-inner admin-section-body">
@@ -521,7 +535,7 @@
         </div>
       </section>
 
-      <section class="card admin-accordion">
+      <section class="card admin-accordion owner-only">
         <button class="admin-accordion-toggle" type="button" aria-expanded="false">Подарить красочку</button>
         <div class="admin-accordion-panel">
           <div class="admin-accordion-inner ticket-admin">
@@ -542,7 +556,7 @@
         </div>
       </section>
 
-      <section class="card admin-accordion">
+      <section class="card admin-accordion owner-only">
         <button class="admin-accordion-toggle" type="button" aria-expanded="false">Розыгрыш</button>
         <div class="admin-accordion-panel">
           <div class="admin-accordion-inner admin-section-body">
@@ -568,7 +582,7 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card owner-only">
         <h3>Глобальный сброс игры</h3>
         <p class="muted">Полностью очищает сезон, удаляет картинки и возвращает игроков на экран подачи заявки.</p>
         <button id="globalResetBtn" class="danger" type="button">Глобальный сброс игры</button>
