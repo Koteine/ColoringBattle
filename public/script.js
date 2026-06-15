@@ -63,8 +63,6 @@ const els = {
   gamePlayCard: document.getElementById('gamePlayCard'),
   taskCard: document.getElementById('taskCard'),
   paletteHint: document.getElementById('paletteHint'),
-  moderatorForm: document.getElementById('moderatorForm'),
-  moderatorTgId: document.getElementById('moderatorTgId'),
   taskAdminForm: document.getElementById('taskAdminForm'),
   taskAdminText: document.getElementById('taskAdminText'),
   taskAdminList: document.getElementById('taskAdminList'),
@@ -223,15 +221,29 @@ function updateDiceFace(value) {
 
 async function renderWorkArchive() {
   els.paletteGrid.classList.add('archive-mode');
-  els.paletteHint.textContent = 'Архив выполненных работ: одобренные клетки игроков с фотографиями ДО и ПОСЛЕ.';
+  els.paletteHint.textContent = 'Проверка ожидающих работ и архив всех игроков со статистикой по клеткам и выполненным заданиям.';
+  els.pendingSubmissions.innerHTML = '<article class="item archive-accordion open"><button type="button" class="archive-toggle"><strong>⏳ Ожидают одобрения</strong></button><div class="archive-panel"><div class="archive-inner"><div class="empty-state">Загружаем работы...</div></div></div></article>';
   els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем архив...</div>';
-  const data = await api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`);
-  if (!data.players?.length) {
-    els.paletteGrid.innerHTML = '<div class="empty-state">Одобренных работ пока нет.</div>';
+
+  const [pendingData, archiveData] = await Promise.all([
+    api(`/api/admin/submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
+    api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`)
+  ]);
+
+  renderPendingSubmissions(pendingData.submissions || []);
+
+  if (!archiveData.players?.length) {
+    els.paletteGrid.innerHTML = '<article class="item archive-accordion open"><button type="button" class="archive-toggle"><strong>👥 Все игроки</strong></button><div class="archive-panel"><div class="archive-inner"><div class="empty-state">Одобренных работ пока нет.</div></div></div></article>';
     return;
   }
+
   els.paletteGrid.innerHTML = '';
-  for (const player of data.players) {
+  const archiveRoot = document.createElement('article');
+  archiveRoot.className = 'item archive-accordion open';
+  archiveRoot.innerHTML = '<button type="button" class="archive-toggle"><strong>👥 Все игроки</strong></button><div class="archive-panel"><div class="archive-inner"></div></div>';
+  const archiveInner = archiveRoot.querySelector('.archive-inner');
+
+  for (const player of archiveData.players) {
     const playerNode = document.createElement('article');
     playerNode.className = 'item archive-accordion';
     const username = player.username ? `@${String(player.username).replace(/^@/, '')}` : 'Без ника';
@@ -255,11 +267,13 @@ async function renderWorkArchive() {
       workNode.innerHTML = `<button type="button" class="archive-toggle"><strong>Клетка ${escapeHtml(work.cell)} — ${escapeHtml(work.text_task)}</strong></button><div class="archive-panel"><div class="archive-inner archive-photos"><div class="comparison-grid"><a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a><a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a></div></div></div>`;
       inner.append(workNode);
     }
-    els.paletteGrid.append(playerNode);
+    archiveInner.append(playerNode);
   }
+  els.paletteGrid.append(archiveRoot);
 }
 
 function renderPalette(tickets = []) {
+  els.pendingSubmissions.innerHTML = '';
   els.paletteGrid.classList.add('archive-mode');
   els.paletteHint.textContent = 'Личный архив: все ваши Красочки с заданиями и Фото ПОСЛЕ.';
   if (!tickets.length) {
@@ -1018,8 +1032,6 @@ function stopRafflePolling() {
 
 async function loadAdminPanel() {
   const adminParam = `admin_tg_id=${encodeURIComponent(tgId)}`;
-  const submissions = await api(`/api/admin/submissions?${adminParam}`);
-  renderPendingSubmissions(submissions.submissions);
   if (!hasAdminAccess(state?.user)) return;
   const [pendingUsers, users, exportData, ticketData, raffleConfig, taskData] = await Promise.all([
     api(`/api/admin/pending-users?${adminParam}`),
@@ -1092,7 +1104,13 @@ function renderPendingUsers(users) {
 }
 
 function renderPendingSubmissions(submissions) {
-  els.pendingSubmissions.innerHTML = submissions.length ? '' : '<p class="muted">Работ на проверке нет.</p>';
+  els.pendingSubmissions.innerHTML = '';
+  const root = document.createElement('article');
+  root.className = 'item archive-accordion open';
+  root.innerHTML = '<button type="button" class="archive-toggle"><strong>⏳ Ожидают одобрения</strong></button><div class="archive-panel"><div class="archive-inner pending-submissions-inner"></div></div>';
+  const pendingInner = root.querySelector('.pending-submissions-inner');
+  if (!submissions.length) pendingInner.innerHTML = '<p class="muted">Все работы проверены!</p>';
+  els.pendingSubmissions.append(root);
   for (const submission of submissions) {
     const beforeUrl = `/uploads/${encodeURIComponent(submission.photo_before)}`;
     const afterUrl = `/uploads/${encodeURIComponent(submission.photo_after)}`;
@@ -1132,7 +1150,7 @@ function renderPendingSubmissions(submissions) {
       });
       const ticketNumbers = result.issuedTickets.map((ticket) => `№${ticket.ticket_number}`).join(', ');
       showToast(`Работа одобрена. Выданы Красочки: ${ticketNumbers}`);
-      await loadAdminPanel();
+      await renderWorkArchive();
       await loadNews().catch(() => {});
       if (submission.tg_id === tgId) await loadState();
     });
@@ -1150,12 +1168,12 @@ function renderPendingSubmissions(submissions) {
         body: JSON.stringify({ admin_tg_id: tgId, submission_id: submission.id, admin_comment: comment })
       });
       showToast('Работа отклонена');
-      await loadAdminPanel();
+      await renderWorkArchive();
     });
 
     actions.append(approve, reject);
     item.append(actions);
-    els.pendingSubmissions.append(item);
+    pendingInner.append(item);
   }
 }
 
@@ -1205,6 +1223,15 @@ function renderAllUsers(users) {
       if (user.tg_id === tgId) await loadState();
     });
 
+    const roleToggle = document.createElement('button');
+    roleToggle.type = 'button';
+    roleToggle.className = user.role === 'moderator' ? 'ghost' : 'success';
+    roleToggle.textContent = user.role === 'moderator' ? '👤 Забрать права модератора' : '👑 Выдать права модератора';
+    roleToggle.disabled = user.role === 'admin' || user.tg_id === OWNER_TG_ID;
+    roleToggle.addEventListener('click', async () => {
+      await toggleModerator(user.tg_id, user.role);
+    });
+
     const resetDice = document.createElement('button');
     resetDice.type = 'button';
     resetDice.className = 'ghost';
@@ -1236,7 +1263,7 @@ function renderAllUsers(users) {
       await loadAdminPanel();
     });
 
-    tools.append(changeCell, resetDice, remove);
+    tools.append(changeCell, resetDice, roleToggle, remove);
     els.allUsers.append(item);
   }
 }
@@ -1317,19 +1344,19 @@ async function addAdminTask(event) {
   await loadAdminPanel();
 }
 
-async function grantModerator(event) {
-  event.preventDefault();
-  const targetTgId = els.moderatorTgId.value.trim();
-  if (!targetTgId) return showToast('Введите Telegram ID помощника');
-  await api('/api/admin/grant-moderator', {
+async function toggleModerator(targetTgId, targetRole) {
+  const actionText = targetRole === 'moderator' ? 'забрать права модератора' : 'выдать права модератора';
+  if (!window.confirm(`Точно ${actionText} для ID ${targetTgId}?`)) return;
+  const result = await api('/api/admin/toggle-moderator', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ admin_tg_id: tgId, tg_id: targetTgId })
+    body: JSON.stringify({ admin_tg_id: tgId, target_tg_id: targetTgId })
   });
-  els.moderatorTgId.value = '';
-  showToast('Права модератора выданы');
+  showToast(result.user.role === 'moderator' ? 'Права модератора выданы' : 'Права модератора забраны');
   await loadAdminPanel();
+  if (targetTgId === tgId) await loadState();
 }
+
 
 async function grantTicket(event) {
   event.preventDefault();
@@ -1410,7 +1437,6 @@ els.luckyChoice.addEventListener('click', (event) => {
   if (button) chooseLuckyTask(button.dataset.luckyChoice).catch((error) => showToast(error.message));
 });
 els.submitForm.addEventListener('submit', submitWork);
-els.moderatorForm?.addEventListener('submit', (event) => grantModerator(event).catch((error) => showToast(error.message)));
 els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catch((error) => showToast(error.message)));
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
@@ -1423,12 +1449,15 @@ els.leaderboardTable?.addEventListener('click', (event) => {
   sendReaction(button.dataset.toId, button.dataset.react, button);
 });
 
-els.paletteGrid.addEventListener('click', (event) => {
+function toggleArchiveAccordion(event) {
   const button = event.target.closest('.archive-toggle');
   if (!button) return;
   const section = button.closest('.archive-accordion');
   section?.classList.toggle('open');
-});
+}
+
+els.paletteGrid.addEventListener('click', toggleArchiveAccordion);
+els.pendingSubmissions.addEventListener('click', toggleArchiveAccordion);
 
 document.querySelectorAll('.admin-accordion-toggle').forEach((button) => {
   button.addEventListener('click', () => {

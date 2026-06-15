@@ -1246,50 +1246,47 @@ app.get('/api/admin/submissions', async (req, res, next) => {
 app.get('/api/admin/work-archive', async (req, res, next) => {
   try {
     await requireModeratorOrAdmin(req.query.admin_tg_id);
-    const rows = await all(`SELECT s.id, s.tg_id, s.cell, s.photo_before, s.photo_after, s.updated_at,
-        u.username, u.current_cell, u.dice_frozen,
-        (SELECT COUNT(*) FROM submissions approved WHERE approved.tg_id = s.tg_id AND approved.status = 'approved') AS approved_submissions_count,
-        (SELECT COUNT(*) FROM tickets active_ticket WHERE active_ticket.tg_id = s.tg_id AND active_ticket.status = 'active') AS active_tickets_count,
-        t.text_task
+    const players = await all(`SELECT u.tg_id, u.username, u.current_cell, u.dice_frozen,
+        (SELECT COUNT(*) FROM submissions approved WHERE approved.tg_id = u.tg_id AND approved.status = 'approved') AS approved_submissions_count,
+        (SELECT COUNT(*) FROM tickets active_ticket WHERE active_ticket.tg_id = u.tg_id AND active_ticket.status = 'active') AS active_tickets_count
+      FROM users u
+      WHERE u.is_approved = 1 AND COALESCE(u.role, 'user') = 'user'
+      ORDER BY u.current_cell DESC, u.username COLLATE NOCASE ASC, u.tg_id ASC`);
+
+    const works = await all(`SELECT s.id, s.tg_id, s.cell, s.photo_before, s.photo_after, s.updated_at, t.text_task
       FROM submissions s
-      JOIN users u ON u.tg_id = s.tg_id
       JOIN tasks t ON t.id = s.task_id
       WHERE s.status = 'approved' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
-      ORDER BY u.username COLLATE NOCASE ASC, u.tg_id ASC, s.cell ASC, s.updated_at DESC, s.id DESC`);
-    const players = [];
-    const byId = new Map();
-    for (const row of rows) {
-      if (!byId.has(row.tg_id)) {
-        const player = {
-          tg_id: row.tg_id,
-          username: row.username,
-          current_cell: row.current_cell,
-          dice_frozen: row.dice_frozen,
-          approved_submissions_count: row.approved_submissions_count,
-          active_tickets_count: row.active_tickets_count,
-          works: []
-        };
-        byId.set(row.tg_id, player);
-        players.push(player);
-      }
-      byId.get(row.tg_id).works.push(row);
+      ORDER BY s.cell ASC, s.updated_at DESC, s.id DESC`);
+
+    const byId = new Map(players.map((player) => [player.tg_id, { ...player, works: [] }]));
+    for (const work of works) {
+      byId.get(work.tg_id)?.works.push(work);
     }
-    res.json({ players });
+
+    res.json({ players: Array.from(byId.values()) });
   } catch (error) {
     next(error);
   }
 });
 
-app.post('/api/admin/grant-moderator', async (req, res, next) => {
+app.post('/api/admin/toggle-moderator', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
-    const tgId = normalizeTgId(req.body.tg_id);
-    if (tgId === OWNER_TG_ID) throw Object.assign(new Error('Главный администратор уже имеет полные права'), { status: 400 });
-    await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
-      VALUES (?, ?, 0, 1, 0, 'moderator')
-      ON CONFLICT(tg_id) DO UPDATE SET is_approved = 1, dice_frozen = 0, pending_lucky_cell = NULL, role = 'moderator'`,
-      [tgId, `moderator_${tgId}`]);
-    res.json({ ok: true, user: await get('SELECT tg_id, username, role, is_approved FROM users WHERE tg_id = ?', [tgId]) });
+    const targetTgId = normalizeTgId(req.body.target_tg_id);
+    if (targetTgId === OWNER_TG_ID) throw Object.assign(new Error('Главный администратор уже имеет полные права'), { status: 400 });
+
+    const user = await get('SELECT tg_id, username, role FROM users WHERE tg_id = ?', [targetTgId]);
+    if (!user) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
+    if (user.role === 'admin') throw Object.assign(new Error('Нельзя изменить роль администратора'), { status: 400 });
+
+    const nextRole = user.role === 'moderator' ? 'user' : 'moderator';
+    const result = await run(`UPDATE users
+      SET role = ?, is_approved = 1, dice_frozen = 0, pending_lucky_cell = NULL
+      WHERE tg_id = ? AND COALESCE(role, 'user') <> 'admin'`, [nextRole, targetTgId]);
+    if (result.changes === 0) throw Object.assign(new Error('Игрок не найден или роль нельзя изменить'), { status: 404 });
+
+    res.json({ ok: true, user: await get('SELECT tg_id, username, role, is_approved FROM users WHERE tg_id = ?', [targetTgId]) });
   } catch (error) {
     next(error);
   }
