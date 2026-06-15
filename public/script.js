@@ -227,7 +227,17 @@ async function renderWorkArchive() {
     const playerNode = document.createElement('article');
     playerNode.className = 'item archive-accordion';
     const username = player.username ? `@${String(player.username).replace(/^@/, '')}` : 'Без ника';
-    playerNode.innerHTML = `<button type="button" class="archive-toggle"><strong>${escapeHtml(username)} (ID: ${escapeHtml(player.tg_id)})</strong></button><div class="archive-panel"><div class="archive-inner"></div></div>`;
+    const diceStatus = Number(player.dice_frozen) === 1 ? 'Заморожен (ждет проверки)' : 'Свободен';
+    playerNode.innerHTML = `
+      <button type="button" class="archive-toggle"><strong>${escapeHtml(username)} (ID: ${escapeHtml(player.tg_id)})</strong></button>
+      <div class="archive-panel"><div class="archive-inner">
+        <div class="item player-dossier">
+          <p><strong>Текущая клетка:</strong> ${Number(player.current_cell || 0)}</p>
+          <p><strong>Статус кубика:</strong> ${escapeHtml(diceStatus)}</p>
+          <p><strong>Выполнено заданий:</strong> ${Number(player.approved_submissions_count || 0)}</p>
+          <p><strong>Всего Красочек:</strong> ${Number(player.active_tickets_count || 0)}</p>
+        </div>
+      </div></div>`;
     const inner = playerNode.querySelector('.archive-inner');
     for (const work of player.works || []) {
       const workNode = document.createElement('article');
@@ -641,7 +651,7 @@ function renderWinners(results = []) {
     const item = document.createElement('article');
     item.className = 'item winner-row';
     item.innerHTML = `
-      <strong>🪙 ${escapeHtml(formatWinnerName(winner))} — Красочка №${escapeHtml(winner.ticket_number)}</strong>
+      <strong>🏆 Место №${escapeHtml(winner.place_number)} — Красочка номер ${escapeHtml(winner.ticket_number)}, игрок ${escapeHtml(formatWinnerName(winner))}</strong>
       <span class="muted">${escapeHtml(new Date(winner.drawn_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span>
     `;
     els.winnersList.append(item);
@@ -650,7 +660,8 @@ function renderWinners(results = []) {
 
 function cardResultMarkup(ticket) {
   if (ticket.status === 'winner') {
-    return '<div><div class="coin">🪙</div><p>МОНЕТКА!</p></div>';
+    const place = ticket.place_number ? `Место №${escapeHtml(ticket.place_number)}` : 'МОНЕТКА!';
+    return `<div><div class="coin">🪙</div><p>${place}</p></div>`;
   }
   if (ticket.status === 'scratched') return '<div>😢<p>Пусто</p></div>';
   return '<div><div class="coin">?</div><p>Что внутри?</p></div>';
@@ -746,8 +757,9 @@ function setupScratchCanvas(card, ticket) {
       const prize = card.querySelector('.scratch-prize');
       if (data.result === 'win') {
         card.classList.add('won');
-        prize.innerHTML = '<div><div class="coin">🪙</div><p>МОНЕТКА!</p></div>';
-        showToast('🎉 Вы нашли монетку и выиграли приз!', 5200);
+        const place = data.winner?.place_number || '';
+        prize.innerHTML = `<div><div class="coin">🪙</div><p>${place ? `Место №${escapeHtml(place)}` : 'МОНЕТКА!'}</p></div>`;
+        showToast(place ? `🏆 Место №${place} — Красочка номер ${ticket.ticket_number}` : '🎉 Вы нашли монетку и выиграли приз!', 5200);
         launchConfetti();
         await loadNews().catch(() => {});
       } else {
@@ -840,13 +852,15 @@ async function loadRaffle(force = true, animateNew = false) {
     els.winnerReveal.textContent = 'Красочки еще не настроены администратором.';
   } else if (data.is_before_start) {
     els.winnerReveal.textContent = 'Подготовьте Красочки — скоро можно будет стирать!';
+  } else if (data.is_sold_out) {
+    els.winnerReveal.textContent = 'Лотерея завершена, все призы разыграны.';
   } else if (data.is_active) {
     els.winnerReveal.textContent = 'Стирайте Красочки и ищите золотую монетку.';
   } else {
     els.winnerReveal.textContent = 'Окно Красочек закрыто.';
   }
 
-  if (force) renderScratchCards(state?.tickets || [], Boolean(data.is_active));
+  if (force) renderScratchCards(state?.tickets || [], Boolean(data.is_active && !data.is_sold_out));
 
   const latest = data.latest_winner || null;
   if (latest && latest.id !== lastRaffleWinnerId) {
