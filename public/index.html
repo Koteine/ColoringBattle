@@ -371,15 +371,12 @@
     .where-table th { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .03em; }
     .where-table tr:last-child td { border-bottom: 0; }
     .where-table tr.is-me { background: rgba(189,224,254,.32); }
-    .where-table th:nth-child(1), .where-table td:nth-child(1) { width: 28px; }
-    .where-table th:nth-child(3), .where-table td:nth-child(3) { width: 52px; }
-    .where-table th:nth-child(4), .where-table td:nth-child(4) { width: 74px; }
-    .where-table th:nth-child(5), .where-table td:nth-child(5) { width: 76px; }
+    .where-table th:nth-child(2), .where-table td:nth-child(2) { width: 56px; }
+    .where-table th:nth-child(3), .where-table td:nth-child(3),
+    .where-table th:nth-child(4), .where-table td:nth-child(4) { width: 66px; text-align: center; }
     .where-table td { overflow-wrap: anywhere; }
-    .reaction-counts { display: inline-flex; flex-wrap: wrap; gap: 2px 6px; font-weight: 950; }
-    .reaction-actions { display: inline-flex; gap: 4px; }
-    .reaction-btn { min-width: 32px; padding: 7px 8px; border-radius: 16px; background: rgba(255,255,255,.68); border: 1px solid var(--line); box-shadow: 0 10px 20px rgba(97,70,120,.12); }
-    .reaction-btn:disabled { opacity: .55; cursor: wait; }
+    .reaction-btn { min-width: 52px; padding: 8px 10px; border-radius: 999px; background: rgba(255,255,255,.78); border: 1px solid var(--line); box-shadow: 0 10px 20px rgba(97,70,120,.12); font-weight: 950; white-space: nowrap; }
+    .reaction-btn:disabled { opacity: .55; cursor: not-allowed; }
 
     .toast { position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px); transform: translateX(-50%); max-width: min(680px, calc(100% - 24px)); padding: 14px 18px; border-radius: 18px; background: #3b2342; border: 1px solid rgba(255,255,255,.24); color: white; box-shadow: 0 20px 60px rgba(97,70,120,.35); z-index: 30; }
 

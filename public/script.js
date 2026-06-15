@@ -325,17 +325,18 @@ function renderLeaderboard(players = []) {
   const reactionLeaders = new Set(sortedByReactions.map((player) => String(player.tg_id)));
   els.leaderboardTable.innerHTML = `
     <table class="where-table">
-      <thead><tr><th>#</th><th>Игрок</th><th>Клетка</th><th>Поддержка</th><th>Реакция</th></tr></thead>
-      <tbody>${players.map((player, index) => {
+      <thead><tr><th>Игрок</th><th>Клетка</th><th>💖</th><th>☕</th></tr></thead>
+      <tbody>${players.map((player) => {
         const isMe = String(player.tg_id) === String(tgId);
         const hearts = Number(player.reactions_hearts || 0);
         const coffee = Number(player.reactions_coffee || 0);
+        const disabled = isMe ? ' disabled aria-disabled="true"' : '';
+        const title = isMe ? ' title="Нельзя поддержать себя"' : '';
         return `<tr class="${isMe ? 'is-me' : ''}" data-player-id="${escapeHtml(player.tg_id)}">
-          <td>${index + 1}</td>
           <td><strong class="${reactionLeaders.has(String(player.tg_id)) ? 'glow-name' : ''}">${escapeHtml(formatHandle(player.username, player.tg_id))}</strong>${isMe ? ' <span class="muted">это вы</span>' : ''}</td>
           <td>${Number(player.current_cell || 0)}/100</td>
-          <td><span class="reaction-counts"><span data-counter="heart">💖 ${hearts}</span><span data-counter="coffee">☕ ${coffee}</span></span></td>
-          <td>${isMe ? '<span class="muted">—</span>' : `<span class="reaction-actions"><button class="reaction-btn" type="button" data-react="heart" data-to-id="${escapeHtml(player.tg_id)}">💖</button><button class="reaction-btn" type="button" data-react="coffee" data-to-id="${escapeHtml(player.tg_id)}">☕</button></span>`}</td>
+          <td><button class="reaction-btn" type="button" data-react="heart" data-to-id="${escapeHtml(player.tg_id)}"${disabled}${title}>💖 ${hearts}</button></td>
+          <td><button class="reaction-btn" type="button" data-react="coffee" data-to-id="${escapeHtml(player.tg_id)}"${disabled}${title}>☕ ${coffee}</button></td>
         </tr>`;
       }).join('')}</tbody>
     </table>`;
@@ -349,6 +350,7 @@ async function loadLeaderboard() {
 
 async function sendReaction(toTgId, reactionType, button) {
   if (!tgId) return showToast('Не найден Telegram ID');
+  if (button.disabled) return;
   button.disabled = true;
   try {
     const data = await api('/api/game/react', {
