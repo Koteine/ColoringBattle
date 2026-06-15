@@ -368,33 +368,58 @@ async function applyForGame() {
   }
 }
 
+function normalizeDiceValue(value) {
+  return Math.max(1, Math.min(6, Number(value || 1)));
+}
+
+function animateDiceTo(serverDice) {
+  const finalDice = normalizeDiceValue(serverDice);
+  const animationSteps = 12;
+  let step = 0;
+
+  return new Promise((resolve) => {
+    els.rollBtn.classList.add('rolling');
+
+    const spinTimer = window.setInterval(() => {
+      step += 1;
+
+      if (step >= animationSteps) {
+        window.clearInterval(spinTimer);
+        updateDiceFace(finalDice);
+        window.setTimeout(() => {
+          els.rollBtn.classList.remove('rolling');
+          updateDiceFace(finalDice);
+          resolve();
+        }, 120);
+        return;
+      }
+
+      const previewDice = (step % 6) + 1;
+      updateDiceFace(previewDice === finalDice ? (previewDice % 6) + 1 : previewDice);
+    }, 120);
+  });
+}
+
 async function rollDice() {
   if (isRolling || els.rollBtn.disabled) return;
   isRolling = true;
   els.rollBtn.disabled = true;
-  els.rollBtn.classList.add('rolling');
-
-  const spinTimer = window.setInterval(() => updateDiceFace(Math.floor(Math.random() * 6) + 1), 120);
-  const animationDone = new Promise((resolve) => window.setTimeout(resolve, 1500));
 
   try {
-    const resultPromise = api('/api/roll', {
+    const result = await api('/api/roll', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tg_id: tgId })
     });
-    const result = await resultPromise;
-    await animationDone;
+    await animateDiceTo(result.dice);
     updateDiceFace(result.dice);
     showToast(`Выпало ${result.dice}. Вы перешли на клетку ${result.current_cell}.`);
     await loadState();
   } catch (error) {
-    await animationDone;
+    els.rollBtn.classList.remove('rolling');
     showToast(error.message);
     await loadState().catch(() => {});
   } finally {
-    window.clearInterval(spinTimer);
-    els.rollBtn.classList.remove('rolling');
     isRolling = false;
     render();
   }
