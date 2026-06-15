@@ -33,6 +33,9 @@ const els = {
   newsTrack: document.getElementById('newsTrack'),
   taskText: document.getElementById('taskText'),
   taskStatus: document.getElementById('taskStatus'),
+  taskActions: document.getElementById('taskActions'),
+  rerollTaskBtn: document.getElementById('rerollTaskBtn'),
+  luckyChoice: document.getElementById('luckyChoice'),
   submitForm: document.getElementById('submitForm'),
   submitStepTitle: document.getElementById('submitStepTitle'),
   submitStepHint: document.getElementById('submitStepHint'),
@@ -92,6 +95,16 @@ let lastRaffleWinnerId = null;
 let newsPollingTimer = null;
 let countdownTimer = null;
 const scratchers = new Map();
+const trapCells = new Set([13, 26, 39, 52, 65, 78, 91]);
+const luckyCells = new Set([7, 21, 35, 49, 63, 77, 88]);
+
+function getClientCellType(cell) {
+  const normalized = Number(cell || 0);
+  if (trapCells.has(normalized)) return 'trap';
+  if (luckyCells.has(normalized)) return 'lucky';
+  return 'ordinary';
+}
+
 const rainbowCovers = [
   ['#ff2d55', '#ff7a8a'],
   ['#ff8c00', '#ffd166'],
@@ -240,6 +253,8 @@ function configureSubmitStep({ fieldName, title, hint, buttonText }) {
 
 function renderTask(submission) {
   els.submitForm.classList.add('hidden');
+  els.taskActions.classList.add('hidden');
+  els.luckyChoice.classList.add('hidden');
   els.submitBtn.disabled = false;
   els.taskStatus.textContent = '';
 
@@ -248,6 +263,12 @@ function renderTask(submission) {
     els.taskText.classList.add('muted');
     return;
   }
+
+  const canReroll = submission.status === 'pending'
+    && !submission.photo_before
+    && !submission.photo_after
+    && getClientCellType(submission.cell) === 'ordinary';
+  els.taskActions.classList.toggle('hidden', !canReroll);
 
   els.taskText.classList.remove('muted');
   els.taskText.textContent = submission.text_task;
@@ -320,6 +341,12 @@ function render() {
   els.diceState.textContent = Number(user.dice_frozen) === 1 ? 'Ждёт проверку' : 'Готов';
   drawProgress(user.current_cell);
   renderTask(activeSubmission);
+  if (!activeSubmission && state.pendingLucky) {
+    els.taskText.textContent = '🎉 Бонусная клетка! Выберите одно из двух условий.';
+    els.taskText.classList.remove('muted');
+    els.taskStatus.textContent = `Клетка ${state.pendingLucky.cell}: после выбора откроется стандартная форма загрузки.`;
+    els.luckyChoice.classList.remove('hidden');
+  }
   renderPalette(tickets);
 
   const frozen = Number(user.dice_frozen) === 1;
@@ -413,7 +440,13 @@ async function rollDice() {
     });
     await animateDiceTo(result.dice);
     updateDiceFace(result.dice);
-    showToast(`Выпало ${result.dice}. Вы перешли на клетку ${result.current_cell}.`);
+    if (result.cell_type === 'trap') {
+      showToast(`Ловушка! Выпало ${result.dice}, затем откат на ${result.trap_dice}. Новая клетка: ${result.current_cell}.`);
+    } else if (result.cell_type === 'lucky') {
+      showToast(`Выпало ${result.dice}. Бонусная клетка ${result.current_cell}: выберите условие.`);
+    } else {
+      showToast(`Выпало ${result.dice}. Вы перешли на клетку ${result.current_cell}.`);
+    }
     await loadState();
   } catch (error) {
     els.rollBtn.classList.remove('rolling');
@@ -422,6 +455,42 @@ async function rollDice() {
   } finally {
     isRolling = false;
     render();
+  }
+}
+
+
+async function rerollTask() {
+  if (isRolling) return;
+  els.rerollTaskBtn.disabled = true;
+  try {
+    const result = await api('/api/reroll-task', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tg_id: tgId })
+    });
+    showToast(`Штрафной откат на ${result.penalty}. Новая клетка: ${result.current_cell}. Задание сменено.`);
+    await loadState();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    els.rerollTaskBtn.disabled = false;
+  }
+}
+
+async function chooseLuckyTask(choice) {
+  els.luckyChoice.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+  try {
+    await api('/api/lucky-choice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tg_id: tgId, choice })
+    });
+    showToast('Бонусное условие выбрано. Загрузите Фото ДО.');
+    await loadState();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    els.luckyChoice.querySelectorAll('button').forEach((button) => { button.disabled = false; });
   }
 }
 
@@ -1097,6 +1166,11 @@ async function globalReset() {
 
 els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
+els.rerollTaskBtn.addEventListener('click', () => rerollTask().catch((error) => showToast(error.message)));
+els.luckyChoice.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-lucky-choice]');
+  if (button) chooseLuckyTask(button.dataset.luckyChoice).catch((error) => showToast(error.message));
+});
 els.submitForm.addEventListener('submit', submitWork);
 els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catch((error) => showToast(error.message)));
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
