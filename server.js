@@ -73,6 +73,7 @@ async function initDb() {
     current_cell INTEGER DEFAULT 0,
     is_approved INTEGER DEFAULT 0,
     dice_frozen INTEGER DEFAULT 0,
+    pending_lucky_cell INTEGER DEFAULT NULL,
     role TEXT DEFAULT 'user'
   )`);
 
@@ -99,6 +100,7 @@ async function initDb() {
   )`);
 
   await ensureSubmissionPhotoColumns();
+  await ensureUserLuckyColumn();
   await ensureAccumulatingTicketsTable();
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
@@ -121,10 +123,18 @@ async function initDb() {
       username = CASE WHEN users.username = '' THEN 'Owner' ELSE users.username END,
       current_cell = 0,
       dice_frozen = 0,
+      pending_lucky_cell = NULL,
       is_approved = 1,
       role = 'admin'`, [OWNER_TG_ID]);
 
   await seedTasks();
+}
+
+async function ensureUserLuckyColumn() {
+  const columns = await all('PRAGMA table_info(users)');
+  if (!columns.some((column) => column.name === 'pending_lucky_cell')) {
+    await run('ALTER TABLE users ADD COLUMN pending_lucky_cell INTEGER DEFAULT NULL');
+  }
 }
 
 async function ensureSubmissionPhotoColumns() {
@@ -433,6 +443,20 @@ async function getPlayerTickets(tgId) {
   return all('SELECT ticket_number, type, status, created_at FROM tickets WHERE tg_id = ? ORDER BY ticket_number ASC', [tgId]);
 }
 
+const TRAP_CELLS = new Set([13, 26, 39, 52, 65, 78, 91]);
+const LUCKY_CELLS = new Set([7, 21, 35, 49, 63, 77, 88]);
+const LUCKY_TASK_OPTIONS = [
+  'Раскрасить что угодно вне заданий',
+  'Взять картинку формата менее А4'
+];
+
+function getCellType(cell) {
+  const normalized = Number(cell || 0);
+  if (TRAP_CELLS.has(normalized)) return 'trap';
+  if (LUCKY_CELLS.has(normalized)) return 'lucky';
+  return 'ordinary';
+}
+
 async function pickUnusedTask(tgId) {
   const task = await get(`SELECT id, text_task
     FROM tasks
@@ -618,7 +642,10 @@ app.get('/api/me/:tgId', async (req, res, next) => {
 
     const activeSubmission = Number(user.is_approved) === 1 ? await getActiveSubmission(tgId) : null;
     const tickets = Number(user.is_approved) === 1 ? await getPlayerTickets(tgId) : [];
-    res.json({ user, activeSubmission, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin' });
+    const pendingLucky = Number(user.is_approved) === 1 && user.pending_lucky_cell !== null
+      ? { cell: Number(user.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
+      : null;
+    res.json({ user, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin' });
   } catch (error) {
     next(error);
   }
@@ -723,6 +750,13 @@ app.get('/api/news', async (req, res, next) => {
   }
 });
 
+async function createPendingSubmissionForCell(tgId, cell) {
+  const task = await pickUnusedTask(tgId);
+  if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
+  const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, cell, task.id, 'pending']);
+  return { task, submission_id: submission.id };
+}
+
 app.post('/api/roll', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
@@ -730,15 +764,69 @@ app.post('/api/roll', async (req, res, next) => {
     if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Кубик заморожен до проверки задания'), { status: 400 });
     if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
-    const task = await pickUnusedTask(tgId);
-    if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
-
     const dice = rollD6();
-    const currentCell = Math.min(100, Number(user.current_cell || 0) + dice);
-    const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, currentCell, task.id, 'pending']);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1 WHERE tg_id = ?', [currentCell, tgId]);
+    const landedCell = Math.min(100, Number(user.current_cell || 0) + dice);
+    const cellType = getCellType(landedCell);
 
-    res.json({ ok: true, dice, current_cell: currentCell, task, submission_id: submission.id });
+    if (cellType === 'lucky') {
+      await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ? WHERE tg_id = ?', [landedCell, landedCell, tgId]);
+      res.json({ ok: true, dice, current_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS });
+      return;
+    }
+
+    let currentCell = landedCell;
+    let trapDice = null;
+    if (cellType === 'trap') {
+      trapDice = rollD6();
+      currentCell = Math.max(0, landedCell - trapDice);
+    }
+
+    const pending = await createPendingSubmissionForCell(tgId, currentCell);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
+
+    res.json({ ok: true, dice, trap_dice: trapDice, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...pending });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/reroll-task', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    const active = await getActiveSubmission(tgId);
+    if (!active || active.status !== 'pending' || active.photo_before || active.photo_after) {
+      throw Object.assign(new Error('Сменить можно только новое задание до загрузки фото'), { status: 400 });
+    }
+    if (getCellType(active.cell) !== 'ordinary') throw Object.assign(new Error('На этой клетке смена задания недоступна'), { status: 400 });
+
+    const penalty = Math.floor(Math.random() * 3) + 1;
+    const currentCell = Math.max(0, Number(user.current_cell || 0) - penalty);
+    await run('DELETE FROM submissions WHERE id = ?', [active.id]);
+    const pending = await createPendingSubmissionForCell(tgId, currentCell);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
+
+    res.json({ ok: true, penalty, current_cell: currentCell, ...pending });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/lucky-choice', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    const choice = String(req.body.choice || '').trim();
+    if (!LUCKY_TASK_OPTIONS.includes(choice)) throw Object.assign(new Error('Выберите один из бонусных вариантов'), { status: 400 });
+    const luckyCell = Number(user.pending_lucky_cell);
+    if (!Number.isInteger(luckyCell) || getCellType(luckyCell) !== 'lucky') throw Object.assign(new Error('Бонусная клетка не ожидает выбора'), { status: 400 });
+
+    const result = await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [choice]);
+    const task = result.id ? await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]) : await get('SELECT id, text_task FROM tasks WHERE text_task = ?', [choice]);
+    const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, luckyCell, task.id, 'pending']);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [luckyCell, tgId]);
+
+    res.json({ ok: true, current_cell: luckyCell, task, submission_id: submission.id });
   } catch (error) {
     next(error);
   }
@@ -828,7 +916,7 @@ app.post('/api/admin/approve-user', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
-    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0 WHERE tg_id = ?', [tgId]);
+    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Заявка не найдена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -871,7 +959,7 @@ app.post('/api/admin/remove-user', async (req, res, next) => {
     await requireAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
     if (tgId === OWNER_TG_ID) throw Object.assign(new Error('Нельзя исключить супер-админа'), { status: 400 });
-    const result = await run('UPDATE users SET is_approved = 0, dice_frozen = 0 WHERE tg_id = ?', [tgId]);
+    const result = await run('UPDATE users SET is_approved = 0, dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -887,7 +975,7 @@ app.post('/api/admin/change-cell', async (req, res, next) => {
     if (!Number.isInteger(currentCell) || currentCell < 0 || currentCell > 100) {
       throw Object.assign(new Error('Клетка должна быть целым числом от 0 до 100'), { status: 400 });
     }
-    const result = await run('UPDATE users SET current_cell = ? WHERE tg_id = ?', [currentCell, tgId]);
+    const result = await run('UPDATE users SET current_cell = ?, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
     res.json({ ok: true, current_cell: currentCell });
   } catch (error) {
@@ -899,7 +987,7 @@ app.post('/api/admin/reset-dice', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
-    const result = await run('UPDATE users SET dice_frozen = 0 WHERE tg_id = ?', [tgId]);
+    const result = await run('UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -978,7 +1066,7 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
     if (!submission) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
 
     await run("UPDATE submissions SET status = 'approved', admin_comment = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [submissionId]);
-    await run('UPDATE users SET dice_frozen = 0 WHERE tg_id = ?', [submission.tg_id]);
+    await run('UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [submission.tg_id]);
 
     const issuedTickets = [await issueTicket(submission.tg_id, 'standard')];
     const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
@@ -1102,6 +1190,7 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
       ON CONFLICT(tg_id) DO UPDATE SET
         current_cell = 0,
         dice_frozen = 0,
+        pending_lucky_cell = NULL,
         is_approved = 1,
         role = 'admin'`, [OWNER_TG_ID]);
 

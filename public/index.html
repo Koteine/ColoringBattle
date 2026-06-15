@@ -182,6 +182,8 @@
     .danger { background: linear-gradient(135deg, #ffb3c1, #fb6f92); }
     .success { background: linear-gradient(135deg, #caffbf, #72d6a1); }
     .finalist { margin-top: 10px; color: #248a60; font-weight: 950; }
+    .lucky-choice { margin: 12px 0; padding: 16px; border-radius: 24px; background: linear-gradient(135deg, rgba(255,241,168,.72), rgba(255,175,204,.5), rgba(189,224,254,.6)); border: 1px solid rgba(255,255,255,.72); }
+    .lucky-choice h3 { margin: 0 0 8px; }
 
     .palette-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 12px; }
     .paint-card {
@@ -412,6 +414,17 @@
           <h2>Текущее задание</h2>
           <p id="taskText" class="task-text muted">Бросьте кубик, чтобы получить задание.</p>
           <p id="taskStatus" class="muted"></p>
+          <div id="taskActions" class="actions hidden">
+            <button id="rerollTaskBtn" class="ghost" type="button">Сменить задание (Штрафной откат от 1 до 3 клеток назад) 🔄</button>
+          </div>
+          <div id="luckyChoice" class="lucky-choice hidden">
+            <h3>🎉 Бонусная клетка!</h3>
+            <p class="muted">Выберите условие задания, чтобы открыть загрузку Фото ДО и Фото ПОСЛЕ.</p>
+            <div class="actions">
+              <button class="success" type="button" data-lucky-choice="Раскрасить что угодно вне заданий">Раскрасить что угодно вне заданий</button>
+              <button class="success" type="button" data-lucky-choice="Взять картинку формата менее А4">Взять картинку формата менее А4</button>
+            </div>
+          </div>
           <form id="submitForm" class="submit-step hidden">
             <h3 id="submitStepTitle">Шаг 1: Зафиксируй начало работы</h3>
             <p id="submitStepHint" class="muted">Загрузите фото ДО — незакрашенную страницу перед началом.</p>
