@@ -298,6 +298,8 @@ async function seedTasks() {
     .map((task) => task.trim())
     .filter((task) => task.length > 0);
 
+  await run('DELETE FROM tasks;');
+
   for (const task of tasks) {
     await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [task]);
   }
