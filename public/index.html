@@ -171,7 +171,7 @@
     .news-feed { width: 100%; overflow: hidden; border-radius: 22px; padding: 12px 0; background: rgba(255,255,255,.5); border: 1px solid var(--line); }
     .news-feed h3 { margin: 0 14px 8px; font-size: 16px; }
     .news-marquee { overflow: hidden; white-space: nowrap; }
-    .news-track { display: inline-flex; gap: 34px; min-width: 100%; padding-left: 100%; color: #5d4164; font-weight: 900; animation: newsScroll 24s linear infinite; }
+    .news-track { display: inline-flex; gap: 34px; min-width: 100%; padding-left: 100%; color: #5d4164; font-weight: 900; animation: newsScroll 36s linear infinite; }
     .news-track:hover { animation-play-state: paused; }
     .news-item { display: inline-flex; align-items: center; }
     @keyframes newsScroll { from { transform: translateX(0); } to { transform: translateX(-100%); } }
@@ -387,13 +387,39 @@
       .card { padding: 16px; border-radius: 26px; }
     }
 
-    .dice-actions { display: flex; align-items: center; justify-content: center; gap: 14px; }
-    .tarot-button { min-width: 64px; height: 64px; border-radius: 22px; font-size: 32px; padding: 0; background: linear-gradient(135deg, #2d1b69, #c084fc, #ffd166); box-shadow: 0 14px 32px rgba(82, 45, 120, .25); }
+    .dice-actions { display: grid; gap: 10px; place-items: center; }
+    .games-box { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: center; padding: 8px 12px 10px; border-radius: 18px; background: rgba(255,255,255,.55); border: 1px solid var(--line); }
+    .games-title { flex-basis: 100%; text-align: center; margin: 0; font-size: 12px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    .tarot-button { min-width: 56px; height: 56px; border-radius: 18px; font-size: 24px; padding: 0; background: linear-gradient(135deg, #2d1b69, #c084fc, #ffd166); box-shadow: 0 14px 32px rgba(82, 45, 120, .25); }
     .tarot-button:disabled, .tarot-button.tarot-disabled { opacity: .4; filter: grayscale(.35); pointer-events: none; animation: none; }
+    .tarot-button.tarot-disabled::before { content: '🔒'; }
+    .tarot-button.tarot-disabled { font-size: 0; }
+
+    .bell-btn { margin-left: 6px; min-width: 28px; height: 28px; padding: 0; border-radius: 999px; font-size: 14px; }
+    .notifications-modal, .duel-modal, .confirm-modal { position: fixed; inset: 0; z-index: 65; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .48); }
+    .notifications-modal.hidden, .duel-modal.hidden, .confirm-modal.hidden { display: none; }
+    .notifications-dialog, .duel-dialog, .confirm-dialog { width: min(560px, 100%); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 28px; background: rgba(255,250,255,.97); box-shadow: 0 24px 70px rgba(50, 30, 62, .34); }
+    .puzzle-grid { display: grid; grid-template-columns: repeat(3, 68px); gap: 8px; justify-content: center; margin: 14px 0; }
+    .puzzle-tile { width: 68px; height: 68px; border-radius: 16px; font-size: 24px; font-weight: 1000; }
+    .puzzle-tile.empty { visibility: hidden; }
+    .duel-player-list { display: grid; gap: 8px; margin-top: 12px; }
     .tarot-modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .48); }
     .tarot-modal.hidden { display: none; }
     .tarot-dialog { width: min(460px, 100%); padding: 24px; border-radius: 30px; text-align: center; background: rgba(255,250,255,.97); box-shadow: 0 24px 70px rgba(50, 30, 62, .34); border: 1px solid rgba(255,255,255,.75); }
     .tarot-dialog h2 { margin-top: 0; }
+    .tarot-warning { line-height: 1.45; }
+    .tarot-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 16px 0; perspective: 900px; }
+    .tarot-card { position: relative; height: 148px; border: 0; padding: 0; background: transparent; transform-style: preserve-3d; transition: opacity .25s ease; cursor: pointer; }
+    .tarot-card:disabled { cursor: default; }
+    .tarot-card.revealed-muted { opacity: .6; }
+    .tarot-card-inner { position: absolute; inset: 0; transform-style: preserve-3d; transition: transform .7s cubic-bezier(.2,.7,.2,1); }
+    .tarot-card.flipped .tarot-card-inner { transform: rotateY(180deg); }
+    .card-front, .card-back { position: absolute; inset: 0; display: grid; place-items: center; padding: 10px; border-radius: 18px; backface-visibility: hidden; box-shadow: 0 12px 28px rgba(82,45,120,.18); }
+    .card-front { color: #fff; font-size: 34px; background: linear-gradient(145deg, #2d1b69, #8b5cf6); border: 2px solid rgba(255,255,255,.55); }
+    .card-back { transform: rotateY(180deg); background: #fff7fb; border: 1px solid rgba(132,90,150,.22); font-size: 12px; line-height: 1.25; }
+    .tarot-result-icon { display: block; font-size: 28px; margin-bottom: 4px; }
+    .tarot-card-title { display: block; font-weight: 950; color: var(--text); }
+    .tarot-card-desc { display: block; margin-top: 4px; color: var(--muted); }
     .glow-name { background: linear-gradient(90deg, #ff4d8d, #ffd166, #7dd3fc, #c084fc, #ff4d8d); background-size: 260% auto; -webkit-background-clip: text; background-clip: text; color: transparent; animation: leaderShimmer 2.8s linear infinite; font-weight: 1000; }
     @keyframes leaderShimmer { to { background-position: 260% center; } }
     .profile-link { border: 0; padding: 0; background: transparent; box-shadow: none; color: inherit; cursor: pointer; text-align: left; font: inherit; }
@@ -436,7 +462,7 @@
     <section id="gameScreen" class="screen hidden" data-screen="game">
       <section class="card">
         <div class="stats-grid">
-          <div class="stat"><span>Игрок</span><strong id="username">—</strong></div>
+          <div class="stat"><span>Игрок</span><strong id="username">—</strong><button id="notificationsBtn" class="bell-btn" type="button" aria-label="Личные уведомления">🔔</button></div>
           <div class="stat"><span>Клетка</span><strong id="currentCell">0/100</strong></div>
           <div class="stat"><span>Кубик</span><strong id="diceState">—</strong></div>
         </div>
@@ -458,10 +484,10 @@
               <i class="pip"></i><i class="pip"></i><i class="pip"></i>
               <i class="pip"></i><i class="pip"></i><i class="pip"></i>
             </span>
-          </button><button id="tarotBtn" class="tarot-button" type="button" aria-label="Карта удачи">🃏</button></div>
+          </button><div class="games-box"><p class="games-title">Игры</p><button id="tarotBtn" class="tarot-button" type="button" aria-label="Карты удачи">🃏</button><button id="duelBtn" class="tarot-button puzzle-button" type="button" aria-label="Дуэль в пятнашки">🧩</button></div></div>
           <p id="diceHint" class="dice-caption muted">После броска кубик заморозится до проверки задания.</p>
           <div class="news-feed" aria-live="polite">
-            <h3>Лента новостей игры</h3>
+            <h3>Глобальные новости</h3>
             <div class="news-marquee"><div id="newsTrack" class="news-track">Загружаем новости...</div></div>
           </div>
         </section>
@@ -653,7 +679,10 @@
     <button id="adminTabBtn" class="nav-btn hidden" type="button" data-tab="admin"><span>🛠</span>Админка</button>
   </nav>
 
-  <div id="tarotModal" class="tarot-modal hidden"><div class="tarot-dialog"><h2>🃏 Карта удачи</h2><p class="muted">Игра на риск. Можно использовать 1 раз за всю игру</p><div class="actions"><button id="tarotDrawBtn" class="success" type="button">Тянуть карту</button><button id="tarotCancelBtn" class="ghost" type="button">Отмена</button></div></div></div>
+  <div id="tarotModal" class="tarot-modal hidden"><div class="tarot-dialog"><h2>🃏 Оракул карт Удачи</h2><p class="muted tarot-warning">Добро пожаловать в игру на риск! Перед тобой 3 карты. Из них 2 содержат мощные баффы, а 1 — коварное проклятие. Выбор происходит абсолютно случайно, а карты тщательно перемешиваются. Испытать удачу можно только 1 раз за всю игру! Рискнёшь?</p><div id="tarotCards" class="tarot-cards" aria-label="Выберите одну из трех карт"></div><div class="actions"><button id="tarotCancelBtn" class="ghost" type="button">Отмена</button></div></div></div>
+  <div id="notificationsModal" class="notifications-modal hidden"><div class="notifications-dialog"><button id="notificationsCloseBtn" class="profile-close" type="button">×</button><h2>🔔 Личные звоночки</h2><div id="notificationsContent"></div></div></div>
+  <div id="duelModal" class="duel-modal hidden"><div class="duel-dialog"><button id="duelCloseBtn" class="profile-close" type="button">×</button><h2>🧩 Дуэль в пятнашки</h2><p class="muted">Собери пятнашки быстрее соперника! 1 вызов и 1 прием за игру. Награда победителю: +1 красочка. У соперника есть 24 часа на ответ, иначе — автопоражение. Закрытие вызова = проигрыш</p><div id="duelContent"></div></div></div>
+  <div id="confirmModal" class="confirm-modal hidden"><div class="confirm-dialog"><h2>Подтверждение</h2><p id="confirmText" class="muted"></p><div class="actions"><button id="confirmYesBtn" class="danger" type="button">Да</button><button id="confirmNoBtn" class="ghost" type="button">Отмена</button></div></div></div>
   <div id="profileModal" class="profile-modal hidden"><div class="profile-dialog"><button id="profileCloseBtn" class="profile-close" type="button">×</button><div id="profileContent"></div></div></div>
   <div id="toast" class="toast hidden"></div>
   <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>

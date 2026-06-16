@@ -24,14 +24,17 @@ const els = {
   bottomNav: document.getElementById('bottomNav'),
   adminTabBtn: document.getElementById('adminTabBtn'),
   username: document.getElementById('username'),
+  notificationsBtn: document.getElementById('notificationsBtn'),
   currentCell: document.getElementById('currentCell'),
   diceState: document.getElementById('diceState'),
   routeRunner: document.getElementById('routeRunner'),
   routeFill: document.getElementById('routeFill'),
   rollBtn: document.getElementById('rollBtn'),
   tarotBtn: document.getElementById('tarotBtn'),
+  duelBtn: document.getElementById('duelBtn'),
   tarotModal: document.getElementById('tarotModal'),
   tarotDrawBtn: document.getElementById('tarotDrawBtn'),
+  tarotCards: document.getElementById('tarotCards'),
   tarotCancelBtn: document.getElementById('tarotCancelBtn'),
   diceFace: document.getElementById('diceFace'),
   diceHint: document.getElementById('diceHint'),
@@ -85,7 +88,17 @@ const els = {
   toast: document.getElementById('toast'),
   profileModal: document.getElementById('profileModal'),
   profileCloseBtn: document.getElementById('profileCloseBtn'),
-  profileContent: document.getElementById('profileContent')
+  profileContent: document.getElementById('profileContent'),
+  notificationsModal: document.getElementById('notificationsModal'),
+  notificationsCloseBtn: document.getElementById('notificationsCloseBtn'),
+  notificationsContent: document.getElementById('notificationsContent'),
+  duelModal: document.getElementById('duelModal'),
+  duelCloseBtn: document.getElementById('duelCloseBtn'),
+  duelContent: document.getElementById('duelContent'),
+  confirmModal: document.getElementById('confirmModal'),
+  confirmText: document.getElementById('confirmText'),
+  confirmYesBtn: document.getElementById('confirmYesBtn'),
+  confirmNoBtn: document.getElementById('confirmNoBtn')
 };
 
 const paintGradients = [
@@ -108,6 +121,11 @@ let raffleLoadedAt = 0;
 let rafflePollingTimer = null;
 let lastRaffleWinnerId = null;
 let newsPollingTimer = null;
+let pendingConfirmResolve = null;
+let activeDuel = null;
+let puzzleState = [];
+let puzzleStartedAt = 0;
+let puzzleTimer = null;
 let countdownTimer = null;
 let leaderboardPlayers = [];
 const scratchers = new Map();
@@ -421,7 +439,7 @@ function startNewsPolling() {
   loadNews().catch((error) => console.warn('News loading error:', error.message));
   newsPollingTimer = window.setInterval(() => {
     if (state?.user && canEnterApp(state.user)) loadNews().catch((error) => console.warn('News polling error:', error.message));
-  }, 6000);
+  }, 9000);
 }
 
 function configureSubmitStep({ fieldName, title, hint, buttonText }) {
@@ -631,7 +649,7 @@ async function rollDice() {
     await animateDiceTo(result.dice);
     updateDiceFace(result.dice);
     if (result.cell_type === 'trap' && result.trap_immunity_used) {
-      showToast(`Защитное яблоко спасло от ловушки! Вы остались на клетке ${result.current_cell}.`);
+      showToast('✨ Магический щит сработал! Ловушка разрушена!');
     } else if (result.cell_type === 'trap') {
       showToast(`Ловушка! Выпало ${result.dice}, затем откат на ${result.trap_dice}. Новая клетка: ${result.current_cell}.`);
     } else if (result.roll_halved) {
@@ -654,14 +672,30 @@ async function rollDice() {
 
 
 
+
 function setTarotDisabled(disabled) {
   if (!els.tarotBtn) return;
   els.tarotBtn.disabled = Boolean(disabled);
   els.tarotBtn.classList.toggle('tarot-disabled', Boolean(disabled));
 }
 
+function renderTarotCards() {
+  if (!els.tarotCards) return;
+  els.tarotCards.innerHTML = '';
+  for (let index = 0; index < 3; index += 1) {
+    const card = document.createElement('button');
+    card.className = 'tarot-card';
+    card.type = 'button';
+    card.dataset.index = String(index);
+    card.innerHTML = `<span class="tarot-card-inner"><span class="card-front">🃏</span><span class="card-back"><span class="tarot-result-icon">✨</span><span class="tarot-card-title">Тайна</span><span class="tarot-card-desc">Карта перемешивается...</span></span></span>`;
+    card.addEventListener('click', () => useTarot(index, card));
+    els.tarotCards.append(card);
+  }
+}
+
 function openTarotModal() {
   if (els.tarotBtn?.disabled) return;
+  renderTarotCards();
   els.tarotModal?.classList.remove('hidden');
 }
 
@@ -669,24 +703,42 @@ function closeTarotModal() {
   els.tarotModal?.classList.add('hidden');
 }
 
-async function useTarot() {
-  els.tarotDrawBtn.disabled = true;
+function revealTarotDeck(deck = [], selectedIndex = 0) {
+  if (!els.tarotCards) return;
+  [...els.tarotCards.querySelectorAll('.tarot-card')].forEach((card, index) => {
+    const data = deck[index];
+    if (!data) return;
+    card.querySelector('.tarot-result-icon').textContent = data.icon || '✨';
+    card.querySelector('.tarot-card-title').textContent = data.title || 'Карта удачи';
+    card.querySelector('.tarot-card-desc').textContent = data.description || '';
+    window.setTimeout(() => {
+      card.classList.add('flipped');
+      if (index !== selectedIndex) card.classList.add('revealed-muted');
+    }, index === selectedIndex ? 0 : 500);
+  });
+}
+
+async function useTarot(selectedIndex, selectedCard) {
+  if (!els.tarotCards || selectedCard?.disabled) return;
+  [...els.tarotCards.querySelectorAll('.tarot-card')].forEach((card) => { card.disabled = true; });
+  selectedCard?.classList.add('flipped');
+  setTarotDisabled(true);
   try {
     const result = await api('/api/tarot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tg_id: tgId })
+      body: JSON.stringify({ tg_id: tgId, selected_index: selectedIndex })
     });
-    setTarotDisabled(true);
-    closeTarotModal();
+    revealTarotDeck(result.tarot_deck, result.selected_index ?? selectedIndex);
     if (result.tarot_effect === 'double_roll') showToast(`🃏 ${result.tarot_card}: броски ${result.dice_rolls.join(' + ')} = ${result.dice}. Клетка ${result.current_cell}.`);
     else if (result.tarot_effect === 'trap_immunity') showToast(`🃏 ${result.tarot_card}: иммунитет от следующей ловушки активен.`);
     else showToast(`🃏 ${result.tarot_card}: следующий бросок будет делиться на 2.`);
+    window.setTimeout(closeTarotModal, 2200);
     await loadState();
   } catch (error) {
+    selectedCard?.classList.remove('flipped');
     showToast(error.message);
-  } finally {
-    els.tarotDrawBtn.disabled = false;
+    await loadState().catch(() => setTarotDisabled(false));
   }
 }
 
@@ -700,13 +752,25 @@ const shareTexts = [
 
 async function sharePaletteCard(button) {
   const card = button.closest('.archive-inner')?.querySelector('[data-share-card]');
-  if (!card) return;
-  if (window.html2canvas) await window.html2canvas(card, { useCORS: true, backgroundColor: null });
+  if (!card) throw new Error('Карточка не найдена');
+  if (!window.html2canvas) throw new Error('Генератор изображения еще загружается');
+  const canvas = await window.html2canvas(card, { useCORS: true, backgroundColor: '#ffffff' });
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+  if (!blob) throw new Error('Не удалось собрать фото для отправки');
   const text = shareTexts[Math.floor(Math.random() * shareTexts.length)];
-  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(location.origin)}&text=${encodeURIComponent(text)}`;
-  await navigator.clipboard?.writeText(`${text} ${shareUrl}`).catch(() => {});
-  window.open(shareUrl, '_blank', 'noopener');
-  showToast('Текст и ссылка для Telegram скопированы.');
+  const file = new File([blob], 'krasochki_result.jpg', { type: 'image/jpeg' });
+  if (navigator.canShare?.({ files: [file] }) && navigator.share) {
+    await navigator.share({ text, files: [file] });
+    return;
+  }
+  await navigator.clipboard?.writeText(text).catch(() => {});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'krasochki_result.jpg';
+  link.click();
+  URL.revokeObjectURL(url);
+  showToast('Фото скачано, текст скопирован — отправьте картинку в Telegram вручную.');
 }
 
 async function openProfile(profileId) {
@@ -720,6 +784,127 @@ async function openProfile(profileId) {
 function closeProfile() {
   els.profileContent.innerHTML = '';
   els.profileModal.classList.add('hidden');
+}
+
+
+function askConfirm(message) {
+  if (!els.confirmModal) return Promise.resolve(window.confirm(message));
+  els.confirmText.textContent = message;
+  els.confirmModal.classList.remove('hidden');
+  return new Promise((resolve) => { pendingConfirmResolve = resolve; });
+}
+
+function closeConfirmModal(result = false) {
+  els.confirmModal?.classList.add('hidden');
+  if (pendingConfirmResolve) pendingConfirmResolve(Boolean(result));
+  pendingConfirmResolve = null;
+}
+
+async function openNotifications() {
+  if (!state?.user || !els.notificationsModal) return;
+  els.notificationsContent.innerHTML = '<div class="empty-state">Загружаем звоночки...</div>';
+  els.notificationsModal.classList.remove('hidden');
+  const data = await api(`/api/notifications/${encodeURIComponent(state.user.tg_id || tgId)}`);
+  const rows = [];
+  for (const event of data.events || []) rows.push(`<li>${escapeHtml(event.message)}<br><small>${escapeHtml(event.created_at || '')}</small></li>`);
+  for (const sub of data.submissions || []) rows.push(`<li>Квест на клетке ${Number(sub.cell || 0)}: ${escapeHtml(sub.status)}<br><small>${escapeHtml(sub.created_at || '')}</small></li>`);
+  for (const duel of data.duels || []) rows.push(`<li>🧩 Дуэль #${Number(duel.id)}: ${escapeHtml(duel.status)}${duel.winner_tg_id ? ` · победитель ID ${escapeHtml(duel.winner_tg_id)}` : ''}<br><small>${escapeHtml(duel.created_at || '')}</small></li>`);
+  els.notificationsContent.innerHTML = rows.length ? `<ul>${rows.join('')}</ul>` : '<p class="muted">Личных звоночков пока нет.</p>';
+}
+
+function closeNotifications() {
+  if (els.notificationsContent) els.notificationsContent.innerHTML = '';
+  els.notificationsModal?.classList.add('hidden');
+}
+
+function shufflePuzzle(values) {
+  const board = values.slice();
+  let empty = board.indexOf(0);
+  for (let i = 0; i < 60; i += 1) {
+    const moves = possiblePuzzleMoves(empty);
+    const next = moves[Math.floor(Math.random() * moves.length)];
+    [board[empty], board[next]] = [board[next], board[empty]];
+    empty = next;
+  }
+  return board;
+}
+
+function possiblePuzzleMoves(emptyIndex) {
+  const row = Math.floor(emptyIndex / 3);
+  const col = emptyIndex % 3;
+  return [emptyIndex - 3, emptyIndex + 3, emptyIndex - 1, emptyIndex + 1]
+    .filter((index) => index >= 0 && index < 9 && Math.abs((index % 3) - col) + Math.abs(Math.floor(index / 3) - row) === 1);
+}
+
+function isPuzzleSolved() {
+  return puzzleState.join(',') === '1,2,3,4,5,6,7,8,0';
+}
+
+function renderPuzzle(duel) {
+  const elapsed = puzzleStartedAt ? Math.floor((Date.now() - puzzleStartedAt) / 1000) : 0;
+  els.duelContent.innerHTML = `<p><strong>Дуэль #${Number(duel.id)}</strong> · таймер: <span id="puzzleTimerText">${elapsed}</span> сек.</p><div class="puzzle-grid">${puzzleState.map((value, index) => `<button class="puzzle-tile ${value === 0 ? 'empty' : ''}" type="button" data-puzzle-index="${index}">${value || ''}</button>`).join('')}</div><p class="muted">Таймер стартует после первого хода.</p>${duel.opponent_tg_id === String(tgId) && !duel.opponent_time ? '<button id="duelDeclineBtn" class="ghost" type="button">Отклонить вызов</button>' : ''}`;
+}
+
+function startPuzzle(duel) {
+  activeDuel = duel;
+  puzzleState = shufflePuzzle([1, 2, 3, 4, 5, 6, 7, 8, 0]);
+  puzzleStartedAt = 0;
+  if (puzzleTimer) window.clearInterval(puzzleTimer);
+  puzzleTimer = window.setInterval(() => {
+    const node = document.getElementById('puzzleTimerText');
+    if (node && puzzleStartedAt) node.textContent = String(Math.floor((Date.now() - puzzleStartedAt) / 1000));
+  }, 1000);
+  renderPuzzle(duel);
+}
+
+async function openDuelModal() {
+  if (!state?.user || !els.duelModal) return;
+  els.duelContent.innerHTML = '<div class="empty-state">Загружаем дуэли...</div>';
+  els.duelModal.classList.remove('hidden');
+  const data = await api(`/api/duels/players?tg_id=${encodeURIComponent(tgId)}`);
+  if (data.active_duel) {
+    startPuzzle(data.active_duel);
+    return;
+  }
+  const players = data.players || [];
+  els.duelContent.innerHTML = `<div class="duel-player-list">${players.map((player) => `<button type="button" data-challenge-id="${escapeHtml(player.tg_id)}">Вызвать ${escapeHtml(formatHandle(player.username, player.tg_id))}</button>`).join('') || '<p class="muted">Нет доступных соперников.</p>'}</div>`;
+}
+
+async function closeDuelModal() {
+  if (puzzleTimer) window.clearInterval(puzzleTimer);
+  puzzleTimer = null;
+  if (activeDuel?.opponent_tg_id === String(tgId) && !activeDuel.opponent_time && ['pending', 'active'].includes(activeDuel.status)) {
+    await api('/api/duels/decline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, duel_id: activeDuel.id }) }).catch(() => {});
+    showToast('Вызов закрыт: засчитано поражение в дуэли.');
+    await loadState().catch(() => {});
+  }
+  activeDuel = null;
+  if (els.duelContent) els.duelContent.innerHTML = '';
+  els.duelModal?.classList.add('hidden');
+}
+
+async function challengePlayer(opponentId) {
+  const result = await api('/api/duels/challenge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, opponent_tg_id: opponentId }) });
+  showToast('Вызов отправлен! Теперь соберите пятнашки.');
+  startPuzzle(result.duel);
+}
+
+async function submitPuzzleResult() {
+  const seconds = Math.max(1, Math.ceil((Date.now() - puzzleStartedAt) / 1000));
+  const result = await api('/api/duels/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, duel_id: activeDuel.id, seconds }) });
+  showToast(result.ticket ? 'Дуэль завершена! Победителю начислена Красочка.' : 'Результат отправлен, ждём соперника.');
+  activeDuel = null;
+  await closeDuelModal();
+  await loadState();
+}
+
+async function movePuzzleTile(index) {
+  const empty = puzzleState.indexOf(0);
+  if (!possiblePuzzleMoves(empty).includes(index)) return;
+  if (!puzzleStartedAt) puzzleStartedAt = Date.now();
+  [puzzleState[empty], puzzleState[index]] = [puzzleState[index], puzzleState[empty]];
+  renderPuzzle(activeDuel);
+  if (isPuzzleSolved()) await submitPuzzleResult();
 }
 
 async function rerollTask() {
@@ -1516,10 +1701,26 @@ async function globalReset() {
 els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
 els.tarotBtn?.addEventListener('click', openTarotModal);
-els.tarotDrawBtn?.addEventListener('click', () => useTarot());
+els.duelBtn?.addEventListener('click', openDuelModal);
+els.notificationsBtn?.addEventListener('click', () => openNotifications().catch((error) => showToast(error.message)));
+els.notificationsCloseBtn?.addEventListener('click', closeNotifications);
+els.notificationsModal?.addEventListener('click', (event) => { if (event.target === els.notificationsModal) closeNotifications(); });
+els.duelCloseBtn?.addEventListener('click', () => closeDuelModal().catch((error) => showToast(error.message)));
+els.confirmYesBtn?.addEventListener('click', () => closeConfirmModal(true));
+els.confirmNoBtn?.addEventListener('click', () => closeConfirmModal(false));
+els.confirmModal?.addEventListener('click', (event) => { if (event.target === els.confirmModal) closeConfirmModal(false); });
 els.tarotCancelBtn?.addEventListener('click', closeTarotModal);
 els.tarotModal?.addEventListener('click', (event) => { if (event.target === els.tarotModal) closeTarotModal(); });
 els.rerollTaskBtn.addEventListener('click', () => rerollTask().catch((error) => showToast(error.message)));
+
+els.duelContent?.addEventListener('click', (event) => {
+  const challengeButton = event.target.closest('[data-challenge-id]');
+  if (challengeButton) { challengePlayer(challengeButton.dataset.challengeId).catch((error) => showToast(error.message)); return; }
+  const tileButton = event.target.closest('[data-puzzle-index]');
+  if (tileButton) { movePuzzleTile(Number(tileButton.dataset.puzzleIndex)).catch((error) => showToast(error.message)); return; }
+  if (event.target.closest('#duelDeclineBtn') && activeDuel) closeDuelModal().catch((error) => showToast(error.message));
+});
+
 els.luckyChoice.addEventListener('click', (event) => {
   const button = event.target.closest('[data-lucky-choice]');
   if (button) chooseLuckyTask(button.dataset.luckyChoice).catch((error) => showToast(error.message));
@@ -1549,6 +1750,11 @@ function toggleArchiveAccordion(event) {
 els.paletteGrid.addEventListener('click', (event) => {
   const shareButton = event.target.closest('[data-share-ticket]');
   if (shareButton) { sharePaletteCard(shareButton).catch((error) => showToast(error.message)); return; }
+  const challengeButton = event.target.closest('[data-challenge-id]');
+  if (challengeButton) { challengePlayer(challengeButton.dataset.challengeId).catch((error) => showToast(error.message)); return; }
+  const tileButton = event.target.closest('[data-puzzle-index]');
+  if (tileButton) { movePuzzleTile(Number(tileButton.dataset.puzzleIndex)).catch((error) => showToast(error.message)); return; }
+  if (event.target.closest('#duelDeclineBtn') && activeDuel) { closeDuelModal().catch((error) => showToast(error.message)); return; }
   toggleArchiveAccordion(event);
 });
 els.profileCloseBtn?.addEventListener('click', closeProfile);
