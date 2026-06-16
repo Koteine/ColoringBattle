@@ -386,6 +386,26 @@
       .app { padding: 12px; }
       .card { padding: 16px; border-radius: 26px; }
     }
+
+    .dice-actions { display: flex; align-items: center; justify-content: center; gap: 14px; }
+    .tarot-button { min-width: 64px; height: 64px; border-radius: 22px; font-size: 32px; padding: 0; background: linear-gradient(135deg, #2d1b69, #c084fc, #ffd166); box-shadow: 0 14px 32px rgba(82, 45, 120, .25); }
+    .tarot-button:disabled, .tarot-button.tarot-disabled { opacity: .4; filter: grayscale(.35); pointer-events: none; animation: none; }
+    .tarot-modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .48); }
+    .tarot-modal.hidden { display: none; }
+    .tarot-dialog { width: min(460px, 100%); padding: 24px; border-radius: 30px; text-align: center; background: rgba(255,250,255,.97); box-shadow: 0 24px 70px rgba(50, 30, 62, .34); border: 1px solid rgba(255,255,255,.75); }
+    .tarot-dialog h2 { margin-top: 0; }
+    .glow-name { background: linear-gradient(90deg, #ff4d8d, #ffd166, #7dd3fc, #c084fc, #ff4d8d); background-size: 260% auto; -webkit-background-clip: text; background-clip: text; color: transparent; animation: leaderShimmer 2.8s linear infinite; font-weight: 1000; }
+    @keyframes leaderShimmer { to { background-position: 260% center; } }
+    .profile-link { border: 0; padding: 0; background: transparent; box-shadow: none; color: inherit; cursor: pointer; text-align: left; font: inherit; }
+    .share-card { position: relative; max-width: 520px; border-radius: 28px; overflow: hidden; background: #fff; box-shadow: 0 18px 46px rgba(80, 56, 100, .22); }
+    .share-card img { display: block; width: 100%; height: auto; }
+    .photo-frame { position: absolute; inset: 12px; border: 8px double #D4AF37; border-radius: 24px; box-shadow: inset 0 0 0 3px rgba(255,255,255,.82), 0 0 22px rgba(212,175,55,.35); pointer-events: none; }
+    .paint-stamp { position: absolute; right: 16px; bottom: 16px; width: 118px; height: 118px; border-radius: 50%; display: grid; place-items: center; text-align: center; font-family: Georgia, 'Times New Roman', serif; font-weight: 900; font-size: 16px; line-height: 1.08; color: #6b2c5c; background: radial-gradient(circle, rgba(255,255,255,.82), rgba(255,232,244,.74)); border: 3px double rgba(212,175,55,.9); transform: rotate(-8deg); box-shadow: 0 10px 26px rgba(80, 56, 100, .2); backdrop-filter: blur(2px); }
+    .profile-modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .42); }
+    .profile-modal.hidden { display: none; }
+    .profile-dialog { position: relative; width: min(720px, 100%); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 28px; background: rgba(255, 250, 255, .96); box-shadow: 0 24px 70px rgba(50, 30, 62, .32); }
+    .profile-close { position: sticky; top: 0; float: right; min-width: 42px; height: 42px; border-radius: 50%; padding: 0; }
+    .profile-works { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
   </style>
 </head>
 <body data-owner-tg-id="341995937">
@@ -432,13 +452,13 @@
 
       <div class="game-grid">
         <section id="gamePlayCard" class="card dice-zone">
-          <button id="rollBtn" class="dice-button" type="button" aria-label="Бросить кубик">
+          <div class="dice-actions"><button id="rollBtn" class="dice-button" type="button" aria-label="Бросить кубик">
             <span id="diceFace" class="dice-face" data-value="1" aria-hidden="true">
               <i class="pip"></i><i class="pip"></i><i class="pip"></i>
               <i class="pip"></i><i class="pip"></i><i class="pip"></i>
               <i class="pip"></i><i class="pip"></i><i class="pip"></i>
             </span>
-          </button>
+          </button><button id="tarotBtn" class="tarot-button" type="button" aria-label="Карта удачи">🃏</button></div>
           <p id="diceHint" class="dice-caption muted">После броска кубик заморозится до проверки задания.</p>
           <div class="news-feed" aria-live="polite">
             <h3>Лента новостей игры</h3>
@@ -514,8 +534,8 @@
     <section id="whereScreen" class="screen hidden" data-screen="where">
       <section class="card where-hero">
         <span class="soft-chip">📍 Кто где</span>
-        <h2>Общий прогресс игроков</h2>
-        <p class="muted">Смотрите, кто на какой клетке, и поддерживайте друг друга сердечками или чашкой кофе раз в сутки.</p>
+        <h2>Топ-3 по Красочкам</h2>
+        <p class="muted">При равенстве Красочек выше тот, чей последний одобренный билет был раньше.</p>
         <div id="topReactions" class="top-reactions"></div>
       </section>
       <section class="card">
@@ -633,7 +653,10 @@
     <button id="adminTabBtn" class="nav-btn hidden" type="button" data-tab="admin"><span>🛠</span>Админка</button>
   </nav>
 
+  <div id="tarotModal" class="tarot-modal hidden"><div class="tarot-dialog"><h2>🃏 Карта удачи</h2><p class="muted">Игра на риск. Можно использовать 1 раз за всю игру</p><div class="actions"><button id="tarotDrawBtn" class="success" type="button">Тянуть карту</button><button id="tarotCancelBtn" class="ghost" type="button">Отмена</button></div></div></div>
+  <div id="profileModal" class="profile-modal hidden"><div class="profile-dialog"><button id="profileCloseBtn" class="profile-close" type="button">×</button><div id="profileContent"></div></div></div>
   <div id="toast" class="toast hidden"></div>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
   <script src="/script.js"></script>
 </body>
 </html>
