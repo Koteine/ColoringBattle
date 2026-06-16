@@ -104,6 +104,7 @@ async function initDb() {
   await ensureSubmissionPhotoColumns();
   await ensureUserLuckyColumn();
   await ensureUserTarotColumns();
+  await ensureUserDuelColumns();
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
   await ensureReactionLogsTable();
@@ -112,6 +113,7 @@ async function initDb() {
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
   await ensureNewsEventsTable();
+  await ensurePuzzleDuelsTable();
 
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_player_status ON submissions(tg_id, status, task_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_images ON submissions(status, image_name)');
@@ -121,6 +123,8 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_place ON raffle_results(place_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_raffle_results_ticket ON raffle_results(ticket_number)');
   await run('CREATE INDEX IF NOT EXISTS idx_news_events_created ON news_events(created_at, id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_news_events_tg_id ON news_events(tg_id, id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_puzzle_duels_players_status ON puzzle_duels(challenger_tg_id, opponent_tg_id, status)');
   await run('CREATE INDEX IF NOT EXISTS idx_reaction_logs_limit ON reaction_logs(from_tg_id, to_tg_id, reacted_at)');
 
   await run('DELETE FROM users WHERE tg_id = 391995937');
@@ -197,6 +201,13 @@ async function ensureUserTarotColumns() {
   if (!names.has('next_roll_halved')) {
     await run('ALTER TABLE users ADD COLUMN next_roll_halved INTEGER DEFAULT 0');
   }
+}
+
+async function ensureUserDuelColumns() {
+  const columns = await all('PRAGMA table_info(users)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('can_challenge')) await run('ALTER TABLE users ADD COLUMN can_challenge INTEGER DEFAULT 1');
+  if (!names.has('can_accept')) await run('ALTER TABLE users ADD COLUMN can_accept INTEGER DEFAULT 1');
 }
 
 async function ensureUserRoleColumn() {
@@ -359,6 +370,40 @@ async function ensureNewsEventsTable() {
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id)
   )`);
+}
+
+async function ensurePuzzleDuelsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS puzzle_duels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenger_tg_id TEXT NOT NULL,
+    opponent_tg_id TEXT NOT NULL,
+    challenger_time REAL,
+    opponent_time REAL,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'challenger_won', 'opponent_won', 'declined', 'expired')),
+    winner_tg_id TEXT DEFAULT '',
+    loser_tg_id TEXT DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (challenger_tg_id) REFERENCES users(tg_id),
+    FOREIGN KEY (opponent_tg_id) REFERENCES users(tg_id)
+  )`);
+}
+
+async function finishPuzzleDuel(duel, winnerTgId, loserTgId, status) {
+  await run(`UPDATE puzzle_duels
+    SET status = ?, winner_tg_id = ?, loser_tg_id = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?`, [status, winnerTgId, loserTgId, duel.id]);
+  const ticket = await issueTicket(winnerTgId, 'bonus');
+  await addNewsEvent('🧩 Да ты не только мастер рисовать, но еще и мегамозг! Дуэль выиграна, лови приз!', { eventType: 'puzzle_duel_win', tgId: winnerTgId, ticketNumber: ticket.ticket_number });
+  await addNewsEvent('🧩 Не выиграла дуэль, зато ты красишь круто!', { eventType: 'puzzle_duel_loss', tgId: loserTgId });
+  return ticket;
+}
+
+async function expirePuzzleDuels() {
+  const expired = await all(`SELECT * FROM puzzle_duels
+    WHERE status IN ('pending', 'active') AND datetime(created_at, '+24 hours') <= datetime('now')
+    LIMIT 50`);
+  for (const duel of expired) await finishPuzzleDuel(duel, duel.challenger_tg_id, duel.opponent_tg_id, 'expired');
 }
 
 async function seedTasks() {
@@ -632,7 +677,22 @@ async function issueTicket(tgId, type = 'standard') {
 }
 
 function rollD6() {
-  return Math.floor(Math.random() * 6) + 1;
+  return crypto.randomInt(1, 7);
+}
+
+const TAROT_CARDS = [
+  { id: 'double_roll', title: 'Золотая кисть Рапунцель', icon: '🖌️', kind: 'buff', description: 'Х2 к следующему шагу: два броска подряд складываются.' },
+  { id: 'trap_immunity', title: 'Защитное яблоко Белоснежки', icon: '🍎', kind: 'buff', description: 'Единоразовый иммунитет от будущей ловушки.' },
+  { id: 'halve_next_roll', title: 'Высохший маркер Шрама', icon: '🖊️', kind: 'curse', description: 'Следующий бросок кубика делится пополам.' }
+];
+
+function shuffleTarotCards() {
+  const cards = TAROT_CARDS.map((card) => ({ ...card }));
+  for (let i = cards.length - 1; i > 0; i -= 1) {
+    const j = crypto.randomInt(0, i + 1);
+    [cards[i], cards[j]] = [cards[j], cards[i]];
+  }
+  return cards;
 }
 
 function shuffleTickets(tickets) {
@@ -1054,31 +1114,119 @@ app.post('/api/roll', async (req, res, next) => {
   }
 });
 
+
+app.get('/api/notifications/:userId', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.params.userId);
+    await requireApproved(tgId);
+    const limit = Math.max(1, Math.min(40, Number(req.query.limit) || 25));
+    const events = await all(`SELECT id, message, event_type, created_at FROM news_events WHERE tg_id = ? ORDER BY id DESC LIMIT ?`, [tgId, limit]);
+    const submissions = await all(`SELECT id, cell, status, updated_at AS created_at FROM submissions WHERE tg_id = ? ORDER BY updated_at DESC, id DESC LIMIT 10`, [tgId]);
+    const duels = await all(`SELECT id, challenger_tg_id, opponent_tg_id, challenger_time, opponent_time, status, winner_tg_id, loser_tg_id, updated_at AS created_at FROM puzzle_duels WHERE challenger_tg_id = ? OR opponent_tg_id = ? ORDER BY updated_at DESC, id DESC LIMIT 10`, [tgId, tgId]);
+    res.json({ events, submissions, duels });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/duels/players', async (req, res, next) => {
+  try {
+    await expirePuzzleDuels();
+    const tgId = normalizeTgId(req.query.tg_id);
+    await requireApproved(tgId);
+    const players = await all(`SELECT tg_id, username FROM users WHERE tg_id <> ? AND is_approved = 1 AND role = 'user' AND can_challenge = 1 AND can_accept = 1 ORDER BY username COLLATE NOCASE ASC, tg_id ASC LIMIT 80`, [tgId]);
+    const active = await get(`SELECT * FROM puzzle_duels WHERE (challenger_tg_id = ? OR opponent_tg_id = ?) AND status IN ('pending', 'active') ORDER BY id DESC LIMIT 1`, [tgId, tgId]);
+    res.json({ players, active_duel: active || null });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/duels/challenge', async (req, res, next) => {
+  try {
+    await expirePuzzleDuels();
+    const tgId = normalizeTgId(req.body.tg_id);
+    const opponentId = normalizeTgId(req.body.opponent_tg_id);
+    if (tgId === opponentId) throw Object.assign(new Error('Нельзя вызвать саму себя'), { status: 400 });
+    const user = await requireApproved(tgId);
+    const opponent = await requireApproved(opponentId);
+    assertPlayableUser(user); assertPlayableUser(opponent);
+    if (Number(user.can_challenge) !== 1) throw Object.assign(new Error('Вызов уже использован в этой игре'), { status: 400 });
+    if (Number(opponent.can_accept) !== 1) throw Object.assign(new Error('Этот игрок уже принимал дуэль'), { status: 400 });
+    const existing = await get(`SELECT id FROM puzzle_duels WHERE (challenger_tg_id = ? OR opponent_tg_id = ? OR challenger_tg_id = ? OR opponent_tg_id = ?) AND status IN ('pending', 'active') LIMIT 1`, [tgId, tgId, opponentId, opponentId]);
+    if (existing) throw Object.assign(new Error('У одного из игроков уже есть активная дуэль'), { status: 400 });
+    const result = await run(`INSERT INTO puzzle_duels (challenger_tg_id, opponent_tg_id, status) VALUES (?, ?, 'pending')`, [tgId, opponentId]);
+    await run('UPDATE users SET can_challenge = 0 WHERE tg_id = ?', [tgId]);
+    await run('UPDATE users SET can_accept = 0 WHERE tg_id = ?', [opponentId]);
+    await addNewsEvent(`🧩 ${formatUserHandle(user.username, user.tg_id)} вызывает ${formatUserHandle(opponent.username, opponent.tg_id)} на дуэль в пятнашки!`, { eventType: 'puzzle_duel_challenge', tgId: opponentId });
+    res.json({ ok: true, duel: await get('SELECT * FROM puzzle_duels WHERE id = ?', [result.id]) });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/duels/decline', async (req, res, next) => {
+  try {
+    await expirePuzzleDuels();
+    const tgId = normalizeTgId(req.body.tg_id);
+    const duelId = Number(req.body.duel_id);
+    const duel = await get("SELECT * FROM puzzle_duels WHERE id = ? AND status IN ('pending', 'active')", [duelId]);
+    if (!duel) throw Object.assign(new Error('Дуэль не найдена'), { status: 404 });
+    if (duel.opponent_tg_id !== tgId) throw Object.assign(new Error('Отклонить может только соперник'), { status: 403 });
+    const ticket = await finishPuzzleDuel(duel, duel.challenger_tg_id, duel.opponent_tg_id, 'declined');
+    res.json({ ok: true, ticket });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/duels/submit', async (req, res, next) => {
+  try {
+    await expirePuzzleDuels();
+    const tgId = normalizeTgId(req.body.tg_id);
+    const duelId = Number(req.body.duel_id);
+    const seconds = Math.max(1, Math.min(3600, Number(req.body.seconds)));
+    const duel = await get("SELECT * FROM puzzle_duels WHERE id = ? AND status IN ('pending', 'active')", [duelId]);
+    if (!duel) throw Object.assign(new Error('Дуэль не найдена или уже закрыта'), { status: 404 });
+    if (![duel.challenger_tg_id, duel.opponent_tg_id].includes(tgId)) throw Object.assign(new Error('Это не ваша дуэль'), { status: 403 });
+    const field = tgId === duel.challenger_tg_id ? 'challenger_time' : 'opponent_time';
+    if (duel[field] !== null && duel[field] !== undefined) throw Object.assign(new Error('Ваш результат уже отправлен'), { status: 400 });
+    await run(`UPDATE puzzle_duels SET ${field} = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [seconds, duelId]);
+    const updated = await get('SELECT * FROM puzzle_duels WHERE id = ?', [duelId]);
+    if (updated.challenger_time !== null && updated.opponent_time !== null) {
+      const challengerWins = Number(updated.challenger_time) <= Number(updated.opponent_time);
+      const winner = challengerWins ? updated.challenger_tg_id : updated.opponent_tg_id;
+      const loser = challengerWins ? updated.opponent_tg_id : updated.challenger_tg_id;
+      const ticket = await finishPuzzleDuel(updated, winner, loser, challengerWins ? 'challenger_won' : 'opponent_won');
+      res.json({ ok: true, duel: await get('SELECT * FROM puzzle_duels WHERE id = ?', [duelId]), ticket });
+      return;
+    }
+    res.json({ ok: true, duel: updated });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/tarot', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
+    const selectedIndex = Number(req.body.selected_index);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
+    if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex > 2) throw Object.assign(new Error('Выберите одну из трех карт'), { status: 400 });
     if (Number(user.has_used_tarot) === 1) throw Object.assign(new Error('Карта удачи уже использована в этой игре'), { status: 400 });
     if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
     if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
-    const cardIndex = crypto.randomInt(0, 3);
+    const deck = shuffleTarotCards();
+    const selectedCard = deck[selectedIndex];
     await run('UPDATE users SET has_used_tarot = 1 WHERE tg_id = ?', [tgId]);
-    if (cardIndex === 0) {
+
+    const tarotExtra = { tarot_card: selectedCard.title, tarot_effect: selectedCard.id, tarot_deck: deck, selected_index: selectedIndex };
+    if (selectedCard.id === 'double_roll') {
       const dice_rolls = [rollD6(), rollD6()];
       const dice = dice_rolls[0] + dice_rolls[1];
       const freshUser = await get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
-      res.json(await applyMoveAndCreateTask(tgId, freshUser, dice, { tarot_card: 'Золотая кисть Рапунцель', tarot_effect: 'double_roll', dice_rolls }));
+      res.json(await applyMoveAndCreateTask(tgId, freshUser, dice, { ...tarotExtra, dice_rolls }));
       return;
     }
-    if (cardIndex === 1) {
+    if (selectedCard.id === 'trap_immunity') {
       await run('UPDATE users SET trap_immunity = 1 WHERE tg_id = ?', [tgId]);
-      res.json({ ok: true, tarot_card: 'Защитное яблоко Белоснежки', tarot_effect: 'trap_immunity', trap_immunity: true });
+      res.json({ ok: true, ...tarotExtra, trap_immunity: true });
       return;
     }
     await run('UPDATE users SET next_roll_halved = 1 WHERE tg_id = ?', [tgId]);
-    res.json({ ok: true, tarot_card: 'Высохший маркер Шрама', tarot_effect: 'halve_next_roll' });
+    res.json({ ok: true, ...tarotExtra });
   } catch (error) {
     next(error);
   }
@@ -1539,13 +1687,14 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await run('DELETE FROM tickets');
     await run('DELETE FROM raffle_results');
     await run('DELETE FROM reaction_logs');
+    await run('DELETE FROM puzzle_duels');
     await regenerateMapConfig();
     await loadMapConfig();
     await run(`UPDATE users
       SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
         has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0,
-        reactions_hearts = 0, reactions_coffee = 0`);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?)', ['submissions', 'tickets', 'raffle_results']);
+        reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1`);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'puzzle_duels']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
   } catch (error) {
     next(error);
@@ -1560,8 +1709,9 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM tickets');
     await run('DELETE FROM news_events');
     await run('DELETE FROM reaction_logs');
+    await run('DELETE FROM puzzle_duels');
     await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels']);
     await run(`UPDATE raffle_config
       SET raffle_start = '', raffle_end = '', total_prizes = 0, remaining_prizes = 0, updated_at = CURRENT_TIMESTAMP
       WHERE id = 1`);
@@ -1574,6 +1724,8 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
         has_used_tarot = 0,
         trap_immunity = 0,
         next_roll_halved = 0,
+        can_challenge = 1,
+        can_accept = 1,
         is_approved = 1,
         role = 'admin'`, [OWNER_TG_ID]);
 
