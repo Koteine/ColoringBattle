@@ -29,6 +29,10 @@ const els = {
   routeRunner: document.getElementById('routeRunner'),
   routeFill: document.getElementById('routeFill'),
   rollBtn: document.getElementById('rollBtn'),
+  tarotBtn: document.getElementById('tarotBtn'),
+  tarotModal: document.getElementById('tarotModal'),
+  tarotDrawBtn: document.getElementById('tarotDrawBtn'),
+  tarotCancelBtn: document.getElementById('tarotCancelBtn'),
   diceFace: document.getElementById('diceFace'),
   diceHint: document.getElementById('diceHint'),
   newsTrack: document.getElementById('newsTrack'),
@@ -78,7 +82,10 @@ const els = {
   resetRoundBtn: document.getElementById('resetRoundBtn'),
   globalResetBtn: document.getElementById('globalResetBtn'),
   confettiLayer: document.getElementById('confettiLayer'),
-  toast: document.getElementById('toast')
+  toast: document.getElementById('toast'),
+  profileModal: document.getElementById('profileModal'),
+  profileCloseBtn: document.getElementById('profileCloseBtn'),
+  profileContent: document.getElementById('profileContent')
 };
 
 const paintGradients = [
@@ -295,9 +302,11 @@ function renderPalette(tickets = []) {
       <div class="archive-panel"><div class="archive-inner">
         ${hasWork ? `
           <p><strong>Квест:</strong> ${escapeHtml(ticket.text_task)}</p>
-          <a class="comparison-photo player-after-photo" href="${afterUrl}" target="_blank" rel="noopener">
-            <strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ для Красочки №${escapeHtml(ticket.ticket_number)}">
-          </a>
+          <div class="share-card" data-share-card>
+            <img src="${afterUrl}" alt="Фото ПОСЛЕ для Красочки №${escapeHtml(ticket.ticket_number)}">
+            <div class="photo-frame"></div><div class="paint-stamp">Красочки:<br>бери и крась</div>
+          </div>
+          <div class="actions"><button class="success" type="button" data-share-ticket="${escapeHtml(ticket.ticket_number)}">Поделиться</button></div>
         ` : '<p class="muted">Эта Красочка бонусная или выдана вручную — привязанной работы нет.</p>'}
       </div></div>
     `;
@@ -314,19 +323,19 @@ function formatHandle(username, fallbackId = '') {
 function renderLeaderboard(players = []) {
   leaderboardPlayers = players;
   const sortedByReactions = [...players]
-    .map((player) => ({ ...player, total_reactions: Number(player.reactions_hearts || 0) + Number(player.reactions_coffee || 0) }))
-    .filter((player) => player.total_reactions > 0)
-    .sort((a, b) => b.total_reactions - a.total_reactions || Number(b.current_cell || 0) - Number(a.current_cell || 0))
+    .sort((a, b) => Number(b.tickets_count || 0) - Number(a.tickets_count || 0)
+      || String(a.last_approved_at || '9999-12-31').localeCompare(String(b.last_approved_at || '9999-12-31'))
+      || Number(b.current_cell || 0) - Number(a.current_cell || 0))
     .slice(0, 3);
 
-  els.topReactions.innerHTML = sortedByReactions.length ? '' : '<div class="empty-state">Топ поддержки появится после первых реакций.</div>';
+  els.topReactions.innerHTML = sortedByReactions.length ? '' : '<div class="empty-state">Топ-3 появится после первых Красочек.</div>';
   sortedByReactions.forEach((player, index) => {
     const card = document.createElement('article');
     card.className = 'reaction-champion';
     card.innerHTML = `
-      <div class="place">${['🥇', '🥈', '🥉'][index]}</div>
+      <div class="place">${['👑', '⭐', '✨'][index]}</div>
       <strong class="glow-name">${escapeHtml(formatHandle(player.username, player.tg_id))}</strong>
-      <p class="muted">${player.total_reactions} реакций · клетка ${Number(player.current_cell || 0)}</p>
+      <p class="muted">${Number(player.tickets_count || 0)} Красочек · клетка ${Number(player.current_cell || 0)}</p>
     `;
     els.topReactions.append(card);
   });
@@ -336,7 +345,7 @@ function renderLeaderboard(players = []) {
     return;
   }
 
-  const reactionLeaders = new Set(sortedByReactions.map((player) => String(player.tg_id)));
+  const reactionLeaders = new Map(sortedByReactions.map((player, index) => [String(player.tg_id), ['👑', '⭐', '✨'][index]]));
   els.leaderboardTable.innerHTML = `
     <table class="where-table">
       <thead><tr><th>Игрок</th><th>Клетка</th><th>💖</th><th>☕</th></tr></thead>
@@ -347,7 +356,7 @@ function renderLeaderboard(players = []) {
         const disabled = isMe ? ' disabled aria-disabled="true"' : '';
         const title = isMe ? ' title="Нельзя поддержать себя"' : '';
         return `<tr class="${isMe ? 'is-me' : ''}" data-player-id="${escapeHtml(player.tg_id)}">
-          <td><strong class="${reactionLeaders.has(String(player.tg_id)) ? 'glow-name' : ''}">${escapeHtml(formatHandle(player.username, player.tg_id))}</strong>${isMe ? ' <span class="muted">это вы</span>' : ''}</td>
+          <td><button class="profile-link ${reactionLeaders.has(String(player.tg_id)) ? 'glow-name' : ''}" type="button" data-profile-id="${escapeHtml(player.tg_id)}">${reactionLeaders.get(String(player.tg_id)) || ''} ${escapeHtml(formatHandle(player.username, player.tg_id))}</button>${isMe ? ' <span class="muted">это вы</span>' : ''}</td>
           <td>${Number(player.current_cell || 0)}/100</td>
           <td><button class="reaction-btn" type="button" data-react="heart" data-to-id="${escapeHtml(player.tg_id)}"${disabled}${title}>💖 ${hearts}</button></td>
           <td><button class="reaction-btn" type="button" data-react="coffee" data-to-id="${escapeHtml(player.tg_id)}"${disabled}${title}>☕ ${coffee}</button></td>
@@ -532,6 +541,8 @@ function render() {
   const finished = Number(user.current_cell) >= 100;
   els.rollBtn.disabled = roleBlocked || frozen || finished || isRolling;
   els.rollBtn.classList.toggle('frozen', roleBlocked || frozen || finished);
+  setTarotDisabled(roleBlocked || frozen || finished || user.has_used_tarot === true || Number(user.has_used_tarot) === 1);
+  if (els.tarotBtn) els.tarotBtn.title = (user.has_used_tarot === true || Number(user.has_used_tarot) === 1) ? 'Карта удачи уже использована' : 'Карта удачи';
   els.diceHint.textContent = finished
     ? 'Вы достигли 100-й клетки. Поздравляем!'
     : frozen
@@ -619,8 +630,12 @@ async function rollDice() {
     });
     await animateDiceTo(result.dice);
     updateDiceFace(result.dice);
-    if (result.cell_type === 'trap') {
+    if (result.cell_type === 'trap' && result.trap_immunity_used) {
+      showToast(`Защитное яблоко спасло от ловушки! Вы остались на клетке ${result.current_cell}.`);
+    } else if (result.cell_type === 'trap') {
       showToast(`Ловушка! Выпало ${result.dice}, затем откат на ${result.trap_dice}. Новая клетка: ${result.current_cell}.`);
+    } else if (result.roll_halved) {
+      showToast(`Высохший маркер сработал: ${result.raw_dice} делится до ${result.dice}. Клетка ${result.current_cell}.`);
     } else if (result.cell_type === 'lucky') {
       showToast(`Выпало ${result.dice}. Бонусная клетка ${result.current_cell}: выберите условие.`);
     } else {
@@ -637,6 +652,75 @@ async function rollDice() {
   }
 }
 
+
+
+function setTarotDisabled(disabled) {
+  if (!els.tarotBtn) return;
+  els.tarotBtn.disabled = Boolean(disabled);
+  els.tarotBtn.classList.toggle('tarot-disabled', Boolean(disabled));
+}
+
+function openTarotModal() {
+  if (els.tarotBtn?.disabled) return;
+  els.tarotModal?.classList.remove('hidden');
+}
+
+function closeTarotModal() {
+  els.tarotModal?.classList.add('hidden');
+}
+
+async function useTarot() {
+  els.tarotDrawBtn.disabled = true;
+  try {
+    const result = await api('/api/tarot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tg_id: tgId })
+    });
+    setTarotDisabled(true);
+    closeTarotModal();
+    if (result.tarot_effect === 'double_roll') showToast(`🃏 ${result.tarot_card}: броски ${result.dice_rolls.join(' + ')} = ${result.dice}. Клетка ${result.current_cell}.`);
+    else if (result.tarot_effect === 'trap_immunity') showToast(`🃏 ${result.tarot_card}: иммунитет от следующей ловушки активен.`);
+    else showToast(`🃏 ${result.tarot_card}: следующий бросок будет делиться на 2.`);
+    await loadState();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    els.tarotDrawBtn.disabled = false;
+  }
+}
+
+const shareTexts = [
+  'Вот какая красота у меня получилась! Не правда ли чудесно?! 🎨✨',
+  'Смотрите, как ожили страницы моей любимой книги! Бери и крась! 👑📖',
+  'Ещё один шедевр в копилку «Красочек»! Как вам такое сочетание? 🥰🎨',
+  'Магия цвета в действии! Я сделала это! 🔮✨',
+  'Мой колористический квест успешно завершён, зацените результат! 💖🖌️'
+];
+
+async function sharePaletteCard(button) {
+  const card = button.closest('.archive-inner')?.querySelector('[data-share-card]');
+  if (!card) return;
+  if (window.html2canvas) await window.html2canvas(card, { useCORS: true, backgroundColor: null });
+  const text = shareTexts[Math.floor(Math.random() * shareTexts.length)];
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(location.origin)}&text=${encodeURIComponent(text)}`;
+  await navigator.clipboard?.writeText(`${text} ${shareUrl}`).catch(() => {});
+  window.open(shareUrl, '_blank', 'noopener');
+  showToast('Текст и ссылка для Telegram скопированы.');
+}
+
+async function openProfile(profileId) {
+  els.profileModal.classList.remove('hidden');
+  els.profileContent.innerHTML = '<div class="empty-state">Загружаем профиль...</div>';
+  const data = await api(`/api/profile/${encodeURIComponent(profileId)}`);
+  const profile = data.profile;
+  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Красочки: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p><div class="profile-works">${(profile.works || []).map((work) => `<a class="comparison-photo" href="/uploads/${encodeURIComponent(work.photo_after)}" target="_blank" rel="noopener"><strong>Клетка ${Number(work.cell || 0)}</strong><img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа"></a>`).join('') || '<p class="muted">Готовых работ пока нет.</p>'}</div>`;
+}
+
+function closeProfile() {
+  els.profileContent.innerHTML = '';
+  els.profileModal.classList.add('hidden');
+}
 
 async function rerollTask() {
   if (isRolling) return;
@@ -1431,6 +1515,10 @@ async function globalReset() {
 
 els.applyBtn.addEventListener('click', applyForGame);
 els.rollBtn.addEventListener('click', rollDice);
+els.tarotBtn?.addEventListener('click', openTarotModal);
+els.tarotDrawBtn?.addEventListener('click', () => useTarot());
+els.tarotCancelBtn?.addEventListener('click', closeTarotModal);
+els.tarotModal?.addEventListener('click', (event) => { if (event.target === els.tarotModal) closeTarotModal(); });
 els.rerollTaskBtn.addEventListener('click', () => rerollTask().catch((error) => showToast(error.message)));
 els.luckyChoice.addEventListener('click', (event) => {
   const button = event.target.closest('[data-lucky-choice]');
@@ -1445,6 +1533,8 @@ els.resetRoundBtn?.addEventListener('click', () => resetRound().catch((error) =>
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
 els.leaderboardTable?.addEventListener('click', (event) => {
   const button = event.target.closest('[data-react]');
+  const profileButton = event.target.closest('[data-profile-id]');
+  if (profileButton) { openProfile(profileButton.dataset.profileId).catch((error) => showToast(error.message)); return; }
   if (!button) return;
   sendReaction(button.dataset.toId, button.dataset.react, button);
 });
@@ -1456,7 +1546,13 @@ function toggleArchiveAccordion(event) {
   section?.classList.toggle('open');
 }
 
-els.paletteGrid.addEventListener('click', toggleArchiveAccordion);
+els.paletteGrid.addEventListener('click', (event) => {
+  const shareButton = event.target.closest('[data-share-ticket]');
+  if (shareButton) { sharePaletteCard(shareButton).catch((error) => showToast(error.message)); return; }
+  toggleArchiveAccordion(event);
+});
+els.profileCloseBtn?.addEventListener('click', closeProfile);
+els.profileModal?.addEventListener('click', (event) => { if (event.target === els.profileModal) closeProfile(); });
 els.pendingSubmissions.addEventListener('click', toggleArchiveAccordion);
 
 document.querySelectorAll('.admin-accordion-toggle').forEach((button) => {

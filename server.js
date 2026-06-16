@@ -103,6 +103,7 @@ async function initDb() {
 
   await ensureSubmissionPhotoColumns();
   await ensureUserLuckyColumn();
+  await ensureUserTarotColumns();
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
   await ensureReactionLogsTable();
@@ -182,6 +183,20 @@ async function loadMapConfig() {
   const rows = await all('SELECT cell, cell_type FROM map_config');
   TRAP_CELLS = new Set(rows.filter((row) => row.cell_type === 'trap').map((row) => Number(row.cell)));
   LUCKY_CELLS = new Set(rows.filter((row) => row.cell_type === 'lucky').map((row) => Number(row.cell)));
+}
+
+async function ensureUserTarotColumns() {
+  const columns = await all('PRAGMA table_info(users)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('has_used_tarot')) {
+    await run('ALTER TABLE users ADD COLUMN has_used_tarot INTEGER DEFAULT 0');
+  }
+  if (!names.has('trap_immunity')) {
+    await run('ALTER TABLE users ADD COLUMN trap_immunity INTEGER DEFAULT 0');
+  }
+  if (!names.has('next_roll_halved')) {
+    await run('ALTER TABLE users ADD COLUMN next_roll_halved INTEGER DEFAULT 0');
+  }
 }
 
 async function ensureUserRoleColumn() {
@@ -790,7 +805,7 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const pendingLucky = Number(user.is_approved) === 1 && user.pending_lucky_cell !== null
       ? { cell: Number(user.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
       : null;
-    res.json({ user, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator' });
+    res.json({ user: { ...user, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1 }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator' });
   } catch (error) {
     next(error);
   }
@@ -810,13 +825,38 @@ app.post('/api/apply', async (req, res, next) => {
 
 app.get('/api/game/leaderboard', async (_req, res, next) => {
   try {
-    const players = await all(`SELECT tg_id, username, current_cell, reactions_hearts, reactions_coffee
-      FROM users
-      WHERE is_approved = 1
-        AND tg_id <> ?
-        AND COALESCE(role, 'user') <> 'moderator'
-      ORDER BY current_cell DESC, username COLLATE NOCASE ASC, tg_id ASC`, [OWNER_TG_ID]);
+    const players = await all(`SELECT u.tg_id, u.username, u.current_cell, u.reactions_hearts, u.reactions_coffee,
+        COUNT(DISTINCT t.ticket_number) AS tickets_count,
+        MIN(CASE WHEN s.status = 'approved' THEN s.updated_at END) AS first_approved_at,
+        MAX(CASE WHEN s.status = 'approved' THEN s.updated_at END) AS last_approved_at
+      FROM users u
+      LEFT JOIN tickets t ON t.tg_id = u.tg_id
+      LEFT JOIN submissions s ON s.tg_id = u.tg_id
+      WHERE u.is_approved = 1
+        AND u.tg_id <> ?
+        AND COALESCE(u.role, 'user') NOT IN ('moderator', 'admin')
+      GROUP BY u.tg_id
+      ORDER BY tickets_count DESC, COALESCE(last_approved_at, '9999-12-31') ASC, u.current_cell DESC, u.username COLLATE NOCASE ASC, u.tg_id ASC`, [OWNER_TG_ID]);
     res.json({ players });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+app.get('/api/profile/:tgId', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.params.tgId);
+    const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen
+      FROM users WHERE tg_id = ? AND is_approved = 1`, [tgId]);
+    if (!user) throw Object.assign(new Error('Профиль не найден'), { status: 404 });
+    const works = await all(`SELECT s.cell, s.photo_after, s.updated_at, t.text_task
+      FROM submissions s
+      JOIN tasks t ON t.id = s.task_id
+      WHERE s.tg_id = ? AND s.status = 'approved' AND s.photo_after IS NOT NULL
+      ORDER BY s.updated_at DESC`, [tgId]);
+    const counts = await get(`SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?`, [tgId]);
+    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску', works } });
   } catch (error) {
     next(error);
   }
@@ -971,6 +1011,33 @@ async function createPendingSubmissionForCell(tgId, cell) {
   return { task, submission_id: submission.id };
 }
 
+async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
+  const landedCell = Math.min(100, Number(user.current_cell || 0) + dice);
+  const cellType = getCellType(landedCell);
+
+  if (cellType === 'lucky') {
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
+    return { ok: true, dice, current_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
+  }
+
+  let currentCell = landedCell;
+  let trapDice = null;
+  let trapImmunityUsed = false;
+  if (cellType === 'trap') {
+    if (Number(user.trap_immunity) === 1) {
+      trapImmunityUsed = true;
+      await run('UPDATE users SET trap_immunity = 0 WHERE tg_id = ?', [tgId]);
+    } else {
+      trapDice = rollD6();
+      currentCell = Math.max(0, landedCell - trapDice);
+    }
+  }
+
+  const pending = await createPendingSubmissionForCell(tgId, currentCell);
+  await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [currentCell, tgId]);
+  return { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...extra, ...pending };
+}
+
 app.post('/api/roll', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
@@ -979,27 +1046,39 @@ app.post('/api/roll', async (req, res, next) => {
     if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Кубик заморожен до проверки задания'), { status: 400 });
     if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
-    const dice = rollD6();
-    const landedCell = Math.min(100, Number(user.current_cell || 0) + dice);
-    const cellType = getCellType(landedCell);
+    const rawDice = rollD6();
+    const dice = Number(user.next_roll_halved) === 1 ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice;
+    res.json(await applyMoveAndCreateTask(tgId, user, dice, { raw_dice: rawDice, roll_halved: Number(user.next_roll_halved) === 1 }));
+  } catch (error) {
+    next(error);
+  }
+});
 
-    if (cellType === 'lucky') {
-      await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ? WHERE tg_id = ?', [landedCell, landedCell, tgId]);
-      res.json({ ok: true, dice, current_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS });
+app.post('/api/tarot', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    if (Number(user.has_used_tarot) === 1) throw Object.assign(new Error('Карта удачи уже использована в этой игре'), { status: 400 });
+    if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
+    if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
+
+    const cardIndex = crypto.randomInt(0, 3);
+    await run('UPDATE users SET has_used_tarot = 1 WHERE tg_id = ?', [tgId]);
+    if (cardIndex === 0) {
+      const dice_rolls = [rollD6(), rollD6()];
+      const dice = dice_rolls[0] + dice_rolls[1];
+      const freshUser = await get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
+      res.json(await applyMoveAndCreateTask(tgId, freshUser, dice, { tarot_card: 'Золотая кисть Рапунцель', tarot_effect: 'double_roll', dice_rolls }));
       return;
     }
-
-    let currentCell = landedCell;
-    let trapDice = null;
-    if (cellType === 'trap') {
-      trapDice = rollD6();
-      currentCell = Math.max(0, landedCell - trapDice);
+    if (cardIndex === 1) {
+      await run('UPDATE users SET trap_immunity = 1 WHERE tg_id = ?', [tgId]);
+      res.json({ ok: true, tarot_card: 'Защитное яблоко Белоснежки', tarot_effect: 'trap_immunity', trap_immunity: true });
+      return;
     }
-
-    const pending = await createPendingSubmissionForCell(tgId, currentCell);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
-
-    res.json({ ok: true, dice, trap_dice: trapDice, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...pending });
+    await run('UPDATE users SET next_roll_halved = 1 WHERE tg_id = ?', [tgId]);
+    res.json({ ok: true, tarot_card: 'Высохший маркер Шрама', tarot_effect: 'halve_next_roll' });
   } catch (error) {
     next(error);
   }
@@ -1020,7 +1099,7 @@ app.post('/api/reroll-task', async (req, res, next) => {
     const currentCell = Math.max(0, Number(user.current_cell || 0) - penalty);
     await run('DELETE FROM submissions WHERE id = ?', [active.id]);
     const pending = await createPendingSubmissionForCell(tgId, currentCell);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [currentCell, tgId]);
 
     res.json({ ok: true, penalty, current_cell: currentCell, ...pending });
   } catch (error) {
@@ -1041,7 +1120,7 @@ app.post('/api/lucky-choice', async (req, res, next) => {
     const result = await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [choice]);
     const task = result.id ? await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]) : await get('SELECT id, text_task FROM tasks WHERE text_task = ?', [choice]);
     const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, luckyCell, task.id, 'pending']);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [luckyCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [luckyCell, tgId]);
 
     res.json({ ok: true, current_cell: luckyCell, task, submission_id: submission.id });
   } catch (error) {
@@ -1135,7 +1214,7 @@ app.post('/api/admin/approve-user', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
-    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL, has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0 WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Заявка не найдена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -1464,6 +1543,7 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await loadMapConfig();
     await run(`UPDATE users
       SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
+        has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0,
         reactions_hearts = 0, reactions_coffee = 0`);
     await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?)', ['submissions', 'tickets', 'raffle_results']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
@@ -1491,6 +1571,9 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
         current_cell = 0,
         dice_frozen = 0,
         pending_lucky_cell = NULL,
+        has_used_tarot = 0,
+        trap_immunity = 0,
+        next_roll_halved = 0,
         is_approved = 1,
         role = 'admin'`, [OWNER_TG_ID]);
 
