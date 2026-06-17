@@ -406,9 +406,15 @@
     .tarot-button.tarot-disabled { font-size: 0; }
 
     .bell-btn { margin-left: 6px; min-width: 28px; height: 28px; padding: 0; border-radius: 999px; font-size: 14px; }
-    .notifications-modal, .duel-modal, .confirm-modal { position: fixed; inset: 0; z-index: 65; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .48); }
-    .notifications-modal.hidden, .duel-modal.hidden, .confirm-modal.hidden { display: none; }
-    .notifications-dialog, .duel-dialog, .confirm-dialog { width: min(560px, 100%); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 28px; background: rgba(255,250,255,.97); box-shadow: 0 24px 70px rgba(50, 30, 62, .34); }
+    .notifications-modal, .duel-modal, .confirm-modal, .finish-modal { position: fixed; inset: 0; z-index: 65; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .48); }
+    .notifications-modal.hidden, .duel-modal.hidden, .confirm-modal.hidden, .finish-modal.hidden { display: none; }
+    .notifications-dialog, .duel-dialog, .confirm-dialog, .finish-dialog { width: min(560px, 100%); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 28px; background: rgba(255,250,255,.97); box-shadow: 0 24px 70px rgba(50, 30, 62, .34); }
+    .finish-dialog { text-align: center; }
+    .finish-dialog h2 { font-size: clamp(30px, 9vw, 46px); margin: 0 0 8px; }
+    .finish-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 18px 0; text-align: left; }
+    .finish-stat { border: 1px solid var(--line); border-radius: 20px; padding: 12px; background: rgba(255,255,255,.68); }
+    .finish-stat span { display: block; color: var(--muted); font-size: 12px; font-weight: 850; }
+    .finish-stat strong { display: block; margin-top: 4px; font-size: 24px; }
     .puzzle-grid { display: grid; grid-template-columns: repeat(3, 68px); gap: 8px; justify-content: center; margin: 14px 0; }
     .puzzle-tile { width: 68px; height: 68px; border-radius: 16px; font-size: 24px; font-weight: 1000; }
     .puzzle-tile.empty { visibility: hidden; }
@@ -698,6 +704,7 @@
   </nav>
 
   <div id="tarotModal" class="tarot-modal hidden"><div class="tarot-dialog"><h2>🃏 Оракул карт Удачи</h2><p class="muted tarot-warning">Добро пожаловать в игру на риск! Перед тобой 3 карты. Из них 2 содержат мощные баффы, а 1 — коварное проклятие. Выбор происходит абсолютно случайно, а карты тщательно перемешиваются. Испытать удачу можно только 1 раз за всю игру! Рискнёшь?</p><div id="tarotCards" class="tarot-cards" aria-label="Выберите одну из трех карт"></div><div class="actions"><button id="tarotCancelBtn" class="ghost" type="button">Отмена</button></div></div></div>
+  <div id="finishModal" class="finish-modal hidden"><div class="finish-dialog"><h2>🏁 Финиш!</h2><p class="muted">Поздравляю! Ты прошел этот путь от начала до конца! Ты настоящий мастер, твои работы вдохновляют. Теперь ты в рядах наших чемпионов, ожидай розыгрыша призов!</p><div id="finishStats" class="finish-stats"></div><div class="actions"><button id="finishCloseBtn" type="button">Ура, жду розыгрыш!</button></div></div></div>
   <div id="notificationsModal" class="notifications-modal hidden"><div class="notifications-dialog"><button id="notificationsCloseBtn" class="profile-close" type="button">×</button><h2>🔔 Личные звоночки</h2><div id="notificationsContent"></div></div></div>
   <div id="duelModal" class="duel-modal hidden"><div class="duel-dialog"><button id="duelCloseBtn" class="profile-close" type="button">×</button><h2>🧩 Дуэль в пятнашки</h2><p class="muted">Собери пятнашки быстрее соперника! 1 вызов и 1 прием за игру. Награда победителю: +1 красочка. У соперника есть 24 часа на ответ, иначе — автопоражение. Закрытие вызова = проигрыш</p><div id="duelContent"></div></div></div>
   <div id="confirmModal" class="confirm-modal hidden"><div class="confirm-dialog"><h2>Подтверждение</h2><p id="confirmText" class="muted"></p><div class="actions"><button id="confirmYesBtn" class="danger" type="button">Да</button><button id="confirmNoBtn" class="ghost" type="button">Отмена</button></div></div></div>

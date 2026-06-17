@@ -99,7 +99,10 @@ const els = {
   confirmModal: document.getElementById('confirmModal'),
   confirmText: document.getElementById('confirmText'),
   confirmYesBtn: document.getElementById('confirmYesBtn'),
-  confirmNoBtn: document.getElementById('confirmNoBtn')
+  confirmNoBtn: document.getElementById('confirmNoBtn'),
+  finishModal: document.getElementById('finishModal'),
+  finishStats: document.getElementById('finishStats'),
+  finishCloseBtn: document.getElementById('finishCloseBtn')
 };
 
 const paintGradients = [
@@ -118,6 +121,7 @@ let activeTab = 'game';
 let pollingTimer = null;
 let lastSubmissionStatus = '';
 let isRolling = false;
+let finishModalOpen = false;
 let raffleLoadedAt = 0;
 let rafflePollingTimer = null;
 let lastRaffleWinnerId = null;
@@ -447,6 +451,47 @@ function configureSubmitStep({ fieldName, title, hint, buttonText }) {
   els.submitForm.classList.remove('hidden');
 }
 
+
+function shouldShowFinishModal(summary) {
+  return summary?.finished && !summary.modal_shown && !finishModalOpen;
+}
+
+function renderFinishStats(summary) {
+  const stats = [
+    ['Бросков кубика', summary.total_dice_rolls],
+    ['Выполненных заданий', summary.completed_tasks],
+    ['Встреченных ловушек', summary.total_traps],
+    ['Полученных баффов', summary.total_buffs],
+    ['Итоговый баланс красочек', summary.paints]
+  ];
+  els.finishStats.innerHTML = stats.map(([label, value]) => `<div class="finish-stat"><span>${escapeHtml(label)}</span><strong>${Number(value || 0)}</strong></div>`).join('');
+}
+
+function showFinishModal(summary) {
+  if (!els.finishModal || !summary?.finished) return;
+  finishModalOpen = true;
+  renderFinishStats(summary);
+  els.finishModal.classList.remove('hidden');
+}
+
+async function closeFinishModal() {
+  els.finishModal?.classList.add('hidden');
+  finishModalOpen = false;
+  if (tgId) {
+    try {
+      const result = await api('/api/finish/ack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tg_id: tgId })
+      });
+      if (state) state.finish_summary = result.finish_summary;
+    } catch (error) {
+      console.warn('Finish ack failed:', error.message);
+    }
+  }
+  await loadState();
+}
+
 function renderTask(submission) {
   els.submitForm.classList.add('hidden');
   els.taskActions.classList.add('hidden');
@@ -559,13 +604,13 @@ function render() {
     ? 'Твой лимит штрафных перебросов исчерпан (3 из 3). Пришло время брать материалы и рисовать выпавшее задание! 🎨✨'
     : `Использовано штрафных перебросов: ${usedPenaltyRerolls} из 3`;
   const frozen = Number(user.dice_frozen) === 1;
-  const finished = Number(user.current_cell) >= 100;
+  const finished = Boolean(state.finish_summary?.finished) || Number(user.current_cell) >= 100;
   els.rollBtn.disabled = roleBlocked || frozen || finished || isRolling;
   els.rollBtn.classList.toggle('frozen', roleBlocked || frozen || finished);
   setTarotDisabled(roleBlocked || frozen || finished || user.has_used_tarot === true || Number(user.has_used_tarot) === 1);
   if (els.tarotBtn) els.tarotBtn.title = (user.has_used_tarot === true || Number(user.has_used_tarot) === 1) ? 'Карта удачи уже использована' : 'Карта удачи';
   els.diceHint.textContent = finished
-    ? 'Вы достигли 100-й клетки. Поздравляем!'
+    ? 'Игра завершена, ожидай розыгрыша.'
     : frozen
       ? (els.taskStatus.textContent || 'Кубик заморожен до проверки задания.')
       : 'Нажмите на кубик: он прокрутится и покажет выпавшее число.';
@@ -573,6 +618,7 @@ function render() {
 
   if (!adminAccess && activeTab === 'admin') activeTab = 'game';
   setActiveTab(activeTab);
+  if (shouldShowFinishModal(state.finish_summary)) showFinishModal(state.finish_summary);
 }
 
 async function loadState() {
@@ -1058,7 +1104,8 @@ async function checkStatus() {
     if (!submission) return;
 
     if (submission.status === 'approved' && lastSubmissionStatus !== 'approved') {
-      showToast('Работа одобрена! Красочка добавлена в палитру, кубик снова доступен.', 5200);
+      showToast(data.finish_summary?.finished ? 'Финальная работа одобрена! Ты дошла до финиша!' : 'Работа одобрена! Красочка добавлена в палитру, кубик снова доступен.', 5200);
+      if (data.finish_summary?.finished && !data.finish_summary.modal_shown) showFinishModal(data.finish_summary);
       lastSubmissionStatus = 'approved';
       await loadState();
     } else if (submission.status === 'rejected' && lastSubmissionStatus !== 'rejected') {
@@ -1835,6 +1882,8 @@ els.paletteGrid.addEventListener('click', (event) => {
 });
 els.profileCloseBtn?.addEventListener('click', closeProfile);
 els.profileModal?.addEventListener('click', (event) => { if (event.target === els.profileModal) closeProfile(); });
+els.finishCloseBtn?.addEventListener('click', () => closeFinishModal().catch((error) => showToast(error.message)));
+els.finishModal?.addEventListener('click', (event) => { if (event.target === els.finishModal) closeFinishModal().catch((error) => showToast(error.message)); });
 els.pendingSubmissions.addEventListener('click', toggleArchiveAccordion);
 
 document.querySelectorAll('.admin-accordion-toggle').forEach((button) => {
