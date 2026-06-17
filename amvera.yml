@@ -1,14 +1,1 @@
----
-meta:
-  environment: node
-  toolchain:
-    name: npm
-    version: 18
-build:
-  requirements:
-    - package.json
-  steps:
-    - npm install
-deploy:
-  command: node server.js
-  port: 8080
+
