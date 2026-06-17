@@ -340,8 +340,10 @@ async function ensureAccumulatingTicketsTable() {
     tg_id TEXT NOT NULL,
     type TEXT DEFAULT 'standard' CHECK(type IN ('standard', 'bonus')),
     status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched')),
+    submission_id INTEGER DEFAULT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id),
+    FOREIGN KEY (submission_id) REFERENCES submissions(id)
   )`;
 
   if (!existing) {
@@ -353,10 +355,13 @@ async function ensureAccumulatingTicketsTable() {
   const hasProperPrimaryKey = sql.includes('ticket_number integer primary key autoincrement');
   const hasTgIdUniqueness = sql.includes('unique') && sql.includes('tg_id');
   const columns = await all('PRAGMA table_info(tickets)');
-  const hasStatus = columns.some((column) => column.name === 'status');
+  const columnNames = new Set(columns.map((column) => column.name));
+  const hasStatus = columnNames.has('status');
+  const hasSubmissionId = columnNames.has('submission_id');
 
   if (hasProperPrimaryKey && !hasTgIdUniqueness && sql.includes("'scratched'")) {
     if (!hasStatus) await run("ALTER TABLE tickets ADD COLUMN status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched'))");
+    if (!hasSubmissionId) await run('ALTER TABLE tickets ADD COLUMN submission_id INTEGER DEFAULT NULL REFERENCES submissions(id)');
     await run("UPDATE tickets SET status = 'active' WHERE status IS NULL OR status = ''");
     return;
   }
@@ -366,9 +371,11 @@ async function ensureAccumulatingTicketsTable() {
   const statusExpression = hasStatus
     ? "CASE WHEN status IN ('active', 'winner', 'scratched') THEN status WHEN status = 'burnt' THEN 'scratched' ELSE 'active' END"
     : "'active'";
-  await run(`INSERT INTO tickets (ticket_number, tg_id, type, status, created_at)
+  const submissionExpression = hasSubmissionId ? 'submission_id' : 'NULL';
+  await run(`INSERT INTO tickets (ticket_number, tg_id, type, status, submission_id, created_at)
     SELECT ticket_number, tg_id, COALESCE(type, 'standard'),
       ${statusExpression},
+      ${submissionExpression},
       COALESCE(created_at, CURRENT_TIMESTAMP)
     FROM tickets_old
     WHERE tg_id IS NOT NULL
@@ -697,14 +704,15 @@ async function getActiveSubmission(tgId) {
 
 async function getPlayerTickets(tgId) {
   return all(`WITH numbered_tickets AS (
-      SELECT t.ticket_number, t.type, t.status, t.created_at, r.place_number,
+      SELECT t.ticket_number, t.type, t.status, t.submission_id AS ticket_submission_id, t.created_at, r.place_number,
         ROW_NUMBER() OVER (PARTITION BY t.tg_id, t.type ORDER BY t.ticket_number ASC) AS ticket_order
       FROM tickets t
       LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
       WHERE t.tg_id = ?
     ), numbered_works AS (
       SELECT s.id AS submission_id, s.cell, s.photo_before, s.photo_after, s.photo_after AS source,
-        '/uploads/' || s.photo_after AS image_url, s.status AS submission_status,
+        CASE WHEN s.photo_after IS NOT NULL AND s.photo_after != '' THEN '/uploads/' || s.photo_after ELSE '' END AS file_url,
+        s.status AS submission_status,
         s.updated_at, task.text_task,
         ROW_NUMBER() OVER (PARTITION BY s.tg_id ORDER BY s.id ASC) AS work_order
       FROM submissions s
@@ -712,9 +720,18 @@ async function getPlayerTickets(tgId) {
       WHERE s.tg_id = ? AND s.status IN ('approved', 'auto_approved')
     )
     SELECT nt.ticket_number, nt.type, nt.status, nt.created_at, nt.place_number,
-      nw.submission_id, nw.cell, nw.text_task, nw.photo_before, nw.photo_after, nw.source, nw.image_url, nw.submission_status
+      COALESCE(direct_work.submission_id, ordered_work.submission_id) AS submission_id,
+      COALESCE(direct_work.cell, ordered_work.cell) AS cell,
+      COALESCE(direct_work.text_task, ordered_work.text_task) AS text_task,
+      COALESCE(direct_work.photo_before, ordered_work.photo_before) AS photo_before,
+      COALESCE(direct_work.photo_after, ordered_work.photo_after) AS photo_after,
+      COALESCE(direct_work.source, ordered_work.source) AS source,
+      COALESCE(direct_work.file_url, ordered_work.file_url) AS file_url,
+      COALESCE(direct_work.file_url, ordered_work.file_url) AS image_url,
+      COALESCE(direct_work.submission_status, ordered_work.submission_status) AS submission_status
     FROM numbered_tickets nt
-    LEFT JOIN numbered_works nw ON nt.type = 'standard' AND nw.work_order = nt.ticket_order
+    LEFT JOIN numbered_works direct_work ON nt.type = 'standard' AND direct_work.submission_id = nt.ticket_submission_id
+    LEFT JOIN numbered_works ordered_work ON nt.type = 'standard' AND nt.ticket_submission_id IS NULL AND ordered_work.work_order = nt.ticket_order
     ORDER BY nt.ticket_number ASC`, [tgId, tgId]);
 }
 
@@ -745,15 +762,19 @@ async function pickUnusedTask(tgId) {
   return get('SELECT id, text_task FROM tasks ORDER BY RANDOM() LIMIT 1');
 }
 
-async function issueTicket(tgId, type = 'standard') {
-  const result = await run("INSERT INTO tickets (tg_id, type, status) VALUES (?, ?, 'active')", [tgId, type]);
-  return get('SELECT ticket_number, type, status FROM tickets WHERE ticket_number = ?', [result.id]);
+async function issueTicket(tgId, type = 'standard', submissionId = null) {
+  const normalizedSubmissionId = submissionId == null ? null : Number(submissionId);
+  const result = await run(
+    "INSERT INTO tickets (tg_id, type, status, submission_id) VALUES (?, ?, 'active', ?)",
+    [tgId, type, Number.isInteger(normalizedSubmissionId) ? normalizedSubmissionId : null]
+  );
+  return get('SELECT ticket_number, type, status, submission_id FROM tickets WHERE ticket_number = ?', [result.id]);
 }
 
 
 async function approveSubmissionSideEffects(submission, source = 'admin') {
   await run("UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?", [submission.tg_id]);
-  const issuedTickets = [await issueTicket(submission.tg_id, 'standard')];
+  const issuedTickets = [await issueTicket(submission.tg_id, 'standard', submission.id)];
   const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
   if (Number(userAfterApproval.current_cell) >= 100) {
     issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
@@ -1025,6 +1046,51 @@ app.get('/api/game/leaderboard', async (_req, res, next) => {
 });
 
 
+app.get('/api/work-details/:workId', async (req, res, next) => {
+  try {
+    const workId = Number(req.params.workId);
+    if (!Number.isInteger(workId) || workId < 1) throw Object.assign(new Error('Некорректный номер работы'), { status: 400 });
+
+    const viewerTgId = normalizeTgId(req.query.viewer_tg_id || req.query.tg_id || '');
+    if (!viewerTgId) throw Object.assign(new Error('Не указан зритель'), { status: 400 });
+    if (ADMIN_TG_IDS.has(String(viewerTgId))) await createOrRefreshApplication(viewerTgId, 'Owner');
+    const viewer = await requireApproved(viewerTgId);
+    const isStaffViewer = isPrivilegedRole(viewer) || ADMIN_TG_IDS.has(String(viewerTgId));
+
+    const work = await get(`SELECT s.id, s.tg_id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, t.text_task
+      FROM submissions s
+      JOIN tasks t ON t.id = s.task_id
+      WHERE s.id = ? AND s.status IN ('approved', 'auto_approved') AND s.photo_after IS NOT NULL`, [workId]);
+    if (!work) throw Object.assign(new Error('Работа не найдена'), { status: 404 });
+
+    const isOwner = String(work.tg_id) === String(viewerTgId);
+    const canViewPrivate = isStaffViewer || isOwner;
+    const details = {
+      id: work.id,
+      submission_id: work.id,
+      cell: work.cell,
+      status: work.status,
+      image_after: `/uploads/${work.photo_after}`,
+      photo_after: work.photo_after,
+      is_admin: isStaffViewer,
+      is_owner: isOwner,
+      can_view_private: canViewPrivate
+    };
+
+    if (canViewPrivate) {
+      details.task_id = work.task_id;
+      details.text_task = work.text_task;
+      details.task = work.text_task;
+      details.image_before = work.photo_before ? `/uploads/${work.photo_before}` : '';
+      details.photo_before = work.photo_before || '';
+    }
+
+    res.json({ work: details });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/profile/:tgId', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.params.tgId);
@@ -1048,6 +1114,12 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
         status: ticket.status,
         submission_id: ticket.submission_id,
         cell: ticket.cell,
+        file_url: ticket.file_url,
+        image_url: ticket.image_url,
+        source: ticket.source,
+        photo_after: ticket.photo_after,
+        photo_before: isOwnProfile ? ticket.photo_before : '',
+        text_task: isOwnProfile ? ticket.text_task : '',
         submission_status: ticket.submission_status
       }));
     }

@@ -130,7 +130,36 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     assert.equal(paletteAfterApproval.tickets.length, 1);
     assert.equal(paletteAfterApproval.tickets[0].submission_status, 'approved');
     assert.ok(paletteAfterApproval.tickets[0].source);
-    assert.equal(paletteAfterApproval.tickets[0].image_url, `/uploads/${paletteAfterApproval.tickets[0].source}`);
+    assert.equal(paletteAfterApproval.tickets[0].file_url, `/uploads/${paletteAfterApproval.tickets[0].source}`);
+    assert.equal(paletteAfterApproval.tickets[0].image_url, paletteAfterApproval.tickets[0].file_url);
+
+    const workId = paletteAfterApproval.tickets[0].submission_id;
+    const ownerWorkDetails = await jsonRequest(server.baseUrl, `/api/work-details/${workId}?viewer_tg_id=200`);
+    assert.equal(ownerWorkDetails.work.is_owner, true);
+    assert.ok(ownerWorkDetails.work.text_task);
+    assert.ok(ownerWorkDetails.work.image_before);
+    assert.ok(ownerWorkDetails.work.image_after);
+
+    const adminWorkDetails = await jsonRequest(server.baseUrl, `/api/work-details/${workId}?viewer_tg_id=341995937`);
+    assert.equal(adminWorkDetails.work.is_admin, true);
+    assert.ok(adminWorkDetails.work.text_task);
+    assert.ok(adminWorkDetails.work.image_before);
+
+    await jsonRequest(server.baseUrl, '/api/apply', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '202', username: 'viewer' })
+    });
+    await jsonRequest(server.baseUrl, '/api/admin/approve-user', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '202' })
+    });
+    const publicWorkDetails = await jsonRequest(server.baseUrl, `/api/work-details/${workId}?viewer_tg_id=202`);
+    assert.equal(publicWorkDetails.work.is_owner, false);
+    assert.equal(publicWorkDetails.work.is_admin, false);
+    assert.equal(publicWorkDetails.work.can_view_private, false);
+    assert.ok(publicWorkDetails.work.image_after);
+    assert.equal(publicWorkDetails.work.image_before, undefined);
+    assert.equal(publicWorkDetails.work.text_task, undefined);
 
     const news = await jsonRequest(server.baseUrl, '/api/news');
     assert.match(news.events[0].message, /Красочка №1 досталась @player/);
@@ -209,6 +238,39 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
 
     const registryAfterRemoval = await jsonRequest(server.baseUrl, '/api/admin/tickets?admin_tg_id=341995937');
     assert.equal(registryAfterRemoval.tickets.length, 2);
+
+    await jsonRequest(server.baseUrl, '/api/apply', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '201', username: 'managed' })
+    });
+    await jsonRequest(server.baseUrl, '/api/admin/approve-user', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '201' })
+    });
+
+    const moved = await jsonRequest(server.baseUrl, '/api/admin/change-cell', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '201', current_cell: 42 })
+    });
+    assert.equal(moved.current_cell, 42);
+
+    const unfrozen = await jsonRequest(server.baseUrl, '/api/admin/reset-dice', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '201' })
+    });
+    assert.equal(unfrozen.ok, true);
+
+    const moderator = await jsonRequest(server.baseUrl, '/api/admin/toggle-moderator', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', target_tg_id: '201' })
+    });
+    assert.equal(moderator.user.role, 'moderator');
+
+    const removedUser = await jsonRequest(server.baseUrl, '/api/admin/remove-user', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '201' })
+    });
+    assert.equal(removedUser.ok, true);
   } finally {
     await server.close();
   }
