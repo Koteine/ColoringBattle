@@ -105,6 +105,7 @@ async function initDb() {
   await ensureUserLuckyColumn();
   await ensureUserTarotColumns();
   await ensureUserDuelColumns();
+  await ensureUserGameCounterColumns();
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
   await ensureReactionLogsTable();
@@ -208,6 +209,13 @@ async function ensureUserDuelColumns() {
   const names = new Set(columns.map((column) => column.name));
   if (!names.has('can_challenge')) await run('ALTER TABLE users ADD COLUMN can_challenge INTEGER DEFAULT 1');
   if (!names.has('can_accept')) await run('ALTER TABLE users ADD COLUMN can_accept INTEGER DEFAULT 1');
+}
+
+async function ensureUserGameCounterColumns() {
+  const columns = await all('PRAGMA table_info(users)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('penalty_rerolls')) await run('ALTER TABLE users ADD COLUMN penalty_rerolls INTEGER DEFAULT 0');
+  if (!names.has('total_dice_rolls')) await run('ALTER TABLE users ADD COLUMN total_dice_rolls INTEGER DEFAULT 0');
 }
 
 async function ensureUserRoleColumn() {
@@ -865,7 +873,7 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const pendingLucky = Number(user.is_approved) === 1 && user.pending_lucky_cell !== null
       ? { cell: Number(user.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
       : null;
-    res.json({ user: { ...user, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1 }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator' });
+    res.json({ user: { ...user, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1, penalty_rerolls: Number(user.penalty_rerolls || 0), total_dice_rolls: Number(user.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator' });
   } catch (error) {
     next(error);
   }
@@ -1076,7 +1084,7 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   const cellType = getCellType(landedCell);
 
   if (cellType === 'lucky') {
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
     return { ok: true, dice, current_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
   }
 
@@ -1094,7 +1102,7 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   }
 
   const pending = await createPendingSubmissionForCell(tgId, currentCell);
-  await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [currentCell, tgId]);
+  await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
   return { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...extra, ...pending };
 }
 
@@ -1243,13 +1251,16 @@ app.post('/api/reroll-task', async (req, res, next) => {
     }
     if (getCellType(active.cell) !== 'ordinary') throw Object.assign(new Error('На этой клетке смена задания недоступна'), { status: 400 });
 
+    if (Number(user.penalty_rerolls || 0) >= 3) {
+      throw Object.assign(new Error('Твой лимит штрафных перебросов исчерпан (3 из 3). Пришло время брать материалы и рисовать выпавшее задание! 🎨✨'), { status: 400 });
+    }
     const penalty = Math.floor(Math.random() * 3) + 1;
     const currentCell = Math.max(0, Number(user.current_cell || 0) - penalty);
     await run('DELETE FROM submissions WHERE id = ?', [active.id]);
     const pending = await createPendingSubmissionForCell(tgId, currentCell);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [currentCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, penalty_rerolls = COALESCE(penalty_rerolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
 
-    res.json({ ok: true, penalty, current_cell: currentCell, ...pending });
+    res.json({ ok: true, penalty, current_cell: currentCell, penalty_rerolls: Number(user.penalty_rerolls || 0) + 1, penalty_rerolls_limit: 3, ...pending });
   } catch (error) {
     next(error);
   }
@@ -1347,7 +1358,7 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
 
 app.get('/api/admin/pending-users', async (req, res, next) => {
   try {
-    await requireAdmin(req.query.admin_tg_id);
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
     const users = await all(`SELECT tg_id, username, current_cell, is_approved, dice_frozen, role
       FROM users
       WHERE is_approved = 0
@@ -1360,9 +1371,9 @@ app.get('/api/admin/pending-users', async (req, res, next) => {
 
 app.post('/api/admin/approve-user', async (req, res, next) => {
   try {
-    await requireAdmin(req.body.admin_tg_id);
+    await requireModeratorOrAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
-    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL, has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0 WHERE tg_id = ?', [tgId]);
+    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL, has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, penalty_rerolls = 0, total_dice_rolls = 0 WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Заявка не найдена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -1372,7 +1383,7 @@ app.post('/api/admin/approve-user', async (req, res, next) => {
 
 app.post('/api/admin/reject-user', async (req, res, next) => {
   try {
-    await requireAdmin(req.body.admin_tg_id);
+    await requireModeratorOrAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
     if (tgId === OWNER_TG_ID) throw Object.assign(new Error('Нельзя отклонить супер-админа'), { status: 400 });
     await run('DELETE FROM submissions WHERE tg_id = ?', [tgId]);
@@ -1676,6 +1687,39 @@ app.get('/api/admin/tickets-export', async (req, res, next) => {
   }
 });
 
+
+app.get('/api/admin/game-stats-export', async (req, res, next) => {
+  try {
+    await requireAdmin(req.query.admin_tg_id);
+    const rows = await all(`SELECT u.tg_id, u.current_cell, u.total_dice_rolls, u.has_used_tarot,
+        (SELECT COUNT(*) FROM submissions s WHERE s.tg_id = u.tg_id AND s.status = 'approved') AS approved_quests,
+        (SELECT COUNT(*) FROM tickets t WHERE t.tg_id = u.tg_id AND t.status = 'active') AS paint_balance,
+        (SELECT COUNT(*) FROM puzzle_duels d WHERE (d.challenger_tg_id = u.tg_id OR d.opponent_tg_id = u.tg_id) AND d.status = 'finished') AS duels_played
+      FROM users u
+      WHERE u.is_approved = 1 AND COALESCE(u.role, 'user') = 'user'
+      ORDER BY u.username COLLATE NOCASE ASC, u.tg_id ASC`);
+    const headers = ['Telegram ID', 'Текущая клетка', 'Всего бросков кубика', 'Сдано квестов', 'Баланс красочек', 'Использовано Таро (Да/Нет)', 'Сыграно дуэлей'];
+    const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const lines = [headers.map(escapeCsv).join(';')];
+    for (const row of rows) {
+      lines.push([
+        row.tg_id,
+        Number(row.current_cell || 0),
+        Number(row.total_dice_rolls || 0),
+        Number(row.approved_quests || 0),
+        Number(row.paint_balance || 0),
+        Number(row.has_used_tarot) === 1 ? 'Да' : 'Нет',
+        Number(row.duels_played || 0)
+      ].map(escapeCsv).join(';'));
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="krasochki-game-stats.csv"');
+    res.send(`\ufeff${lines.join('\n')}`);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/admin/draw-winner', async (_req, res) => {
   res.status(410).json({ error: 'Ручной выбор победителя администратором отключен. Используйте Красочки игроков.' });
 });
@@ -1688,13 +1732,15 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await run('DELETE FROM raffle_results');
     await run('DELETE FROM reaction_logs');
     await run('DELETE FROM puzzle_duels');
+    await run('DELETE FROM news_events');
     await regenerateMapConfig();
     await loadMapConfig();
     await run(`UPDATE users
       SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
         has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0,
+        penalty_rerolls = 0, total_dice_rolls = 0,
         reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1`);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'puzzle_duels']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
   } catch (error) {
     next(error);
@@ -1711,7 +1757,7 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM reaction_logs');
     await run('DELETE FROM puzzle_duels');
     await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels']);
     await run(`UPDATE raffle_config
       SET raffle_start = '', raffle_end = '', total_prizes = 0, remaining_prizes = 0, updated_at = CURRENT_TIMESTAMP
       WHERE id = 1`);
@@ -1724,6 +1770,8 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
         has_used_tarot = 0,
         trap_immunity = 0,
         next_roll_halved = 0,
+        penalty_rerolls = 0,
+        total_dice_rolls = 0,
         can_challenge = 1,
         can_accept = 1,
         is_approved = 1,
