@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const UPLOADS_DIR = '/data/uploads';
 const DB_PATH = '/data/game.db';
 const OWNER_TG_ID = '341995937';
