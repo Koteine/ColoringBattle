@@ -645,14 +645,16 @@ async function getPlayerTickets(tgId) {
       LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
       WHERE t.tg_id = ?
     ), numbered_works AS (
-      SELECT s.id, s.cell, s.photo_after, s.updated_at, task.text_task,
+      SELECT s.id AS submission_id, s.cell, s.photo_after, s.photo_after AS source,
+        '/uploads/' || s.photo_after AS image_url, s.status AS submission_status,
+        s.updated_at, task.text_task,
         ROW_NUMBER() OVER (PARTITION BY s.tg_id ORDER BY s.id ASC) AS work_order
       FROM submissions s
       JOIN tasks task ON task.id = s.task_id
       WHERE s.tg_id = ? AND s.status = 'approved'
     )
     SELECT nt.ticket_number, nt.type, nt.status, nt.created_at, nt.place_number,
-      nw.cell, nw.text_task, nw.photo_after
+      nw.submission_id, nw.cell, nw.text_task, nw.photo_after, nw.source, nw.image_url, nw.submission_status
     FROM numbered_tickets nt
     LEFT JOIN numbered_works nw ON nt.type = 'standard' AND nw.work_order = nt.ticket_order
     ORDER BY nt.ticket_number ASC`, [tgId, tgId]);
@@ -1644,7 +1646,7 @@ app.post('/api/admin/grant-ticket', async (req, res, next) => {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await get('SELECT tg_id, username FROM users WHERE tg_id = ?', [tgId]);
     if (!user) throw Object.assign(new Error('Игрок с таким Telegram ID не найден'), { status: 404 });
-    const ticket = await issueTicket(tgId, 'standard');
+    const ticket = await issueTicket(tgId, 'bonus');
     await addNewsEvent(`🎁 Модератор вручную начислил бонусную Красочку №${ticket.ticket_number} игроку ${formatUserHandle(user.username, user.tg_id)}!`, {
       eventType: 'manual_ticket',
       tgId: user.tg_id,

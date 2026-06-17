@@ -311,16 +311,17 @@ function renderPalette(tickets = []) {
   for (const [index, ticket] of tickets.entries()) {
     const card = document.createElement('article');
     card.className = 'item archive-accordion player-ticket-archive';
-    const hasWork = ticket.text_task && ticket.photo_after;
-    const afterUrl = hasWork ? `/uploads/${encodeURIComponent(ticket.photo_after)}` : '';
+    const workSource = ticket.source || ticket.photo_after || '';
+    const hasApprovedWork = Boolean(workSource || ticket.image_url || ticket.submission_id);
+    const afterUrl = ticket.image_url || (workSource ? `/uploads/${encodeURIComponent(workSource)}` : '');
     card.innerHTML = `
       <button type="button" class="archive-toggle" style="background:${paintGradients[index % paintGradients.length]}">
         <strong>Красочка №${escapeHtml(ticket.ticket_number)}</strong>
         <small>${ticket.type === 'bonus' ? 'Бонусная' : 'За задание'}</small>
       </button>
       <div class="archive-panel"><div class="archive-inner">
-        ${hasWork ? `
-          <p><strong>Квест:</strong> ${escapeHtml(ticket.text_task)}</p>
+        ${hasApprovedWork ? `
+          ${ticket.text_task ? `<p><strong>Квест:</strong> ${escapeHtml(ticket.text_task)}</p>` : ''}
           <div class="share-card" data-share-card>
             <img src="${afterUrl}" alt="Фото ПОСЛЕ для Красочки №${escapeHtml(ticket.ticket_number)}">
             <div class="photo-frame"></div><div class="paint-stamp">Красочки:<br>бери и крась</div>

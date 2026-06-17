@@ -126,6 +126,12 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     assert.equal(checkApproved.dice_frozen, 0);
     assert.equal(checkApproved.tickets.length, 1);
 
+    const paletteAfterApproval = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
+    assert.equal(paletteAfterApproval.tickets.length, 1);
+    assert.equal(paletteAfterApproval.tickets[0].submission_status, 'approved');
+    assert.ok(paletteAfterApproval.tickets[0].source);
+    assert.equal(paletteAfterApproval.tickets[0].image_url, `/uploads/${paletteAfterApproval.tickets[0].source}`);
+
     const news = await jsonRequest(server.baseUrl, '/api/news');
     assert.match(news.events[0].message, /Красочка №1 досталась @player/);
 
@@ -191,6 +197,7 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     });
     assert.equal(grant.ticket.ticket_number, 3);
     assert.equal(grant.ticket.status, 'active');
+    assert.equal(grant.ticket.type, 'bonus');
 
     const registry = await jsonRequest(server.baseUrl, '/api/admin/tickets?admin_tg_id=341995937');
     assert.equal(registry.tickets.length, 3);
