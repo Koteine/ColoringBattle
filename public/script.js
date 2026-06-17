@@ -317,11 +317,10 @@ function renderPalette(tickets = []) {
       <div class="archive-panel"><div class="archive-inner">
         ${hasApprovedWork ? `
           ${ticket.text_task ? `<p><strong>Квест:</strong> ${escapeHtml(ticket.text_task)}</p>` : ''}
-          <div class="share-card" data-share-card>
+          <div class="work-card">
             <img src="${afterUrl}" alt="Фото ПОСЛЕ для Красочки №${escapeHtml(ticket.ticket_number)}">
             <div class="photo-frame"></div><div class="paint-stamp">Красочки:<br>бери и крась</div>
           </div>
-          <div class="actions"><button class="success" type="button" data-share-ticket="${escapeHtml(ticket.ticket_number)}">Поделиться</button></div>
         ` : '<p class="muted">Эта Красочка бонусная или выдана вручную — привязанной работы нет.</p>'}
       </div></div>
     `;
@@ -744,26 +743,6 @@ async function useTarot(selectedIndex, selectedCard) {
     showToast(error.message);
     await loadState().catch(() => setTarotDisabled(false));
   }
-}
-
-const shareTexts = [
-  'Вот какая красота у меня получилась! Не правда ли чудесно?! 🎨✨',
-  'Смотрите, как ожили страницы моей любимой книги! Бери и крась! 👑📖',
-  'Ещё один шедевр в копилку «Красочек»! Как вам такое сочетание? 🥰🎨',
-  'Магия цвета в действии! Я сделала это! 🔮✨',
-  'Мой колористический квест успешно завершён, зацените результат! 💖🖌️'
-];
-
-async function sharePaletteCard(button) {
-  const text = shareTexts[Math.floor(Math.random() * shareTexts.length)];
-  const afterImage = button.closest('.archive-inner')?.querySelector('[data-share-card] img')?.getAttribute('src') || '';
-  const absoluteImageUrl = afterImage ? new URL(afterImage, window.location.href).href : '';
-  const shareQuery = [text, absoluteImageUrl].filter(Boolean).join(' ');
-  if (tgApp?.switchInlineQuery) {
-    tgApp.switchInlineQuery(shareQuery, ['users', 'groups', 'channels']);
-    return;
-  }
-  throw new Error('Нативная отправка Telegram недоступна. Откройте игру внутри Telegram.');
 }
 
 function renderWorkDetails(work) {
@@ -1845,8 +1824,6 @@ function toggleArchiveAccordion(event) {
 }
 
 els.paletteGrid.addEventListener('click', (event) => {
-  const shareButton = event.target.closest('[data-share-ticket]');
-  if (shareButton) { sharePaletteCard(shareButton).catch((error) => showToast(error.message)); return; }
   const profileButton = event.target.closest('[data-profile-id]');
   if (profileButton) { openProfile(profileButton.dataset.profileId).catch((error) => showToast(error.message)); return; }
   const challengeButton = event.target.closest('[data-challenge-id]');
