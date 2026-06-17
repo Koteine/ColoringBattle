@@ -1,7 +1,7 @@
 {
   "name": "telegram-coloring-battle",
   "version": "1.0.0",
-  "description": "Telegram WebApp board game optimized for Railway with Express, SQLite and Multer uploads",
+  "description": "Telegram WebApp board game optimized for Amvera with Express, SQLite and Multer uploads",
   "type": "module",
   "main": "server.js",
   "scripts": {
