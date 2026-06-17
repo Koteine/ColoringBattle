@@ -252,10 +252,10 @@ async function ensureUserActivityColumns() {
   const columns = await all('PRAGMA table_info(users)');
   const columnNames = new Set(columns.map((column) => column.name));
   if (!columnNames.has('registered_at')) {
-    await run('ALTER TABLE users ADD COLUMN registered_at TEXT DEFAULT CURRENT_TIMESTAMP');
+    await run('ALTER TABLE users ADD COLUMN registered_at TEXT');
   }
   if (!columnNames.has('last_login_at')) {
-    await run('ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT CURRENT_TIMESTAMP');
+    await run('ALTER TABLE users ADD COLUMN last_login_at TEXT');
   }
   await run('UPDATE users SET registered_at = COALESCE(registered_at, CURRENT_TIMESTAMP), last_login_at = COALESCE(last_login_at, registered_at, CURRENT_TIMESTAMP)');
 }
