@@ -275,7 +275,7 @@ async function renderWorkArchive() {
     const username = player.username ? `@${String(player.username).replace(/^@/, '')}` : 'Без ника';
     const diceStatus = Number(player.dice_frozen) === 1 ? 'Заморожен (ждет проверки)' : 'Свободен';
     playerNode.innerHTML = `
-      <button type="button" class="archive-toggle"><strong>${escapeHtml(username)} (ID: ${escapeHtml(player.tg_id)})</strong></button>
+      <button type="button" class="archive-toggle"><strong><span class="profile-link" data-profile-id="${escapeHtml(player.tg_id)}">${escapeHtml(username)}</span> (ID: ${escapeHtml(player.tg_id)})</strong></button>
       <div class="archive-panel"><div class="archive-inner">
         <div class="item player-dossier">
           <p><strong>Текущая клетка:</strong> ${Number(player.current_cell || 0)}</p>
@@ -760,19 +760,27 @@ const shareTexts = [
 ];
 
 async function sharePaletteCard(button) {
-  const card = button.closest('.archive-inner')?.querySelector('[data-share-card]');
-  if (!card) throw new Error('Карточка не найдена');
-  if (!window.html2canvas) throw new Error('Генератор изображения еще загружается');
-  const canvas = await window.html2canvas(card, { useCORS: true, backgroundColor: '#ffffff' });
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
-  if (!blob) throw new Error('Не удалось собрать фото для отправки');
   const text = shareTexts[Math.floor(Math.random() * shareTexts.length)];
-  const file = new File([blob], 'krasochki_result.jpg', { type: 'image/jpeg' });
-  if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
-    await navigator.share({ files: [file], text });
+  const afterImage = button.closest('.archive-inner')?.querySelector('[data-share-card] img')?.getAttribute('src') || '';
+  const absoluteImageUrl = afterImage ? new URL(afterImage, window.location.href).href : '';
+  const shareQuery = [text, absoluteImageUrl].filter(Boolean).join(' ');
+  if (tgApp?.switchInlineQuery) {
+    tgApp.switchInlineQuery(shareQuery, ['users', 'groups', 'channels']);
     return;
   }
-  throw new Error('На этом устройстве системная отправка картинки недоступна. Откройте игру на смартфоне с поддержкой Web Share.');
+  throw new Error('Нативная отправка Telegram недоступна. Откройте игру внутри Telegram.');
+}
+
+function renderWorkDetails(work) {
+  const beforeUrl = work.photo_before ? `/uploads/${encodeURIComponent(work.photo_before)}` : '';
+  const afterUrl = work.photo_after ? `/uploads/${encodeURIComponent(work.photo_after)}` : '';
+  els.profileContent.innerHTML = `<h2>Красочка / работа #${Number(work.id || work.submission_id || 0)}</h2>
+    <p><strong>Задание:</strong> ${escapeHtml(work.text_task || work.task || '')}</p>
+    <p class="muted">Клетка: ${Number(work.cell || 0)} · статус: ${escapeHtml(work.status || '')}</p>
+    <div class="comparison-grid">
+      ${beforeUrl ? `<a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a>` : '<div class="empty-state">Фото ДО не загружено</div>'}
+      ${afterUrl ? `<a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a>` : '<div class="empty-state">Фото ПОСЛЕ не загружено</div>'}
+    </div>`;
 }
 
 async function openProfile(profileId) {
@@ -780,7 +788,15 @@ async function openProfile(profileId) {
   els.profileContent.innerHTML = '<div class="empty-state">Загружаем профиль...</div>';
   const data = await api(`/api/profile/${encodeURIComponent(profileId)}`);
   const profile = data.profile;
-  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Красочки: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p><div class="profile-works">${(profile.works || []).map((work) => `<a class="comparison-photo" href="/uploads/${encodeURIComponent(work.photo_after)}" target="_blank" rel="noopener"><strong>Клетка ${Number(work.cell || 0)}</strong><img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа"></a>`).join('') || '<p class="muted">Готовых работ пока нет.</p>'}</div>`;
+  const works = profile.works || [];
+  const tickets = profile.tickets || [];
+  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Красочки: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p><h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? `Задание #${escapeHtml(ticket.submission_id)}` : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div><h3>Работы</h3><div class="profile-works">${works.map((work, index) => `<button class="comparison-photo" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)} · задание #${Number(work.task_id || 0)}</strong>${work.photo_after ? `<img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа">` : ''}</button>`).join('') || '<p class="muted">Готовых работ пока нет.</p>'}</div>`;
+  els.profileContent.querySelectorAll('[data-profile-ticket-index]').forEach((button) => {
+    button.addEventListener('click', () => renderWorkDetails(tickets[Number(button.dataset.profileTicketIndex)]));
+  });
+  els.profileContent.querySelectorAll('[data-profile-work]').forEach((button) => {
+    button.addEventListener('click', () => renderWorkDetails(works[Number(button.dataset.profileWork)]));
+  });
 }
 
 function closeProfile() {
@@ -1508,6 +1524,13 @@ function renderAllUsers(users) {
       await toggleModerator(user.tg_id, user.role);
     });
 
+    const profile = document.createElement('button');
+    profile.type = 'button';
+    profile.className = 'ghost';
+    profile.textContent = 'Открыть профиль';
+    profile.addEventListener('click', () => openProfile(user.tg_id).catch((error) => showToast(error.message)));
+
+
     const resetDice = document.createElement('button');
     resetDice.type = 'button';
     resetDice.className = 'ghost';
@@ -1539,7 +1562,7 @@ function renderAllUsers(users) {
       await loadAdminPanel();
     });
 
-    tools.append(changeCell, resetDice, roleToggle, remove);
+    tools.append(profile, changeCell, resetDice, roleToggle, remove);
     els.allUsers.append(item);
   }
 }
@@ -1662,11 +1685,11 @@ function downloadGameStatsExport() {
   const url = `/api/admin/game-stats-export?admin_tg_id=${encodeURIComponent(tgId)}`;
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'krasochki-game-stats.csv';
+  link.download = 'krasochki-detailed-player-export.csv';
   document.body.append(link);
   link.click();
   link.remove();
-  showToast('Выгрузка статистики началась');
+  showToast('Скачивание CSV началось');
 }
 
 async function saveRaffleConfig(event) {
@@ -1770,6 +1793,8 @@ function toggleArchiveAccordion(event) {
 els.paletteGrid.addEventListener('click', (event) => {
   const shareButton = event.target.closest('[data-share-ticket]');
   if (shareButton) { sharePaletteCard(shareButton).catch((error) => showToast(error.message)); return; }
+  const profileButton = event.target.closest('[data-profile-id]');
+  if (profileButton) { openProfile(profileButton.dataset.profileId).catch((error) => showToast(error.message)); return; }
   const challengeButton = event.target.closest('[data-challenge-id]');
   if (challengeButton) { challengePlayer(challengeButton.dataset.challengeId).catch((error) => showToast(error.message)); return; }
   const tileButton = event.target.closest('[data-puzzle-index]');
