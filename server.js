@@ -13,7 +13,13 @@ const PORT = process.env.PORT || 8080;
 const UPLOADS_DIR = '/data/uploads';
 const DB_PATH = '/data/game.db';
 const OWNER_TG_ID = '341995937';
-const ADMIN_TG_IDS = new Set([OWNER_TG_ID]);
+const ADMIN_TG_IDS = new Set([
+  OWNER_TG_ID,
+  ...String(process.env.ADMIN_TG_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean)
+]);
 
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
