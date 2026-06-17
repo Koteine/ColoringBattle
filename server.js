@@ -82,7 +82,9 @@ async function initDb() {
     pending_lucky_cell INTEGER DEFAULT NULL,
     role TEXT DEFAULT 'user',
     reactions_hearts INTEGER DEFAULT 0,
-    reactions_coffee INTEGER DEFAULT 0
+    reactions_coffee INTEGER DEFAULT 0,
+    registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_login_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
   await run(`CREATE TABLE IF NOT EXISTS tasks (
@@ -114,6 +116,7 @@ async function initDb() {
   await ensureUserGameCounterColumns();
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
+  await ensureUserActivityColumns();
   await ensureReactionLogsTable();
   await ensureMapConfigTable();
   await ensureAccumulatingTicketsTable();
@@ -243,6 +246,18 @@ async function ensureUserReactionColumns() {
   if (!columnNames.has('reactions_coffee')) {
     await run('ALTER TABLE users ADD COLUMN reactions_coffee INTEGER DEFAULT 0');
   }
+}
+
+async function ensureUserActivityColumns() {
+  const columns = await all('PRAGMA table_info(users)');
+  const columnNames = new Set(columns.map((column) => column.name));
+  if (!columnNames.has('registered_at')) {
+    await run('ALTER TABLE users ADD COLUMN registered_at TEXT DEFAULT CURRENT_TIMESTAMP');
+  }
+  if (!columnNames.has('last_login_at')) {
+    await run('ALTER TABLE users ADD COLUMN last_login_at TEXT DEFAULT CURRENT_TIMESTAMP');
+  }
+  await run('UPDATE users SET registered_at = COALESCE(registered_at, CURRENT_TIMESTAMP), last_login_at = COALESCE(last_login_at, registered_at, CURRENT_TIMESTAMP)');
 }
 
 async function ensureReactionLogsTable() {
@@ -515,6 +530,7 @@ async function findOrRefreshKnownUser(tgId, username = '') {
   if (role === 'admin' && user.role !== 'admin') {
     updates.push("role = 'admin'", 'is_approved = 1');
   }
+  updates.push('last_login_at = CURRENT_TIMESTAMP');
   if (updates.length) {
     params.push(tgId);
     await run(`UPDATE users SET ${updates.join(', ')} WHERE tg_id = ?`, params);
@@ -525,12 +541,13 @@ async function findOrRefreshKnownUser(tgId, username = '') {
 async function createOrRefreshApplication(tgId, username = '') {
   const role = ADMIN_TG_IDS.has(String(tgId)) ? 'admin' : 'user';
   const approved = role === 'admin' ? 1 : 0;
-  await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
-    VALUES (?, ?, 0, ?, 0, ?)
+  await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role, registered_at, last_login_at)
+    VALUES (?, ?, 0, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     ON CONFLICT(tg_id) DO UPDATE SET
       username = CASE WHEN excluded.username <> '' THEN excluded.username ELSE users.username END,
       role = CASE WHEN users.role = 'admin' OR excluded.role = 'admin' THEN 'admin' ELSE users.role END,
-      is_approved = CASE WHEN users.role = 'admin' OR excluded.role = 'admin' THEN 1 ELSE users.is_approved END`,
+      is_approved = CASE WHEN users.role = 'admin' OR excluded.role = 'admin' THEN 1 ELSE users.is_approved END,
+      last_login_at = CURRENT_TIMESTAMP`,
     [tgId, username, approved, role]);
   return get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
 }
@@ -645,7 +662,7 @@ async function getPlayerTickets(tgId) {
       LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
       WHERE t.tg_id = ?
     ), numbered_works AS (
-      SELECT s.id AS submission_id, s.cell, s.photo_after, s.photo_after AS source,
+      SELECT s.id AS submission_id, s.cell, s.photo_before, s.photo_after, s.photo_after AS source,
         '/uploads/' || s.photo_after AS image_url, s.status AS submission_status,
         s.updated_at, task.text_task,
         ROW_NUMBER() OVER (PARTITION BY s.tg_id ORDER BY s.id ASC) AS work_order
@@ -654,7 +671,7 @@ async function getPlayerTickets(tgId) {
       WHERE s.tg_id = ? AND s.status = 'approved'
     )
     SELECT nt.ticket_number, nt.type, nt.status, nt.created_at, nt.place_number,
-      nw.submission_id, nw.cell, nw.text_task, nw.photo_after, nw.source, nw.image_url, nw.submission_status
+      nw.submission_id, nw.cell, nw.text_task, nw.photo_before, nw.photo_after, nw.source, nw.image_url, nw.submission_status
     FROM numbered_tickets nt
     LEFT JOIN numbered_works nw ON nt.type = 'standard' AND nw.work_order = nt.ticket_order
     ORDER BY nt.ticket_number ASC`, [tgId, tgId]);
@@ -926,13 +943,14 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
     const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen
       FROM users WHERE tg_id = ? AND is_approved = 1`, [tgId]);
     if (!user) throw Object.assign(new Error('Профиль не найден'), { status: 404 });
-    const works = await all(`SELECT s.cell, s.photo_after, s.updated_at, t.text_task
+    const works = await all(`SELECT s.id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.updated_at, t.text_task
       FROM submissions s
       JOIN tasks t ON t.id = s.task_id
       WHERE s.tg_id = ? AND s.status = 'approved' AND s.photo_after IS NOT NULL
       ORDER BY s.updated_at DESC`, [tgId]);
+    const tickets = await getPlayerTickets(tgId);
     const counts = await get(`SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?`, [tgId]);
-    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску', works } });
+    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску', tickets, works } });
   } catch (error) {
     next(error);
   }
@@ -1696,32 +1714,74 @@ app.get('/api/admin/tickets-export', async (req, res, next) => {
 });
 
 
+async function collectDetailedPlayerExportRows() {
+  const rows = await all(`SELECT u.tg_id, u.username, u.registered_at, u.last_login_at, u.current_cell, u.is_approved, u.dice_frozen, u.role,
+      (SELECT COUNT(*) FROM submissions s WHERE s.tg_id = u.tg_id AND s.status = 'approved') AS completed_tasks,
+      (SELECT COUNT(*) FROM tickets t WHERE t.tg_id = u.tg_id AND t.status = 'active') AS paint_balance,
+      (SELECT COUNT(*) FROM submissions s WHERE s.tg_id = u.tg_id AND s.status = 'rejected') AS rejected_submissions
+    FROM users u
+    WHERE COALESCE(u.role, 'user') = 'user'
+    ORDER BY u.username COLLATE NOCASE ASC, u.tg_id ASC`);
+
+  const works = await all(`SELECT s.id, s.tg_id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.admin_comment, s.created_at, s.updated_at, t.text_task
+    FROM submissions s
+    JOIN tasks t ON t.id = s.task_id
+    ORDER BY s.tg_id ASC, s.created_at ASC, s.id ASC`);
+
+  const worksByPlayer = new Map();
+  for (const work of works) {
+    if (!worksByPlayer.has(work.tg_id)) worksByPlayer.set(work.tg_id, []);
+    worksByPlayer.get(work.tg_id).push({
+      submission_id: work.id,
+      task_id: work.task_id,
+      cell: work.cell,
+      status: work.status,
+      task: work.text_task,
+      photo_before_url: work.photo_before ? `/uploads/${work.photo_before}` : '',
+      photo_after_url: work.photo_after ? `/uploads/${work.photo_after}` : '',
+      admin_comment: work.admin_comment || '',
+      created_at: work.created_at,
+      updated_at: work.updated_at
+    });
+  }
+
+  return rows.map((row) => ({
+    telegram_id: row.tg_id,
+    name: row.username || '',
+    username: row.username || '',
+    registered_at: row.registered_at || '',
+    completed_tasks: Number(row.completed_tasks || 0),
+    paint_balance: Number(row.paint_balance || 0),
+    player_status: Number(row.is_approved) === 1 ? (Number(row.dice_frozen) === 1 ? 'Ждет проверку' : 'Активен') : 'Ожидает/исключен',
+    rejected_submissions: Number(row.rejected_submissions || 0),
+    last_login_at: row.last_login_at || '',
+    works: worksByPlayer.get(row.tg_id) || []
+  }));
+}
+
 app.get('/api/admin/game-stats-export', async (req, res, next) => {
   try {
     await requireAdmin(req.query.admin_tg_id);
-    const rows = await all(`SELECT u.tg_id, u.current_cell, u.total_dice_rolls, u.has_used_tarot,
-        (SELECT COUNT(*) FROM submissions s WHERE s.tg_id = u.tg_id AND s.status = 'approved') AS approved_quests,
-        (SELECT COUNT(*) FROM tickets t WHERE t.tg_id = u.tg_id AND t.status = 'active') AS paint_balance,
-        (SELECT COUNT(*) FROM puzzle_duels d WHERE (d.challenger_tg_id = u.tg_id OR d.opponent_tg_id = u.tg_id) AND d.status = 'finished') AS duels_played
-      FROM users u
-      WHERE u.is_approved = 1 AND COALESCE(u.role, 'user') = 'user'
-      ORDER BY u.username COLLATE NOCASE ASC, u.tg_id ASC`);
-    const headers = ['Telegram ID', 'Текущая клетка', 'Всего бросков кубика', 'Сдано квестов', 'Баланс красочек', 'Использовано Таро (Да/Нет)', 'Сыграно дуэлей'];
+    const rows = await collectDetailedPlayerExportRows();
+    const headers = ['Telegram ID', 'Имя', 'Username', 'Дата регистрации', 'Количество выполненных заданий', 'Текущий баланс красочек', 'Текущий статус игрока', 'Количество отклоненных заявок', 'Последний вход', 'История работ JSON'];
     const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     const lines = [headers.map(escapeCsv).join(';')];
     for (const row of rows) {
       lines.push([
-        row.tg_id,
-        Number(row.current_cell || 0),
-        Number(row.total_dice_rolls || 0),
-        Number(row.approved_quests || 0),
-        Number(row.paint_balance || 0),
-        Number(row.has_used_tarot) === 1 ? 'Да' : 'Нет',
-        Number(row.duels_played || 0)
+        row.telegram_id,
+        row.name,
+        row.username,
+        row.registered_at,
+        row.completed_tasks,
+        row.paint_balance,
+        row.player_status,
+        row.rejected_submissions,
+        row.last_login_at,
+        JSON.stringify(row.works)
       ].map(escapeCsv).join(';'));
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="krasochki-game-stats.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="krasochki-detailed-player-export.csv"');
     res.send(`\ufeff${lines.join('\n')}`);
   } catch (error) {
     next(error);
