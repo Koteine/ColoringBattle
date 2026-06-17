@@ -307,8 +307,8 @@ function renderPalette(tickets = []) {
     const card = document.createElement('article');
     card.className = 'item archive-accordion player-ticket-archive';
     const workSource = ticket.source || ticket.photo_after || '';
-    const hasApprovedWork = Boolean(workSource || ticket.image_url || ticket.submission_id);
-    const afterUrl = ticket.image_url || (workSource ? `/uploads/${encodeURIComponent(workSource)}` : '');
+    const afterUrl = ticket.file_url || ticket.image_url || (workSource ? `/uploads/${encodeURIComponent(workSource)}` : '');
+    const hasApprovedWork = ticket.type === 'standard' && Boolean(ticket.submission_id && afterUrl);
     card.innerHTML = `
       <button type="button" class="archive-toggle" style="background:${paintGradients[index % paintGradients.length]}">
         <strong>Красочка №${escapeHtml(ticket.ticket_number)}</strong>
@@ -767,15 +767,25 @@ async function sharePaletteCard(button) {
 }
 
 function renderWorkDetails(work) {
-  const beforeUrl = work.photo_before ? `/uploads/${encodeURIComponent(work.photo_before)}` : '';
-  const afterUrl = work.photo_after ? `/uploads/${encodeURIComponent(work.photo_after)}` : '';
-  els.profileContent.innerHTML = `<h2>Красочка / работа #${Number(work.id || work.submission_id || 0)}</h2>
+  const canViewPrivate = Boolean(work.can_view_private || work.is_admin || work.is_owner);
+  const beforeUrl = work.image_before || (work.photo_before ? `/uploads/${encodeURIComponent(work.photo_before)}` : '');
+  const afterUrl = work.image_after || work.file_url || work.image_url || (work.photo_after ? `/uploads/${encodeURIComponent(work.photo_after)}` : '');
+  const privateDetails = canViewPrivate ? `
     <p><strong>Задание:</strong> ${escapeHtml(work.text_task || work.task || '')}</p>
     <p class="muted">Клетка: ${Number(work.cell || 0)} · статус: ${escapeHtml(work.status || '')}</p>
-    <div class="comparison-grid">
-      ${beforeUrl ? `<a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a>` : '<div class="empty-state">Фото ДО не загружено</div>'}
+  ` : '<p class="muted">Доступно только фото ПОСЛЕ. Задание и фото ДО скрыты.</p>';
+  els.profileContent.innerHTML = `<h2>Красочка / работа #${Number(work.id || work.submission_id || 0)}</h2>
+    ${privateDetails}
+    <div class="comparison-grid ${canViewPrivate ? '' : 'after-only'}">
+      ${canViewPrivate ? (beforeUrl ? `<a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a>` : '<div class="empty-state">Фото ДО не загружено</div>') : ''}
       ${afterUrl ? `<a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a>` : '<div class="empty-state">Фото ПОСЛЕ не загружено</div>'}
     </div>`;
+}
+
+async function openWorkDetails(workId) {
+  els.profileContent.innerHTML = '<div class="empty-state">Загружаем работу...</div>';
+  const data = await api(`/api/work-details/${encodeURIComponent(workId)}?viewer_tg_id=${encodeURIComponent(tgId)}`);
+  renderWorkDetails(data.work);
 }
 
 async function openProfile(profileId) {
@@ -787,17 +797,23 @@ async function openProfile(profileId) {
   const tickets = profile.tickets || [];
   const isAdminView = Boolean(profile.is_admin_view);
   const ownProfile = String(profile.tg_id) === String(tgId);
-  const ticketsBlock = isAdminView ? `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? `Задание #${escapeHtml(ticket.submission_id)}` : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>` : '';
+  const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
   const worksBlock = `<h3>Сданные работы</h3><div class="profile-works">${works.map((work, index) => {
     if (isAdminView) return `<button class="comparison-photo" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)} · задание #${Number(work.task_id || 0)}</strong>${work.photo_after ? `<img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа">` : ''}</button>`;
     return `<div class="item"><strong>Клетка ${Number(work.cell || 0)} · работа #${Number(work.id || 0)}</strong><p class="muted">Статус: ${escapeHtml(work.status || '')}</p>${ownProfile && Number(work.resubmission_required || 0) === 1 ? `<p class="notice">Ваша прошлая работа (№${Number(work.task_id || 0)}) отклонена. Комментарий: ${escapeHtml(work.admin_comment || '')}</p><button type="button" data-resubmit-id="${Number(work.id || 0)}">Загрузить заново</button>` : ''}</div>`;
   }).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div>`;
   els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${ticketsBlock}${worksBlock}`;
   els.profileContent.querySelectorAll('[data-profile-ticket-index]').forEach((button) => {
-    button.addEventListener('click', () => { if (isAdminView) renderWorkDetails(tickets[Number(button.dataset.profileTicketIndex)]); });
+    button.addEventListener('click', () => {
+      const ticket = tickets[Number(button.dataset.profileTicketIndex)];
+      if (ticket?.submission_id) openWorkDetails(ticket.submission_id).catch((error) => showToast(error.message));
+    });
   });
   els.profileContent.querySelectorAll('[data-profile-work]').forEach((button) => {
-    button.addEventListener('click', () => { if (isAdminView) renderWorkDetails(works[Number(button.dataset.profileWork)]); });
+    button.addEventListener('click', () => {
+      const work = works[Number(button.dataset.profileWork)];
+      if (work?.id) openWorkDetails(work.id).catch((error) => showToast(error.message));
+    });
   });
   els.profileContent.querySelectorAll('[data-resubmit-id]').forEach((button) => {
     button.addEventListener('click', () => uploadResubmission(button.dataset.resubmitId).catch((error) => showToast(error.message)));
@@ -1502,44 +1518,35 @@ function renderAllUsers(users) {
   els.allUsers.innerHTML = users.length ? '' : '<p class="muted">Игроков пока нет.</p>';
   for (const user of users) {
     const item = document.createElement('article');
-    item.className = 'item';
+    item.className = 'item admin-player-row';
     const playerName = user.username ? `@${String(user.username).replace(/^@/, '')}` : 'Без ника';
+    const safeTgId = escapeHtml(user.tg_id);
+    const isProtectedAdmin = user.role === 'admin' || user.tg_id === OWNER_TG_ID;
     item.innerHTML = `
-      <button class="profile-link" type="button" data-profile-id="${escapeHtml(user.tg_id)}"><strong>${escapeHtml(playerName)} (${escapeHtml(user.tg_id)}) — Клетка ${Number(user.current_cell || 0)}</strong></button>
-      <p class="muted player-meta">Роль: ${escapeHtml(user.role)} · Красочек: ${user.tickets_count || 0} · ${Number(user.is_approved) === 1 ? 'доступ открыт' : 'исключен/ожидает'} · кубик: ${Number(user.dice_frozen) === 1 ? 'заморожен' : 'готов'}</p>
-      <div class="player-tools">
-        <label class="muted">Номер клетки
-          <input type="number" min="0" max="100" value="${Number(user.current_cell || 0)}" data-cell-input="${escapeHtml(user.tg_id)}">
-        </label>
+      <div class="admin-player-main">
+        <div class="admin-player-name">
+          <strong>${escapeHtml(playerName)}</strong>
+          <small>ID: ${safeTgId} · клетка ${Number(user.current_cell || 0)}</small>
+        </div>
+        <button class="ghost admin-action-toggle" type="button" data-player-menu="${safeTgId}" aria-expanded="false">⚙️ Управление</button>
       </div>
+      <p class="muted player-meta">Роль: ${escapeHtml(user.role)} · Красочек: ${user.tickets_count || 0} · ${Number(user.is_approved) === 1 ? 'доступ открыт' : 'исключен/ожидает'} · кубик: ${Number(user.dice_frozen) === 1 ? 'заморожен' : 'готов'}</p>
+      <div class="admin-action-menu hidden" data-player-menu-panel="${safeTgId}"></div>
     `;
-    item.querySelector('[data-profile-id]').addEventListener('click', () => openProfile(user.tg_id).catch((error) => showToast(error.message)));
-    const tools = item.querySelector('.player-tools');
 
-    const changeCell = document.createElement('button');
-    changeCell.type = 'button';
-    changeCell.textContent = 'Изменить клетку';
-    changeCell.addEventListener('click', async () => {
-      const input = item.querySelector('input[type="number"]');
-      await api('/api/admin/change-cell', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admin_tg_id: tgId, tg_id: user.tg_id, current_cell: input.value })
-      });
-      showToast('Клетка изменена');
+    const menuToggle = item.querySelector('[data-player-menu]');
+    const menu = item.querySelector('[data-player-menu-panel]');
+    menuToggle.addEventListener('click', () => {
+      const willOpen = menu.classList.contains('hidden');
+      item.querySelectorAll('.admin-action-menu').forEach((panel) => panel.classList.add('hidden'));
+      menu.classList.toggle('hidden', !willOpen);
+      menuToggle.setAttribute('aria-expanded', String(willOpen));
+    });
+
+    const refreshAfterPlayerAction = async () => {
       await loadAdminPanel();
-      await loadRaffle(true).catch(() => {});
       if (user.tg_id === tgId) await loadState();
-    });
-
-    const roleToggle = document.createElement('button');
-    roleToggle.type = 'button';
-    roleToggle.className = user.role === 'moderator' ? 'ghost' : 'success';
-    roleToggle.textContent = user.role === 'moderator' ? '👤 Забрать права модератора' : '👑 Выдать права модератора';
-    roleToggle.disabled = user.role === 'admin' || user.tg_id === OWNER_TG_ID;
-    roleToggle.addEventListener('click', async () => {
-      await toggleModerator(user.tg_id, user.role);
-    });
+    };
 
     const profile = document.createElement('button');
     profile.type = 'button';
@@ -1547,29 +1554,59 @@ function renderAllUsers(users) {
     profile.textContent = 'Открыть профиль';
     profile.addEventListener('click', () => openProfile(user.tg_id).catch((error) => showToast(error.message)));
 
+    const changeCell = document.createElement('button');
+    changeCell.type = 'button';
+    changeCell.textContent = 'Изменить клетку';
+    changeCell.addEventListener('click', async () => {
+      const input = window.prompt(`Новая клетка для ${playerName} (0–100):`, String(Number(user.current_cell || 0)));
+      if (input === null) return;
+      const currentCell = Number(input);
+      if (!Number.isInteger(currentCell) || currentCell < 0 || currentCell > 100) {
+        showToast('Клетка должна быть целым числом от 0 до 100');
+        return;
+      }
+      if (!window.confirm(`Переместить ${playerName} на клетку ${currentCell}?`)) return;
+      await api('/api/admin/change-cell', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin_tg_id: tgId, tg_id: user.tg_id, current_cell: currentCell })
+      });
+      showToast('Клетка изменена');
+      await refreshAfterPlayerAction();
+      await loadRaffle(true).catch(() => {});
+    });
 
     const resetDice = document.createElement('button');
     resetDice.type = 'button';
     resetDice.className = 'ghost';
     resetDice.textContent = 'Разморозить кубик';
     resetDice.addEventListener('click', async () => {
+      if (!window.confirm(`Разморозить кубик игрока ${playerName}?`)) return;
       await api('/api/admin/reset-dice', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ admin_tg_id: tgId, tg_id: user.tg_id })
       });
       showToast('Кубик разморожен');
-      await loadAdminPanel();
-      if (user.tg_id === tgId) await loadState();
+      await refreshAfterPlayerAction();
+    });
+
+    const roleToggle = document.createElement('button');
+    roleToggle.type = 'button';
+    roleToggle.className = user.role === 'moderator' ? 'ghost' : 'success';
+    roleToggle.textContent = user.role === 'moderator' ? 'Забрать модератора' : 'Сделать модератором';
+    roleToggle.disabled = isProtectedAdmin;
+    roleToggle.addEventListener('click', async () => {
+      await toggleModerator(user.tg_id, user.role);
     });
 
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'danger';
-    remove.textContent = 'Исключить';
+    remove.textContent = 'Исключить из игры';
     remove.disabled = user.tg_id === OWNER_TG_ID;
     remove.addEventListener('click', async () => {
-      if (!window.confirm(`Исключить игрока ${user.username || user.tg_id}?`)) return;
+      if (!window.confirm(`Исключить игрока ${playerName}?`)) return;
       await api('/api/admin/remove-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1579,7 +1616,7 @@ function renderAllUsers(users) {
       await loadAdminPanel();
     });
 
-    tools.append(profile, changeCell, resetDice, roleToggle, remove);
+    menu.append(profile, changeCell, resetDice, roleToggle, remove);
     els.allUsers.append(item);
   }
 }
