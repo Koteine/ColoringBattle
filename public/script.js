@@ -82,6 +82,7 @@ const els = {
   totalPrizesInput: document.getElementById('totalPrizesInput'),
   raffleConfigHint: document.getElementById('raffleConfigHint'),
   refreshExportBtn: document.getElementById('refreshExportBtn'),
+  gameStatsExportBtn: document.getElementById('gameStatsExportBtn'),
   resetRoundBtn: document.getElementById('resetRoundBtn'),
   globalResetBtn: document.getElementById('globalResetBtn'),
   confettiLayer: document.getElementById('confettiLayer'),
@@ -555,6 +556,13 @@ function render() {
   if (roleBlocked) renderWorkArchive().catch((error) => { els.paletteGrid.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`; });
   else renderPalette(tickets);
 
+  const usedPenaltyRerolls = Number(user.penalty_rerolls || 0);
+  const penaltyLimitReached = usedPenaltyRerolls >= 3;
+  els.rerollTaskBtn.classList.toggle('penalty-reroll-locked', penaltyLimitReached);
+  els.rerollTaskBtn.disabled = penaltyLimitReached;
+  els.rerollTaskBtn.title = penaltyLimitReached
+    ? 'Твой лимит штрафных перебросов исчерпан (3 из 3). Пришло время брать материалы и рисовать выпавшее задание! 🎨✨'
+    : `Использовано штрафных перебросов: ${usedPenaltyRerolls} из 3`;
   const frozen = Number(user.dice_frozen) === 1;
   const finished = Number(user.current_cell) >= 100;
   els.rollBtn.disabled = roleBlocked || frozen || finished || isRolling;
@@ -759,18 +767,11 @@ async function sharePaletteCard(button) {
   if (!blob) throw new Error('Не удалось собрать фото для отправки');
   const text = shareTexts[Math.floor(Math.random() * shareTexts.length)];
   const file = new File([blob], 'krasochki_result.jpg', { type: 'image/jpeg' });
-  if (navigator.canShare?.({ files: [file] }) && navigator.share) {
-    await navigator.share({ text, files: [file] });
+  if (navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }))) {
+    await navigator.share({ files: [file], text });
     return;
   }
-  await navigator.clipboard?.writeText(text).catch(() => {});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = 'krasochki_result.jpg';
-  link.click();
-  URL.revokeObjectURL(url);
-  showToast('Фото скачано, текст скопирован — отправьте картинку в Telegram вручную.');
+  throw new Error('На этом устройстве системная отправка картинки недоступна. Откройте игру на смартфоне с поддержкой Web Share.');
 }
 
 async function openProfile(profileId) {
@@ -909,6 +910,10 @@ async function movePuzzleTile(index) {
 
 async function rerollTask() {
   if (isRolling) return;
+  if (Number(state?.user?.penalty_rerolls || 0) >= 3) {
+    showToast('Твой лимит штрафных перебросов исчерпан (3 из 3). Пришло время брать материалы и рисовать выпавшее задание! 🎨✨');
+    return;
+  }
   els.rerollTaskBtn.disabled = true;
   try {
     const result = await api('/api/reroll-task', {
@@ -916,12 +921,12 @@ async function rerollTask() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tg_id: tgId })
     });
-    showToast(`Штрафной откат на ${result.penalty}. Новая клетка: ${result.current_cell}. Задание сменено.`);
+    showToast(`Штрафной откат на ${result.penalty}. Новая клетка: ${result.current_cell}. Использовано ${result.penalty_rerolls || 0} из ${result.penalty_rerolls_limit || 3}.`);
     await loadState();
   } catch (error) {
     showToast(error.message);
   } finally {
-    els.rerollTaskBtn.disabled = false;
+    els.rerollTaskBtn.disabled = Number(state?.user?.penalty_rerolls || 0) >= 3;
   }
 }
 
@@ -1301,16 +1306,17 @@ function stopRafflePolling() {
 
 async function loadAdminPanel() {
   const adminParam = `admin_tg_id=${encodeURIComponent(tgId)}`;
+  if (!hasStaffAccess(state?.user)) return;
+  const pendingUsers = await api(`/api/admin/pending-users?${adminParam}`);
+  renderPendingUsers(pendingUsers.users);
   if (!hasAdminAccess(state?.user)) return;
-  const [pendingUsers, users, exportData, ticketData, raffleConfig, taskData] = await Promise.all([
-    api(`/api/admin/pending-users?${adminParam}`),
+  const [users, exportData, ticketData, raffleConfig, taskData] = await Promise.all([
     api(`/api/admin/users?${adminParam}`),
     api(`/api/admin/tickets-export?${adminParam}`),
     api(`/api/admin/tickets?${adminParam}`),
     api(`/api/admin/raffle-config?${adminParam}`),
     api(`/api/admin/tasks?${adminParam}`)
   ]);
-  renderPendingUsers(pendingUsers.users);
   renderAllUsers(users.users);
   renderTicketRegistry(ticketData.tickets || []);
   renderAdminTasks(taskData.tasks || []);
@@ -1650,6 +1656,18 @@ async function refreshExport() {
   showToast('Выгрузка обновлена');
 }
 
+
+function downloadGameStatsExport() {
+  const url = `/api/admin/game-stats-export?admin_tg_id=${encodeURIComponent(tgId)}`;
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'krasochki-game-stats.csv';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  showToast('Выгрузка статистики началась');
+}
+
 async function saveRaffleConfig(event) {
   event.preventDefault();
   const payload = {
@@ -1729,7 +1747,8 @@ els.submitForm.addEventListener('submit', submitWork);
 els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catch((error) => showToast(error.message)));
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
-els.refreshExportBtn.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
+els.refreshExportBtn?.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
+els.gameStatsExportBtn?.addEventListener('click', () => downloadGameStatsExport());
 els.resetRoundBtn?.addEventListener('click', () => resetRound().catch((error) => showToast(error.message)));
 els.globalResetBtn.addEventListener('click', () => globalReset().catch((error) => showToast(error.message)));
 els.leaderboardTable?.addEventListener('click', (event) => {
