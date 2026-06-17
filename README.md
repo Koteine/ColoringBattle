@@ -1,6 +1,6 @@
 # Telegram Coloring Battle
 
-Легковесная Telegram WebApp игра-бродилка на 100 клеток для деплоя на Railway.app.
+Легковесная Telegram WebApp игра-бродилка на 100 ячеек для деплоя на Railway.app.
 
 ## Стек
 
