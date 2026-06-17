@@ -271,28 +271,23 @@ async function renderWorkArchive() {
 
   for (const player of archiveData.players) {
     const playerNode = document.createElement('article');
-    playerNode.className = 'item archive-accordion';
+    playerNode.className = 'item';
     const username = player.username ? `@${String(player.username).replace(/^@/, '')}` : 'Без ника';
     const diceStatus = Number(player.dice_frozen) === 1 ? 'Заморожен (ждет проверки)' : 'Свободен';
     playerNode.innerHTML = `
-      <button type="button" class="archive-toggle"><strong><span class="profile-link" data-profile-id="${escapeHtml(player.tg_id)}">${escapeHtml(username)}</span> (ID: ${escapeHtml(player.tg_id)})</strong></button>
-      <div class="archive-panel"><div class="archive-inner">
-        <div class="item player-dossier">
-          <p><strong>Текущая клетка:</strong> ${Number(player.current_cell || 0)}</p>
-          <p><strong>Статус кубика:</strong> ${escapeHtml(diceStatus)}</p>
-          <p><strong>Выполнено заданий:</strong> ${Number(player.approved_submissions_count || 0)}</p>
-          <p><strong>Всего Красочек:</strong> ${Number(player.active_tickets_count || 0)}</p>
-        </div>
-      </div></div>`;
-    const inner = playerNode.querySelector('.archive-inner');
+      <button type="button" class="profile-link" data-profile-id="${escapeHtml(player.tg_id)}"><strong>${escapeHtml(username)}</strong> (ID: ${escapeHtml(player.tg_id)})</button>
+      <p class="muted">Клетка: ${Number(player.current_cell || 0)} · кубик: ${escapeHtml(diceStatus)} · выполнено: ${Number(player.approved_submissions_count || 0)} · Красочек: ${Number(player.active_tickets_count || 0)}</p>`;
+    const worksWrap = document.createElement('div');
+    worksWrap.className = 'profile-works';
     for (const work of player.works || []) {
       const workNode = document.createElement('article');
       workNode.className = 'item archive-accordion archive-work';
       const beforeUrl = `/uploads/${encodeURIComponent(work.photo_before)}`;
       const afterUrl = `/uploads/${encodeURIComponent(work.photo_after)}`;
       workNode.innerHTML = `<button type="button" class="archive-toggle"><strong>Клетка ${escapeHtml(work.cell)} — ${escapeHtml(work.text_task)}</strong></button><div class="archive-panel"><div class="archive-inner archive-photos"><div class="comparison-grid"><a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a><a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a></div></div></div>`;
-      inner.append(workNode);
+      worksWrap.append(workNode);
     }
+    playerNode.append(worksWrap);
     archiveInner.append(playerNode);
   }
   els.paletteGrid.append(archiveRoot);
@@ -786,17 +781,48 @@ function renderWorkDetails(work) {
 async function openProfile(profileId) {
   els.profileModal.classList.remove('hidden');
   els.profileContent.innerHTML = '<div class="empty-state">Загружаем профиль...</div>';
-  const data = await api(`/api/profile/${encodeURIComponent(profileId)}`);
+  const data = await api(`/api/profile/${encodeURIComponent(profileId)}?viewer_tg_id=${encodeURIComponent(tgId)}`);
   const profile = data.profile;
   const works = profile.works || [];
   const tickets = profile.tickets || [];
-  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Красочки: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p><h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? `Задание #${escapeHtml(ticket.submission_id)}` : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div><h3>Работы</h3><div class="profile-works">${works.map((work, index) => `<button class="comparison-photo" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)} · задание #${Number(work.task_id || 0)}</strong>${work.photo_after ? `<img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа">` : ''}</button>`).join('') || '<p class="muted">Готовых работ пока нет.</p>'}</div>`;
+  const isAdminView = Boolean(profile.is_admin_view);
+  const ownProfile = String(profile.tg_id) === String(tgId);
+  const ticketsBlock = isAdminView ? `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? `Задание #${escapeHtml(ticket.submission_id)}` : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>` : '';
+  const worksBlock = `<h3>Сданные работы</h3><div class="profile-works">${works.map((work, index) => {
+    if (isAdminView) return `<button class="comparison-photo" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)} · задание #${Number(work.task_id || 0)}</strong>${work.photo_after ? `<img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа">` : ''}</button>`;
+    return `<div class="item"><strong>Клетка ${Number(work.cell || 0)} · работа #${Number(work.id || 0)}</strong><p class="muted">Статус: ${escapeHtml(work.status || '')}</p>${ownProfile && Number(work.resubmission_required || 0) === 1 ? `<p class="notice">Ваша прошлая работа (№${Number(work.task_id || 0)}) отклонена. Комментарий: ${escapeHtml(work.admin_comment || '')}</p><button type="button" data-resubmit-id="${Number(work.id || 0)}">Загрузить заново</button>` : ''}</div>`;
+  }).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div>`;
+  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${ticketsBlock}${worksBlock}`;
   els.profileContent.querySelectorAll('[data-profile-ticket-index]').forEach((button) => {
-    button.addEventListener('click', () => renderWorkDetails(tickets[Number(button.dataset.profileTicketIndex)]));
+    button.addEventListener('click', () => { if (isAdminView) renderWorkDetails(tickets[Number(button.dataset.profileTicketIndex)]); });
   });
   els.profileContent.querySelectorAll('[data-profile-work]').forEach((button) => {
-    button.addEventListener('click', () => renderWorkDetails(works[Number(button.dataset.profileWork)]));
+    button.addEventListener('click', () => { if (isAdminView) renderWorkDetails(works[Number(button.dataset.profileWork)]); });
   });
+  els.profileContent.querySelectorAll('[data-resubmit-id]').forEach((button) => {
+    button.addEventListener('click', () => uploadResubmission(button.dataset.resubmitId).catch((error) => showToast(error.message)));
+  });
+}
+
+
+async function uploadResubmission(submissionId) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.multiple = true;
+  input.click();
+  await new Promise((resolve) => { input.addEventListener('change', resolve, { once: true }); });
+  const files = Array.from(input.files || []).slice(0, 2);
+  if (!files.length) return;
+  const formData = new FormData();
+  formData.append('tg_id', tgId);
+  formData.append('submission_id', submissionId);
+  if (files[0]) formData.append('photo_before', files[0]);
+  if (files[1]) formData.append('photo_after', files[1]);
+  await api('/api/resubmit-submission', { method: 'POST', body: formData });
+  showToast(files.length > 1 ? 'Работа повторно отправлена на проверку' : 'Фото загружено. При необходимости добавьте второе фото.');
+  await openProfile(tgId);
+  await loadState().catch(() => {});
 }
 
 function closeProfile() {
@@ -825,7 +851,10 @@ async function openNotifications() {
   const data = await api(`/api/notifications/${encodeURIComponent(state.user.tg_id || tgId)}`);
   const rows = [];
   for (const event of data.events || []) rows.push(`<li>${escapeHtml(event.message)}<br><small>${escapeHtml(event.created_at || '')}</small></li>`);
-  for (const sub of data.submissions || []) rows.push(`<li>Квест на клетке ${Number(sub.cell || 0)}: ${escapeHtml(sub.status)}<br><small>${escapeHtml(sub.created_at || '')}</small></li>`);
+  for (const sub of data.submissions || []) {
+    if (Number(sub.resubmission_required || 0) === 1) rows.push(`<li>Ваша прошлая работа (№${Number(sub.task_id || sub.id || 0)}) отклонена. Комментарий: ${escapeHtml(sub.admin_comment || '')}<br><small>${escapeHtml(sub.created_at || '')}</small></li>`);
+    else rows.push(`<li>Квест на клетке ${Number(sub.cell || 0)}: ${escapeHtml(sub.status)}<br><small>${escapeHtml(sub.created_at || '')}</small></li>`);
+  }
   for (const duel of data.duels || []) rows.push(`<li>🧩 Дуэль #${Number(duel.id)}: ${escapeHtml(duel.status)}${duel.winner_tg_id ? ` · победитель ID ${escapeHtml(duel.winner_tg_id)}` : ''}<br><small>${escapeHtml(duel.created_at || '')}</small></li>`);
   els.notificationsContent.innerHTML = rows.length ? `<ul>${rows.join('')}</ul>` : '<p class="muted">Личных звоночков пока нет.</p>';
 }
@@ -1410,7 +1439,7 @@ function renderPendingSubmissions(submissions) {
     const item = document.createElement('article');
     item.className = 'item';
     item.innerHTML = `
-      <strong>${escapeHtml(playerName)} — клетка ${submission.cell}</strong>
+      <strong>${escapeHtml(playerName)} — клетка ${submission.cell}</strong><p class="muted">Статус: ${submission.status === 'auto_approved' ? 'автоодобрено' : 'ожидает одобрения'}</p>
       <p>${escapeHtml(submission.text_task)}</p>
       <div class="comparison-grid">
         <a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener">
@@ -1440,8 +1469,8 @@ function renderPendingSubmissions(submissions) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ admin_tg_id: tgId, submission_id: submission.id })
       });
-      const ticketNumbers = result.issuedTickets.map((ticket) => `№${ticket.ticket_number}`).join(', ');
-      showToast(`Работа одобрена. Выданы Красочки: ${ticketNumbers}`);
+      const ticketNumbers = (result.issuedTickets || []).map((ticket) => `№${ticket.ticket_number}`).join(', ');
+      showToast(ticketNumbers ? `Работа одобрена. Выданы Красочки: ${ticketNumbers}` : 'Автоодобренная работа подтверждена');
       await renderWorkArchive();
       await loadNews().catch(() => {});
       if (submission.tg_id === tgId) await loadState();
@@ -1473,30 +1502,18 @@ function renderAllUsers(users) {
   els.allUsers.innerHTML = users.length ? '' : '<p class="muted">Игроков пока нет.</p>';
   for (const user of users) {
     const item = document.createElement('article');
-    item.className = 'item player-accordion';
+    item.className = 'item';
     const playerName = user.username ? `@${String(user.username).replace(/^@/, '')}` : 'Без ника';
     item.innerHTML = `
-      <button class="player-summary" type="button" aria-expanded="false">
-        <strong>${escapeHtml(playerName)} (${escapeHtml(user.tg_id)}) — Клетка ${Number(user.current_cell || 0)}</strong>
-      </button>
-      <div class="player-details">
-        <div class="player-details-inner">
-          <p class="muted player-meta">Роль: ${escapeHtml(user.role)} · Красочек: ${user.tickets_count || 0} · ${Number(user.is_approved) === 1 ? 'доступ открыт' : 'исключен/ожидает'} · кубик: ${Number(user.dice_frozen) === 1 ? 'заморожен' : 'готов'}</p>
-          <div class="player-tools">
-            <label class="muted">Номер клетки
-              <input type="number" min="0" max="100" value="${Number(user.current_cell || 0)}" data-cell-input="${escapeHtml(user.tg_id)}">
-            </label>
-          </div>
-        </div>
+      <button class="profile-link" type="button" data-profile-id="${escapeHtml(user.tg_id)}"><strong>${escapeHtml(playerName)} (${escapeHtml(user.tg_id)}) — Клетка ${Number(user.current_cell || 0)}</strong></button>
+      <p class="muted player-meta">Роль: ${escapeHtml(user.role)} · Красочек: ${user.tickets_count || 0} · ${Number(user.is_approved) === 1 ? 'доступ открыт' : 'исключен/ожидает'} · кубик: ${Number(user.dice_frozen) === 1 ? 'заморожен' : 'готов'}</p>
+      <div class="player-tools">
+        <label class="muted">Номер клетки
+          <input type="number" min="0" max="100" value="${Number(user.current_cell || 0)}" data-cell-input="${escapeHtml(user.tg_id)}">
+        </label>
       </div>
     `;
-
-    const summary = item.querySelector('.player-summary');
-    summary.addEventListener('click', () => {
-      const isOpen = item.classList.toggle('open');
-      summary.setAttribute('aria-expanded', String(isOpen));
-    });
-
+    item.querySelector('[data-profile-id]').addEventListener('click', () => openProfile(user.tg_id).catch((error) => showToast(error.message)));
     const tools = item.querySelector('.player-tools');
 
     const changeCell = document.createElement('button');
