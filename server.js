@@ -101,15 +101,17 @@ async function initDb() {
     image_name TEXT,
     photo_before TEXT,
     photo_after TEXT,
-    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'auto_approved')),
     admin_comment TEXT DEFAULT '',
+    resubmission_required INTEGER DEFAULT 0,
+    resubmission_notice_shown INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
   )`);
 
-  await ensureSubmissionPhotoColumns();
+  await ensureSubmissionSchema();
   await ensureUserLuckyColumn();
   await ensureUserTarotColumns();
   await ensureUserDuelColumns();
@@ -276,15 +278,54 @@ async function ensureUserLuckyColumn() {
   }
 }
 
-async function ensureSubmissionPhotoColumns() {
+
+async function ensureSubmissionSchema() {
+  const existing = await get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'submissions'");
+  const desiredSql = `CREATE TABLE submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id TEXT NOT NULL,
+    cell INTEGER NOT NULL,
+    task_id INTEGER NOT NULL,
+    image_name TEXT,
+    photo_before TEXT,
+    photo_after TEXT,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'auto_approved')),
+    admin_comment TEXT DEFAULT '',
+    resubmission_required INTEGER DEFAULT 0,
+    resubmission_notice_shown INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id),
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+  )`;
+
+  if (!existing) {
+    await run(desiredSql);
+    return;
+  }
+
   const columns = await all('PRAGMA table_info(submissions)');
   const columnNames = new Set(columns.map((column) => column.name));
+  const needsRebuild = !String(existing.sql || '').includes('auto_approved')
+    || !columnNames.has('resubmission_required')
+    || !columnNames.has('resubmission_notice_shown');
 
-  if (!columnNames.has('photo_before')) {
-    await run('ALTER TABLE submissions ADD COLUMN photo_before TEXT');
-  }
-  if (!columnNames.has('photo_after')) {
-    await run('ALTER TABLE submissions ADD COLUMN photo_after TEXT');
+  if (needsRebuild) {
+    await run('ALTER TABLE submissions RENAME TO submissions_legacy');
+    if (!columnNames.has('photo_before')) await run('ALTER TABLE submissions_legacy ADD COLUMN photo_before TEXT');
+    if (!columnNames.has('photo_after')) await run('ALTER TABLE submissions_legacy ADD COLUMN photo_after TEXT');
+    if (!columnNames.has('resubmission_required')) await run('ALTER TABLE submissions_legacy ADD COLUMN resubmission_required INTEGER DEFAULT 0');
+    if (!columnNames.has('resubmission_notice_shown')) await run('ALTER TABLE submissions_legacy ADD COLUMN resubmission_notice_shown INTEGER DEFAULT 0');
+    await run(desiredSql);
+    await run(`INSERT INTO submissions (id, tg_id, cell, task_id, image_name, photo_before, photo_after, status, admin_comment, resubmission_required, resubmission_notice_shown, created_at, updated_at)
+      SELECT id, tg_id, cell, task_id, image_name, photo_before, COALESCE(photo_after, image_name),
+        CASE WHEN status IN ('pending', 'approved', 'rejected', 'auto_approved') THEN status ELSE 'pending' END,
+        COALESCE(admin_comment, ''), COALESCE(resubmission_required, 0), COALESCE(resubmission_notice_shown, 0), created_at, updated_at
+      FROM submissions_legacy`);
+    await run('DROP TABLE submissions_legacy');
+  } else {
+    if (!columnNames.has('photo_before')) await run('ALTER TABLE submissions ADD COLUMN photo_before TEXT');
+    if (!columnNames.has('photo_after')) await run('ALTER TABLE submissions ADD COLUMN photo_after TEXT');
   }
 
   await run(`UPDATE submissions
@@ -649,7 +690,7 @@ async function getActiveSubmission(tgId) {
   return get(`SELECT s.*, t.text_task
     FROM submissions s
     JOIN tasks t ON t.id = s.task_id
-    WHERE s.tg_id = ? AND s.status IN ('pending', 'rejected')
+    WHERE s.tg_id = ? AND s.status IN ('pending', 'rejected') AND COALESCE(s.resubmission_required, 0) = 0
     ORDER BY s.id DESC
     LIMIT 1`, [tgId]);
 }
@@ -668,7 +709,7 @@ async function getPlayerTickets(tgId) {
         ROW_NUMBER() OVER (PARTITION BY s.tg_id ORDER BY s.id ASC) AS work_order
       FROM submissions s
       JOIN tasks task ON task.id = s.task_id
-      WHERE s.tg_id = ? AND s.status = 'approved'
+      WHERE s.tg_id = ? AND s.status IN ('approved', 'auto_approved')
     )
     SELECT nt.ticket_number, nt.type, nt.status, nt.created_at, nt.place_number,
       nw.submission_id, nw.cell, nw.text_task, nw.photo_before, nw.photo_after, nw.source, nw.image_url, nw.submission_status
@@ -695,7 +736,7 @@ async function pickUnusedTask(tgId) {
   const task = await get(`SELECT id, text_task
     FROM tasks
     WHERE id NOT IN (
-      SELECT task_id FROM submissions WHERE tg_id = ? AND status IN ('approved', 'pending')
+      SELECT task_id FROM submissions WHERE tg_id = ? AND status IN ('approved', 'auto_approved', 'pending')
     )
     ORDER BY RANDOM()
     LIMIT 1`, [tgId]);
@@ -707,6 +748,53 @@ async function pickUnusedTask(tgId) {
 async function issueTicket(tgId, type = 'standard') {
   const result = await run("INSERT INTO tickets (tg_id, type, status) VALUES (?, ?, 'active')", [tgId, type]);
   return get('SELECT ticket_number, type, status FROM tickets WHERE ticket_number = ?', [result.id]);
+}
+
+
+async function approveSubmissionSideEffects(submission, source = 'admin') {
+  await run("UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?", [submission.tg_id]);
+  const issuedTickets = [await issueTicket(submission.tg_id, 'standard')];
+  const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
+  if (Number(userAfterApproval.current_cell) >= 100) {
+    issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
+    issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
+  }
+  const prefix = source === 'auto' ? '🤖 Работа автоодобрена' : '⚡️ Модератор одобрил работу';
+  await addNewsEvent(`${prefix} ${formatUserHandle(userAfterApproval.username, userAfterApproval.tg_id)} на ${Number(submission.cell || 0)} клетке! Выдана Красочка №${issuedTickets[0].ticket_number}`, {
+    eventType: source === 'auto' ? 'auto_approve_submission' : 'admin_approve_submission',
+    tgId: userAfterApproval.tg_id,
+    ticketNumber: issuedTickets[0].ticket_number
+  });
+  await addApprovalNewsEvents(userAfterApproval, issuedTickets);
+  return { issuedTickets, userAfterApproval };
+}
+
+let autoApprovalRunning = false;
+async function autoApproveExpiredSubmissions() {
+  if (autoApprovalRunning) return;
+  autoApprovalRunning = true;
+  try {
+    const submissions = await all(`SELECT s.id, s.tg_id, s.cell, s.status
+      FROM submissions s
+      WHERE s.status = 'pending'
+        AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
+        AND datetime(s.updated_at, '+4 hours') <= datetime('now')
+      ORDER BY s.updated_at ASC, s.id ASC`);
+    for (const submission of submissions) {
+      const result = await run("UPDATE submissions SET status = 'auto_approved', admin_comment = '', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'", [submission.id]);
+      if (result.changes === 0) continue;
+      await approveSubmissionSideEffects(submission, 'auto');
+    }
+  } catch (error) {
+    console.error('Auto approval failed:', error);
+  } finally {
+    autoApprovalRunning = false;
+  }
+}
+
+function startAutoApprovalJob() {
+  autoApproveExpiredSubmissions();
+  setInterval(autoApproveExpiredSubmissions, 5 * 60 * 1000);
 }
 
 function rollD6() {
@@ -940,17 +1028,39 @@ app.get('/api/game/leaderboard', async (_req, res, next) => {
 app.get('/api/profile/:tgId', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.params.tgId);
+    const viewerTgId = req.query.viewer_tg_id ? normalizeTgId(req.query.viewer_tg_id) : '';
+    const viewer = viewerTgId ? await get('SELECT role FROM users WHERE tg_id = ?', [viewerTgId]) : null;
+    const isStaffViewer = viewer?.role === 'admin' || viewer?.role === 'moderator' || ADMIN_TG_IDS.has(String(viewerTgId));
+    const isOwnProfile = viewerTgId && viewerTgId === tgId;
     const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen
       FROM users WHERE tg_id = ? AND is_approved = 1`, [tgId]);
     if (!user) throw Object.assign(new Error('Профиль не найден'), { status: 404 });
-    const works = await all(`SELECT s.id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.updated_at, t.text_task
+    const works = await all(`SELECT s.id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.admin_comment, s.resubmission_required, s.updated_at, t.text_task
       FROM submissions s
       JOIN tasks t ON t.id = s.task_id
-      WHERE s.tg_id = ? AND s.status = 'approved' AND s.photo_after IS NOT NULL
+      WHERE s.tg_id = ? AND (s.status IN ('approved', 'auto_approved') OR COALESCE(s.resubmission_required, 0) = 1) AND s.photo_after IS NOT NULL
       ORDER BY s.updated_at DESC`, [tgId]);
-    const tickets = await getPlayerTickets(tgId);
+    let tickets = await getPlayerTickets(tgId);
+    if (!isStaffViewer) {
+      tickets = tickets.map((ticket) => ({
+        ticket_number: ticket.ticket_number,
+        type: ticket.type,
+        status: ticket.status,
+        submission_id: ticket.submission_id,
+        cell: ticket.cell,
+        submission_status: ticket.submission_status
+      }));
+    }
+    const visibleWorks = isStaffViewer ? works : works.map((work) => ({
+      id: work.id,
+      task_id: work.task_id,
+      cell: work.cell,
+      status: work.status,
+      admin_comment: isOwnProfile && Number(work.resubmission_required || 0) === 1 ? work.admin_comment : '',
+      resubmission_required: isOwnProfile ? Number(work.resubmission_required || 0) : 0
+    }));
     const counts = await get(`SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?`, [tgId]);
-    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску', tickets, works } });
+    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску', tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
   } catch (error) {
     next(error);
   }
@@ -1155,7 +1265,7 @@ app.get('/api/notifications/:userId', async (req, res, next) => {
     await requireApproved(tgId);
     const limit = Math.max(1, Math.min(40, Number(req.query.limit) || 25));
     const events = await all(`SELECT id, message, event_type, created_at FROM news_events WHERE tg_id = ? ORDER BY id DESC LIMIT ?`, [tgId, limit]);
-    const submissions = await all(`SELECT id, cell, status, updated_at AS created_at FROM submissions WHERE tg_id = ? ORDER BY updated_at DESC, id DESC LIMIT 10`, [tgId]);
+    const submissions = await all(`SELECT id, task_id, cell, status, admin_comment, resubmission_required, updated_at AS created_at FROM submissions WHERE tg_id = ? ORDER BY updated_at DESC, id DESC LIMIT 10`, [tgId]);
     const duels = await all(`SELECT id, challenger_tg_id, opponent_tg_id, challenger_time, opponent_time, status, winner_tg_id, loser_tg_id, updated_at AS created_at FROM puzzle_duels WHERE challenger_tg_id = ? OR opponent_tg_id = ? ORDER BY updated_at DESC, id DESC LIMIT 10`, [tgId, tgId]);
     res.json({ events, submissions, duels });
   } catch (error) { next(error); }
@@ -1364,6 +1474,41 @@ app.post('/api/submit', upload.fields([
   }
 });
 
+
+app.post('/api/resubmit-submission', upload.fields([
+  { name: 'photo_before', maxCount: 1 },
+  { name: 'photo_after', maxCount: 1 },
+  { name: 'work_image', maxCount: 1 }
+]), async (req, res, next) => {
+  const uploadedFiles = Object.values(req.files || {}).flat();
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const submissionId = Number(req.body.submission_id);
+    await requireApproved(tgId);
+    if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
+    const submission = await get("SELECT * FROM submissions WHERE id = ? AND tg_id = ? AND status = 'rejected' AND COALESCE(resubmission_required, 0) = 1", [submissionId, tgId]);
+    if (!submission) throw Object.assign(new Error('Работа не ожидает повторной загрузки'), { status: 404 });
+    const photoBefore = req.files?.photo_before?.[0];
+    const photoAfter = req.files?.photo_after?.[0] || req.files?.work_image?.[0];
+    if (!photoBefore && !photoAfter) throw Object.assign(new Error('Загрузите фото ДО или ПОСЛЕ'), { status: 400 });
+    await run(`UPDATE submissions
+      SET photo_before = COALESCE(?, photo_before), photo_after = COALESCE(?, photo_after), image_name = COALESCE(?, image_name),
+        status = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, photo_after) IS NOT NULL THEN 'pending' ELSE status END,
+        admin_comment = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, photo_after) IS NOT NULL THEN '' ELSE admin_comment END,
+        resubmission_required = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, photo_after) IS NOT NULL THEN 0 ELSE resubmission_required END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?`, [photoBefore?.filename || null, photoAfter?.filename || null, photoAfter?.filename || null,
+        photoBefore?.filename || null, photoAfter?.filename || null, photoBefore?.filename || null, photoAfter?.filename || null,
+        photoBefore?.filename || null, photoAfter?.filename || null, submissionId]);
+    const updated = await get('SELECT * FROM submissions WHERE id = ?', [submissionId]);
+    if (updated.status === 'pending') await run('UPDATE users SET dice_frozen = 1 WHERE tg_id = ?', [tgId]);
+    res.json({ ok: true, submission: updated });
+  } catch (error) {
+    for (const file of uploadedFiles) await fs.promises.rm(path.join(UPLOADS_DIR, file.filename), { force: true }).catch(() => {});
+    next(error);
+  }
+});
+
 app.get('/api/check-status/:tgId', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.params.tgId);
@@ -1492,7 +1637,7 @@ app.get('/api/admin/submissions', async (req, res, next) => {
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
       JOIN tasks t ON t.id = s.task_id
-      WHERE s.status = 'pending' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
+      WHERE s.status IN ('pending', 'auto_approved') AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
       ORDER BY s.updated_at ASC, s.id ASC`);
     res.json({ submissions });
   } catch (error) {
@@ -1505,7 +1650,7 @@ app.get('/api/admin/work-archive', async (req, res, next) => {
   try {
     await requireModeratorOrAdmin(req.query.admin_tg_id);
     const players = await all(`SELECT u.tg_id, u.username, u.current_cell, u.dice_frozen,
-        (SELECT COUNT(*) FROM submissions approved WHERE approved.tg_id = u.tg_id AND approved.status = 'approved') AS approved_submissions_count,
+        (SELECT COUNT(*) FROM submissions approved WHERE approved.tg_id = u.tg_id AND approved.status IN ('approved', 'auto_approved')) AS approved_submissions_count,
         (SELECT COUNT(*) FROM tickets active_ticket WHERE active_ticket.tg_id = u.tg_id AND active_ticket.status = 'active') AS active_tickets_count
       FROM users u
       WHERE u.is_approved = 1 AND COALESCE(u.role, 'user') = 'user'
@@ -1514,7 +1659,7 @@ app.get('/api/admin/work-archive', async (req, res, next) => {
     const works = await all(`SELECT s.id, s.tg_id, s.cell, s.photo_before, s.photo_after, s.updated_at, t.text_task
       FROM submissions s
       JOIN tasks t ON t.id = s.task_id
-      WHERE s.status = 'approved' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
+      WHERE s.status IN ('approved', 'auto_approved') AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
       ORDER BY s.cell ASC, s.updated_at DESC, s.id DESC`);
 
     const byId = new Map(players.map((player) => [player.tg_id, { ...player, works: [] }]));
@@ -1598,28 +1743,19 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
     const submissionId = Number(req.body.submission_id);
     if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
 
-    const submission = await get(`SELECT s.id, s.tg_id, s.cell, u.current_cell, u.username
+    const submission = await get(`SELECT s.id, s.tg_id, s.cell, s.status, u.current_cell, u.username
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
-      WHERE s.id = ? AND s.status = 'pending' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL`, [submissionId]);
+      WHERE s.id = ? AND s.status IN ('pending', 'auto_approved') AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL`, [submissionId]);
     if (!submission) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
 
-    await run("UPDATE submissions SET status = 'approved', admin_comment = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [submissionId]);
-    await run('UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [submission.tg_id]);
-
-    const issuedTickets = [await issueTicket(submission.tg_id, 'standard')];
-    const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
-    if (Number(userAfterApproval.current_cell) >= 100) {
-      issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
-      issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
+    const wasAutoApproved = submission.status === 'auto_approved';
+    await run("UPDATE submissions SET status = 'approved', admin_comment = '', resubmission_required = 0, resubmission_notice_shown = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [submissionId]);
+    if (wasAutoApproved) {
+      const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
+      return res.json({ ok: true, issuedTickets: [], is_finalist: Number(userAfterApproval.current_cell) >= 100 });
     }
-    await addNewsEvent(`⚡️ Модератор одобрил работу ${formatUserHandle(userAfterApproval.username, userAfterApproval.tg_id)} на ${Number(submission.cell || 0)} клетке! Выдана Красочка №${issuedTickets[0].ticket_number}`, {
-      eventType: 'admin_approve_submission',
-      tgId: userAfterApproval.tg_id,
-      ticketNumber: issuedTickets[0].ticket_number
-    });
-    await addApprovalNewsEvents(userAfterApproval, issuedTickets);
-
+    const { issuedTickets, userAfterApproval } = await approveSubmissionSideEffects(submission, 'admin');
     res.json({ ok: true, issuedTickets, is_finalist: Number(userAfterApproval.current_cell) >= 100 });
   } catch (error) {
     next(error);
@@ -1635,8 +1771,8 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
     if (!comment) throw Object.assign(new Error('Добавьте комментарий для отклонения'), { status: 400 });
 
     const result = await run(`UPDATE submissions
-      SET status = 'rejected', admin_comment = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status = 'pending' AND photo_before IS NOT NULL AND photo_after IS NOT NULL`, [comment, submissionId]);
+      SET status = 'rejected', admin_comment = ?, resubmission_required = CASE WHEN status = 'auto_approved' THEN 1 ELSE 0 END, resubmission_notice_shown = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status IN ('pending', 'auto_approved') AND photo_before IS NOT NULL AND photo_after IS NOT NULL`, [comment, submissionId]);
     if (result.changes === 0) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -1865,7 +2001,10 @@ app.use((error, _req, res, _next) => {
 });
 
 initDb()
-  .then(() => app.listen(PORT, () => console.log(`Coloring Battle server started on port ${PORT}`)))
+  .then(() => {
+    startAutoApprovalJob();
+    app.listen(PORT, () => console.log(`Coloring Battle server started on port ${PORT}`));
+  })
   .catch((error) => {
     console.error('Database initialization failed:', error);
     process.exit(1);
