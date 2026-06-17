@@ -227,7 +227,12 @@ async function ensureUserGameCounterColumns() {
   const names = new Set(columns.map((column) => column.name));
   if (!names.has('penalty_rerolls')) await run('ALTER TABLE users ADD COLUMN penalty_rerolls INTEGER DEFAULT 0');
   if (!names.has('total_dice_rolls')) await run('ALTER TABLE users ADD COLUMN total_dice_rolls INTEGER DEFAULT 0');
+  if (!names.has('total_traps')) await run('ALTER TABLE users ADD COLUMN total_traps INTEGER DEFAULT 0');
+  if (!names.has('total_buffs')) await run('ALTER TABLE users ADD COLUMN total_buffs INTEGER DEFAULT 0');
+  if (!names.has('finished_at')) await run('ALTER TABLE users ADD COLUMN finished_at TEXT DEFAULT NULL');
+  if (!names.has('finish_modal_shown')) await run('ALTER TABLE users ADD COLUMN finish_modal_shown INTEGER DEFAULT 0');
 }
+
 
 async function ensureUserRoleColumn() {
   const columns = await all('PRAGMA table_info(users)');
@@ -617,6 +622,12 @@ function assertPlayableUser(user) {
   }
 }
 
+function assertGameNotFinished(user) {
+  if (user?.finished_at) {
+    throw Object.assign(new Error('Игра завершена, ожидай розыгрыша'), { status: 400 });
+  }
+}
+
 async function requireAdmin(tgId) {
   const normalized = normalizeTgId(tgId);
   if (!ADMIN_TG_IDS.has(normalized)) {
@@ -677,7 +688,7 @@ async function addApprovalNewsEvents(user, issuedTickets = []) {
   const milestones = [
     [50, `🎉 ${handle} на 50-й клеточке! Поздравляем с экватором!`],
     [70, `🔥 ${handle} дошел до 70-й клетки! Финиш близко!`],
-    [100, `🏆 УРА! ${handle} дошел до ФИНАЛА (100 клетка) и получает 2 бонусные Красочки!`]
+    [100, `🏆 УРА! ${handle} дошел до ФИНАЛА (100 клетка) и получает 3 бонусные Красочки!`]
   ];
 
   for (const [cell, message] of milestones) {
@@ -691,6 +702,26 @@ async function addApprovalNewsEvents(user, issuedTickets = []) {
       ticketNumber: standardTicket?.ticket_number || null
     });
   }
+}
+
+
+async function getFinishSummary(tgId) {
+  const [user, taskStats, ticketStats] = await Promise.all([
+    get('SELECT tg_id, username, current_cell, total_dice_rolls, total_traps, total_buffs, finished_at, finish_modal_shown FROM users WHERE tg_id = ?', [tgId]),
+    get("SELECT COUNT(*) AS completed_tasks FROM submissions WHERE tg_id = ? AND status IN ('approved', 'auto_approved')", [tgId]),
+    get('SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?', [tgId])
+  ]);
+  if (!user || !user.finished_at) return null;
+  return {
+    finished: true,
+    finished_at: user.finished_at,
+    modal_shown: Number(user.finish_modal_shown || 0) === 1,
+    total_dice_rolls: Number(user.total_dice_rolls || 0),
+    completed_tasks: Number(taskStats?.completed_tasks || 0),
+    total_traps: Number(user.total_traps || 0),
+    total_buffs: Number(user.total_buffs || 0),
+    paints: Number(ticketStats?.paints || 0)
+  };
 }
 
 async function getActiveSubmission(tgId) {
@@ -773,10 +804,13 @@ async function issueTicket(tgId, type = 'standard', submissionId = null) {
 
 
 async function approveSubmissionSideEffects(submission, source = 'admin') {
-  await run("UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?", [submission.tg_id]);
-  const issuedTickets = [await issueTicket(submission.tg_id, 'standard', submission.id)];
+  const userBeforeApproval = await get('SELECT finished_at FROM users WHERE tg_id = ?', [submission.tg_id]);
   const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
-  if (Number(userAfterApproval.current_cell) >= 100) {
+  const finishedNow = Number(userAfterApproval.current_cell) >= 100 && !userBeforeApproval?.finished_at;
+  await run("UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL, finished_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE finished_at END, finish_modal_shown = CASE WHEN ? = 1 THEN 0 ELSE finish_modal_shown END WHERE tg_id = ?", [finishedNow ? 1 : 0, finishedNow ? 1 : 0, submission.tg_id]);
+  const issuedTickets = [await issueTicket(submission.tg_id, 'standard', submission.id)];
+  if (finishedNow) {
+    issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
     issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
     issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
   }
@@ -787,7 +821,7 @@ async function approveSubmissionSideEffects(submission, source = 'admin') {
     ticketNumber: issuedTickets[0].ticket_number
   });
   await addApprovalNewsEvents(userAfterApproval, issuedTickets);
-  return { issuedTickets, userAfterApproval };
+  return { issuedTickets, userAfterApproval, finishedNow, finishSummary: finishedNow ? await getFinishSummary(submission.tg_id) : null };
 }
 
 let autoApprovalRunning = false;
@@ -1007,7 +1041,8 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const pendingLucky = Number(user.is_approved) === 1 && user.pending_lucky_cell !== null
       ? { cell: Number(user.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
       : null;
-    res.json({ user: { ...user, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1, penalty_rerolls: Number(user.penalty_rerolls || 0), total_dice_rolls: Number(user.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator' });
+    const finishSummary = await getFinishSummary(tgId);
+    res.json({ user: { ...user, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1, penalty_rerolls: Number(user.penalty_rerolls || 0), total_dice_rolls: Number(user.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator', finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -1098,7 +1133,7 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
     const viewer = viewerTgId ? await get('SELECT role FROM users WHERE tg_id = ?', [viewerTgId]) : null;
     const isStaffViewer = viewer?.role === 'admin' || viewer?.role === 'moderator' || ADMIN_TG_IDS.has(String(viewerTgId));
     const isOwnProfile = viewerTgId && viewerTgId === tgId;
-    const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen
+    const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen, finished_at
       FROM users WHERE tg_id = ? AND is_approved = 1`, [tgId]);
     if (!user) throw Object.assign(new Error('Профиль не найден'), { status: 404 });
     const works = await all(`SELECT s.id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.admin_comment, s.resubmission_required, s.updated_at, t.text_task
@@ -1132,7 +1167,7 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
       resubmission_required: isOwnProfile ? Number(work.resubmission_required || 0) : 0
     }));
     const counts = await get(`SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?`, [tgId]);
-    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску', tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
+    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: user.finished_at ? 'Игра завершена, ожидай розыгрыша' : (Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску'), tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
   } catch (error) {
     next(error);
   }
@@ -1217,6 +1252,20 @@ app.get('/api/raffle/status', async (_req, res, next) => {
   }
 });
 
+
+app.post('/api/finish/ack', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    if (!user.finished_at) throw Object.assign(new Error('Финиш еще не достигнут'), { status: 400 });
+    await run('UPDATE users SET finish_modal_shown = 1 WHERE tg_id = ?', [tgId]);
+    res.json({ ok: true, finish_summary: await getFinishSummary(tgId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/raffle/scratch-ticket', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
@@ -1292,7 +1341,7 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   const cellType = getCellType(landedCell);
 
   if (cellType === 'lucky') {
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
     return { ok: true, dice, current_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
   }
 
@@ -1302,10 +1351,11 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   if (cellType === 'trap') {
     if (Number(user.trap_immunity) === 1) {
       trapImmunityUsed = true;
-      await run('UPDATE users SET trap_immunity = 0 WHERE tg_id = ?', [tgId]);
+      await run('UPDATE users SET trap_immunity = 0, total_traps = COALESCE(total_traps, 0) + 1 WHERE tg_id = ?', [tgId]);
     } else {
       trapDice = rollD6();
       currentCell = Math.max(0, landedCell - trapDice);
+      await run('UPDATE users SET total_traps = COALESCE(total_traps, 0) + 1 WHERE tg_id = ?', [tgId]);
     }
   }
 
@@ -1319,6 +1369,7 @@ app.post('/api/roll', async (req, res, next) => {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
+    assertGameNotFinished(user);
     if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Кубик заморожен до проверки задания'), { status: 400 });
     if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
@@ -1419,6 +1470,7 @@ app.post('/api/tarot', async (req, res, next) => {
     const selectedIndex = Number(req.body.selected_index);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
+    assertGameNotFinished(user);
     if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex > 2) throw Object.assign(new Error('Выберите одну из трех карт'), { status: 400 });
     if (Number(user.has_used_tarot) === 1) throw Object.assign(new Error('Карта удачи уже использована в этой игре'), { status: 400 });
     if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
@@ -1432,12 +1484,13 @@ app.post('/api/tarot', async (req, res, next) => {
     if (selectedCard.id === 'double_roll') {
       const dice_rolls = [rollD6(), rollD6()];
       const dice = dice_rolls[0] + dice_rolls[1];
+      await run('UPDATE users SET total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [tgId]);
       const freshUser = await get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
       res.json(await applyMoveAndCreateTask(tgId, freshUser, dice, { ...tarotExtra, dice_rolls }));
       return;
     }
     if (selectedCard.id === 'trap_immunity') {
-      await run('UPDATE users SET trap_immunity = 1 WHERE tg_id = ?', [tgId]);
+      await run('UPDATE users SET trap_immunity = 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [tgId]);
       res.json({ ok: true, ...tarotExtra, trap_immunity: true });
       return;
     }
@@ -1453,6 +1506,7 @@ app.post('/api/reroll-task', async (req, res, next) => {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
+    assertGameNotFinished(user);
     const active = await getActiveSubmission(tgId);
     if (!active || active.status !== 'pending' || active.photo_before || active.photo_after) {
       throw Object.assign(new Error('Сменить можно только новое задание до загрузки фото'), { status: 400 });
@@ -1479,6 +1533,7 @@ app.post('/api/lucky-choice', async (req, res, next) => {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
+    assertGameNotFinished(user);
     const choice = String(req.body.choice || '').trim();
     if (!LUCKY_TASK_OPTIONS.includes(choice)) throw Object.assign(new Error('Выберите один из бонусных вариантов'), { status: 400 });
     const luckyCell = Number(user.pending_lucky_cell);
@@ -1505,6 +1560,7 @@ app.post('/api/submit', upload.fields([
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
+    assertGameNotFinished(user);
 
     const photoBefore = req.files?.photo_before?.[0];
     const photoAfter = req.files?.photo_after?.[0] || req.files?.work_image?.[0];
@@ -1586,6 +1642,7 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
     const tgId = normalizeTgId(req.params.tgId);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
+    const finishSummary = await getFinishSummary(tgId);
     const submission = await get(`SELECT s.*, t.text_task
       FROM submissions s
       JOIN tasks t ON t.id = s.task_id
@@ -1593,7 +1650,7 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
       ORDER BY s.id DESC
       LIMIT 1`, [tgId]);
     const tickets = await getPlayerTickets(tgId);
-    res.json({ submission, dice_frozen: user.dice_frozen, tickets, is_finalist: Number(user.current_cell) >= 100 });
+    res.json({ submission, dice_frozen: user.dice_frozen, tickets, is_finalist: Number(user.current_cell) >= 100, finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -1828,7 +1885,7 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
       return res.json({ ok: true, issuedTickets: [], is_finalist: Number(userAfterApproval.current_cell) >= 100 });
     }
     const { issuedTickets, userAfterApproval } = await approveSubmissionSideEffects(submission, 'admin');
-    res.json({ ok: true, issuedTickets, is_finalist: Number(userAfterApproval.current_cell) >= 100 });
+    res.json({ ok: true, issuedTickets, is_finalist: Number(userAfterApproval.current_cell) >= 100, finish_summary: await getFinishSummary(submission.tg_id) });
   } catch (error) {
     next(error);
   }
