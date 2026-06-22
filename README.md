@@ -66,7 +66,7 @@ npm start
 Для теста вне Telegram можно открыть страницу с query-параметрами:
 
 - Игрок: `http://localhost:8080/?tg_id=200&username=player`
-- Админ: `http://localhost:8080/?tg_id=341995937&username=admin`
+- Админ: `http://localhost:8080/?tg_id=000&username=admin`
 
 ## API
 
