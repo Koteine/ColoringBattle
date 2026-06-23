@@ -568,18 +568,36 @@ async function seedTasks() {
 77. «Зеркальный номер»: Найди в любой из своих книг страницу с «зеркальным» номером (11, 22, 33, 44, 55, 66, 77, 88, 99). Какое бы задание там ни было — это твоя цель на этот этап. (Кодовое слово: Зеркало)
 78. «Праздник к нам приходит»: Найди страницу, где персонажи что-то празднуют, танцуют, дарят подарки или где в кадре есть конфетти/салют. Раскрась этот момент максимально шумно и сочно! (Кодовое слово: Праздник)
 79. «Этот парень — настоящий бродяга с верным другом-абу, который влюбился в принцессу и притворился принцем с помощью одного синего весельчака. Но его главная фишка — он умеет летать на ковре без всякого пилота». Назови героя, найди и раскрась его! (Ответ и кодовое слово — задача на этап)
-80. «Ее мачеха была настолько одержима своей красотой, что приказала охотнику отнести сердце девушки в шкатулке. Но беглянка нашла приют в маленьком домике посреди леса, где жили семеро шахтеров». (Ответ и кодовое слово — задача на этап)';
+80. «Ее мачеха была настолько одержима своей красотой, что приказала охотнику отнести сердце девушки в шкатулке. Но беглянка нашла приют в маленьком домике посреди леса, где жили семеро шахтеров». (Ответ и кодовое слово — задача на этап)`;
 
-  const tasks = rawTasks
-    .split('\n')
-    .map((task) => task.trim())
-    .filter((task) => task.length > 0);
+  const tasks = parseSeedTasks(rawTasks);
 
   await run('DELETE FROM tasks;');
 
   for (const task of tasks) {
     await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [task]);
   }
+}
+
+function parseSeedTasks(rawTasks) {
+  const tasks = rawTasks
+    .replace(/\r\n?/g, '\n')
+    .split(/\n(?=(?:\[[^\]]+\]\s*[^:]+:\s*)?\d{1,2}\.\s)/g)
+    .map((task) => task.replace(/^\[[^\]]+\]\s*[^:]+:\s*/, '').trim())
+    .filter((task) => task.length > 0);
+
+  if (tasks.length !== 80) {
+    throw new Error(`Ожидалось 80 заданий для посева, получено ${tasks.length}`);
+  }
+
+  tasks.forEach((task, index) => {
+    const expectedNumber = index + 1;
+    if (!task.startsWith(`${expectedNumber}. `)) {
+      throw new Error(`Некорректная нумерация задания #${expectedNumber}: ${task.slice(0, 40)}`);
+    }
+  });
+
+  return tasks;
 }
 
 function normalizeTgId(value) {
@@ -1353,6 +1371,9 @@ app.get('/api/news', async (req, res, next) => {
 });
 
 async function createPendingSubmissionForCell(tgId, cell) {
+  const active = await getActiveSubmission(tgId);
+  if (active) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
+
   const task = await pickUnusedTask(tgId);
   if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
   const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, cell, task.id, 'pending']);
@@ -1561,6 +1582,9 @@ app.post('/api/lucky-choice', async (req, res, next) => {
     if (!LUCKY_TASK_OPTIONS.includes(choice)) throw Object.assign(new Error('Выберите один из бонусных вариантов'), { status: 400 });
     const luckyCell = Number(user.pending_lucky_cell);
     if (!Number.isInteger(luckyCell) || getCellType(luckyCell) !== 'lucky') throw Object.assign(new Error('Бонусная клетка не ожидает выбора'), { status: 400 });
+
+    const active = await getActiveSubmission(tgId);
+    if (active) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
 
     const result = await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [choice]);
     const task = result.id ? await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]) : await get('SELECT id, text_task FROM tasks WHERE text_task = ?', [choice]);
