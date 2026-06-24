@@ -24,6 +24,9 @@ const ADMIN_TG_IDS = new Set([
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+if (!fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
+  fs.copyFileSync(LEGACY_DB_PATH, DB_PATH);
+}
 
 const app = express();
 const db = new sqlite3.Database(DB_PATH);
@@ -142,14 +145,15 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_reaction_logs_limit ON reaction_logs(from_tg_id, to_tg_id, reacted_at)');
 
   await run('DELETE FROM users WHERE tg_id = 391995937');
+  await restoreFrozenDiceFromActiveSubmissions();
 
   await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
     VALUES (?, 'Owner', 0, 1, 0, 'admin')
     ON CONFLICT(tg_id) DO UPDATE SET
       username = CASE WHEN users.username = '' THEN 'Owner' ELSE users.username END,
-      current_cell = 0,
-      dice_frozen = 0,
-      pending_lucky_cell = NULL,
+      current_cell = users.current_cell,
+      dice_frozen = users.dice_frozen,
+      pending_lucky_cell = users.pending_lucky_cell,
       is_approved = 1,
       role = 'admin'`, [OWNER_TG_ID]);
 
@@ -778,6 +782,35 @@ async function getActiveSubmission(tgId) {
     LIMIT 1`, [tgId]);
 }
 
+
+async function restoreFrozenDiceFromActiveSubmissions() {
+  await run(`UPDATE users
+    SET dice_frozen = 1
+    WHERE tg_id IN (
+      SELECT DISTINCT tg_id
+      FROM submissions
+      WHERE status IN ('pending', 'rejected') AND COALESCE(resubmission_required, 0) = 0
+    )`);
+}
+
+function getSubmissionProgressStatus(submission) {
+  if (!submission) return 'none';
+  if (submission.status === 'rejected') return 'rejected';
+  if (submission.status === 'pending' && !submission.photo_before) return 'in_progress_before_required';
+  if (submission.status === 'pending' && !submission.photo_after) return 'in_progress_after_required';
+  if (submission.status === 'pending') return 'waiting_review';
+  return submission.status;
+}
+
+async function getDiceFrozenState(tgId, user = null) {
+  const activeSubmission = await getActiveSubmission(tgId);
+  return {
+    diceFrozen: activeSubmission ? 1 : Number(user?.dice_frozen || 0),
+    activeSubmission,
+    progressStatus: getSubmissionProgressStatus(activeSubmission)
+  };
+}
+
 async function getPlayerTickets(tgId) {
   return all(`WITH numbered_tickets AS (
       SELECT t.ticket_number, t.type, t.status, t.submission_id AS ticket_submission_id, t.created_at, r.place_number,
@@ -1126,12 +1159,13 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     }
 
     const activeSubmission = Number(user.is_approved) === 1 ? await getActiveSubmission(tgId) : null;
+    const effectiveDiceFrozen = activeSubmission ? 1 : Number(user.dice_frozen || 0);
     const tickets = Number(user.is_approved) === 1 && !isPrivilegedRole(user) ? await getPlayerTickets(tgId) : [];
     const pendingLucky = Number(user.is_approved) === 1 && user.pending_lucky_cell !== null
       ? { cell: Number(user.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
       : null;
     const finishSummary = await getFinishSummary(tgId);
-    res.json({ user: { ...user, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1, penalty_rerolls: Number(user.penalty_rerolls || 0), total_dice_rolls: Number(user.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator', finish_summary: finishSummary });
+    res.json({ user: { ...user, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1, penalty_rerolls: Number(user.penalty_rerolls || 0), total_dice_rolls: Number(user.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator', finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -1463,7 +1497,8 @@ app.post('/api/roll', async (req, res, next) => {
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
     assertGameNotFinished(user);
-    if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Кубик заморожен до проверки задания'), { status: 400 });
+    const { activeSubmission } = await getDiceFrozenState(tgId, user);
+    if (Number(user.dice_frozen) === 1 || activeSubmission) throw Object.assign(new Error('Кубик заморожен до выполнения и проверки текущего задания'), { status: 400 });
     if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
     const rawDice = rollD6();
@@ -1566,7 +1601,7 @@ app.post('/api/tarot', async (req, res, next) => {
     assertGameNotFinished(user);
     if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex > 2) throw Object.assign(new Error('Выберите одну из трех карт'), { status: 400 });
     if (Number(user.has_used_tarot) === 1) throw Object.assign(new Error('Карта удачи уже использована в этой игре'), { status: 400 });
-    if (Number(user.dice_frozen) === 1) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
+    if (Number(user.dice_frozen) === 1 || await getActiveSubmission(tgId)) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
     if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
     const deck = shuffleTarotCards();
@@ -1746,7 +1781,8 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
       ORDER BY s.id DESC
       LIMIT 1`, [tgId]);
     const tickets = await getPlayerTickets(tgId);
-    res.json({ submission, dice_frozen: user.dice_frozen, tickets, is_finalist: Number(user.current_cell) >= 100, finish_summary: finishSummary });
+    const activeSubmission = submission && ['pending', 'rejected'].includes(submission.status) && Number(submission.resubmission_required || 0) === 0 ? submission : null;
+    res.json({ submission, dice_frozen: activeSubmission ? 1 : user.dice_frozen, progress_status: getSubmissionProgressStatus(activeSubmission), tickets, is_finalist: Number(user.current_cell) >= 100, finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -1846,6 +1882,8 @@ app.post('/api/admin/reset-dice', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
+    const active = await getActiveSubmission(tgId);
+    if (active) throw Object.assign(new Error('Нельзя разморозить кубик: у игрока есть незавершенное или непроверенное задание'), { status: 400 });
     const result = await run('UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
     res.json({ ok: true });
