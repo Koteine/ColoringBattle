@@ -220,6 +220,8 @@ async function ensureUserDuelColumns() {
   const names = new Set(columns.map((column) => column.name));
   if (!names.has('can_challenge')) await run('ALTER TABLE users ADD COLUMN can_challenge INTEGER DEFAULT 1');
   if (!names.has('can_accept')) await run('ALTER TABLE users ADD COLUMN can_accept INTEGER DEFAULT 1');
+  if (!names.has('duel_challenges_used')) await run('ALTER TABLE users ADD COLUMN duel_challenges_used INTEGER DEFAULT 0');
+  if (!names.has('duel_accepts_used')) await run('ALTER TABLE users ADD COLUMN duel_accepts_used INTEGER DEFAULT 0');
 }
 
 async function ensureUserGameCounterColumns() {
@@ -810,7 +812,7 @@ async function getPlayerTickets(tgId) {
 let TRAP_CELLS = new Set([13, 26, 39, 52, 65, 78, 91]);
 let LUCKY_CELLS = new Set([7, 21, 35, 49, 63, 77, 88]);
 const LUCKY_TASK_OPTIONS = [
-  'Раскрасить что угодно вне заданий',
+  'Раскрасить что угодно',
   'Взять картинку формата менее А4'
 ];
 
@@ -965,7 +967,51 @@ function buildRaffleWindow(config) {
   };
 }
 
+async function finalizeExpiredRaffleIfNeeded() {
+  const config = await getRaffleConfig();
+  const windowState = buildRaffleWindow(config);
+  if (!windowState.is_finished) return;
+
+  await run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const freshConfig = await getRaffleConfig();
+    const freshWindow = buildRaffleWindow(freshConfig);
+    if (!freshWindow.is_finished) {
+      await run('COMMIT');
+      return;
+    }
+    const totalPrizes = Number(freshConfig?.total_prizes || 0);
+    const awarded = await get('SELECT COUNT(*) AS count FROM raffle_results');
+    let placeNumber = Number(awarded?.count || 0);
+    if (totalPrizes <= 0 || placeNumber >= totalPrizes) {
+      await run('COMMIT');
+      return;
+    }
+
+    const activeTickets = await all(`SELECT t.ticket_number, t.tg_id, t.type, u.username
+      FROM tickets t
+      JOIN users u ON u.tg_id = t.tg_id
+      WHERE t.status = 'active'
+      ORDER BY t.ticket_number ASC`);
+    const draw = buildUniqueWinnerDraw(activeTickets);
+    for (const ticket of draw.winners.slice(0, totalPrizes - placeNumber)) {
+      placeNumber += 1;
+      await run("UPDATE tickets SET status = 'winner' WHERE ticket_number = ? AND status = 'active'", [ticket.ticket_number]);
+      await run(`INSERT OR IGNORE INTO raffle_results (place_number, ticket_number, tg_id, username)
+        VALUES (?, ?, ?, ?)`, [placeNumber, ticket.ticket_number, ticket.tg_id, ticket.username || '']);
+    }
+    await run(`UPDATE raffle_config
+      SET remaining_prizes = MAX(total_prizes - ?, 0), updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1`, [placeNumber]);
+    await run('COMMIT');
+  } catch (error) {
+    await run('ROLLBACK').catch(() => {});
+    throw error;
+  }
+}
+
 async function getRaffleStatus() {
+  await finalizeExpiredRaffleIfNeeded();
   const [config, results, latestWinner, stats] = await Promise.all([
     getRaffleConfig(),
     all(`SELECT id, place_number, ticket_number, tg_id, username, drawn_at
@@ -1458,13 +1504,13 @@ app.post('/api/duels/challenge', async (req, res, next) => {
     const user = await requireApproved(tgId);
     const opponent = await requireApproved(opponentId);
     assertPlayableUser(user); assertPlayableUser(opponent);
-    if (Number(user.can_challenge) !== 1) throw Object.assign(new Error('Вызов уже использован в этой игре'), { status: 400 });
-    if (Number(opponent.can_accept) !== 1) throw Object.assign(new Error('Этот игрок уже принимал дуэль'), { status: 400 });
+    if (Number(user.duel_challenges_used || 0) >= 1 || Number(user.can_challenge) !== 1) throw Object.assign(new Error('Лимит вызовов исчерпан: за игру можно бросить вызов только 1 раз'), { status: 400 });
+    if (Number(opponent.duel_accepts_used || 0) >= 2) throw Object.assign(new Error('Этот игрок уже принял максимум 2 дуэли'), { status: 400 });
     const existing = await get(`SELECT id FROM puzzle_duels WHERE (challenger_tg_id = ? OR opponent_tg_id = ? OR challenger_tg_id = ? OR opponent_tg_id = ?) AND status IN ('pending', 'active') LIMIT 1`, [tgId, tgId, opponentId, opponentId]);
     if (existing) throw Object.assign(new Error('У одного из игроков уже есть активная дуэль'), { status: 400 });
     const result = await run(`INSERT INTO puzzle_duels (challenger_tg_id, opponent_tg_id, status) VALUES (?, ?, 'pending')`, [tgId, opponentId]);
-    await run('UPDATE users SET can_challenge = 0 WHERE tg_id = ?', [tgId]);
-    await run('UPDATE users SET can_accept = 0 WHERE tg_id = ?', [opponentId]);
+    await run('UPDATE users SET can_challenge = 0, duel_challenges_used = COALESCE(duel_challenges_used, 0) + 1 WHERE tg_id = ?', [tgId]);
+    await run('UPDATE users SET can_accept = CASE WHEN COALESCE(duel_accepts_used, 0) + 1 >= 2 THEN 0 ELSE 1 END, duel_accepts_used = COALESCE(duel_accepts_used, 0) + 1 WHERE tg_id = ?', [opponentId]);
     await addNewsEvent(`🧩 ${formatUserHandle(user.username, user.tg_id)} вызывает ${formatUserHandle(opponent.username, opponent.tg_id)} на дуэль в пятнашки!`, { eventType: 'puzzle_duel_challenge', tgId: opponentId });
     res.json({ ok: true, duel: await get('SELECT * FROM puzzle_duels WHERE id = ?', [result.id]) });
   } catch (error) { next(error); }
@@ -2075,7 +2121,7 @@ app.get('/api/admin/game-stats-export', async (req, res, next) => {
   try {
     await requireAdmin(req.query.admin_tg_id);
     const rows = await collectDetailedPlayerExportRows();
-    const headers = ['Telegram ID', 'Имя', 'Username', 'Дата регистрации', 'Количество выполненных заданий', 'Текущий баланс красочек', 'Текущий статус игрока', 'Количество отклоненных заявок', 'Последний вход', 'История работ JSON'];
+    const headers = ['Telegram ID', 'Имя', 'Username', 'Дата регистрации', 'Количество выполненных заданий', 'Текущий баланс красочек', 'Текущий статус игрока', 'Количество отклоненных заявок', 'Последний вход', 'Ссылки на фото работ', 'История работ JSON'];
     const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
     const lines = [headers.map(escapeCsv).join(';')];
     for (const row of rows) {
@@ -2089,6 +2135,7 @@ app.get('/api/admin/game-stats-export', async (req, res, next) => {
         row.player_status,
         row.rejected_submissions,
         row.last_login_at,
+        row.works.map((work) => [work.photo_before_url, work.photo_after_url].filter(Boolean).join(' | ')).filter(Boolean).join(' ; '),
         JSON.stringify(row.works)
       ].map(escapeCsv).join(';'));
     }
@@ -2119,7 +2166,7 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
       SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
         has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0,
         penalty_rerolls = 0, total_dice_rolls = 0,
-        reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1`);
+        reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1, duel_challenges_used = 0, duel_accepts_used = 0`);
     await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
   } catch (error) {
@@ -2154,6 +2201,8 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
         total_dice_rolls = 0,
         can_challenge = 1,
         can_accept = 1,
+        duel_challenges_used = 0,
+        duel_accepts_used = 0,
         is_approved = 1,
         role = 'admin'`, [OWNER_TG_ID]);
 
