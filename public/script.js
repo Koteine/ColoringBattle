@@ -584,7 +584,8 @@ function render() {
 
   els.username.textContent = user.username || `ID ${user.tg_id}`;
   els.currentCell.textContent = `${user.current_cell}/100`;
-  els.diceState.textContent = Number(user.dice_frozen) === 1 ? 'Ждёт проверку' : 'Готов';
+  const hasActiveSubmission = Boolean(activeSubmission || state.pendingLucky);
+  els.diceState.textContent = hasActiveSubmission || Number(user.dice_frozen) === 1 ? 'Заморожен' : 'Готов';
   drawProgress(user.current_cell);
   if (!roleBlocked) renderTask(activeSubmission);
   if (!activeSubmission && state.pendingLucky) {
@@ -603,7 +604,7 @@ function render() {
   els.rerollTaskBtn.title = penaltyLimitReached
     ? 'Твой лимит штрафных перебросов исчерпан (3 из 3). Пришло время брать материалы и рисовать выпавшее задание! 🎨✨'
     : `Использовано штрафных перебросов: ${usedPenaltyRerolls} из 3`;
-  const frozen = Number(user.dice_frozen) === 1;
+  const frozen = Number(user.dice_frozen) === 1 || hasActiveSubmission;
   const finished = Boolean(state.finish_summary?.finished) || Number(user.current_cell) >= 100;
   els.rollBtn.disabled = roleBlocked || frozen || finished || isRolling;
   els.rollBtn.classList.toggle('frozen', roleBlocked || frozen || finished);

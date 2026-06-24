@@ -48,7 +48,7 @@ run:
 
 Все динамические данные хранятся в `/data`:
 
-- База данных: `/data/game.db`.
+- База данных: `/data/database.json` (SQLite-файл в persistent volume; старая `/data/game.db` копируется автоматически при первом запуске новой версии).
 - Загруженные изображения: `/data/uploads`.
 - Express раздает изображения по URL `/uploads/<file>`.
 
@@ -72,7 +72,7 @@ npm start
 
 - `GET /api/me/:tg_id?username=...` — регистрация/получение состояния игрока.
 - `POST /api/roll` — бросок кубика и выдача задания.
-- `POST /api/submit` — загрузка фото работы через `multipart/form-data` поле `work_image`.
+- `POST /api/submit` — поэтапная обязательная загрузка двух фото работы через `multipart/form-data`: `photo_before`, затем `photo_after` (`work_image` оставлен как legacy-алиас для Фото ПОСЛЕ).
 - `GET /api/check-status/:tg_id` — polling статуса последней сдачи.
 - `GET /api/admin/pending-users?admin_tg_id=...` — заявки на вход.
 - `POST /api/admin/approve-user` — одобрение игрока.

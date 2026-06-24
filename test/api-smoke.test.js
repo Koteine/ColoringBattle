@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 
-const DATA_DB = '/data/game.db';
+const DATA_DB = '/data/database.json';
 const DATA_UPLOADS = '/data/uploads';
 
 async function wait(ms) {
