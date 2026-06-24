@@ -8,3 +8,8 @@ run:
   command: npm start
   containerPort: 8080
   persistenceMount: /data
+
+persistence:
+  enabled: true
+  mountPath: /data
+  path: /data

@@ -10,10 +10,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 8080;
-const DATA_DIR = '/data';
+const DATA_DIR = process.env.DATA_DIR || '/data';
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-const DB_PATH = path.join(DATA_DIR, 'database.json');
-const LEGACY_DB_PATH = path.join(DATA_DIR, 'game.db');
+const DB_PATH = path.join(DATA_DIR, 'game.db');
 const OWNER_TG_ID = '341995937';
 const ADMIN_TG_IDS = new Set([
   OWNER_TG_ID,
@@ -23,6 +22,7 @@ const ADMIN_TG_IDS = new Set([
     .filter(Boolean)
 ]);
 
+fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 if (!fs.existsSync(DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
   fs.copyFileSync(LEGACY_DB_PATH, DB_PATH);
@@ -1290,7 +1290,8 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
       resubmission_required: isOwnProfile ? Number(work.resubmission_required || 0) : 0
     }));
     const counts = await get(`SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?`, [tgId]);
-    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: user.finished_at ? 'Игра завершена, ожидай розыгрыша' : (Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску'), tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
+    const activeTask = isStaffViewer ? await getActiveSubmission(tgId) : null;
+    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: user.finished_at ? 'Игра завершена, ожидай розыгрыша' : (Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску'), active_task: activeTask, tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
   } catch (error) {
     next(error);
   }
@@ -1977,6 +1978,30 @@ app.post('/api/admin/tasks', async (req, res, next) => {
     const result = await run('INSERT INTO tasks (text_task) VALUES (?)', [textTask]);
     const task = await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]);
     res.status(201).json({ ok: true, task });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+app.post('/api/admin/assign-task', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    const taskId = Number(req.body.task_id);
+    if (!Number.isInteger(taskId) || taskId < 1) throw Object.assign(new Error('Некорректный ID задания'), { status: 400 });
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    assertGameNotFinished(user);
+    const task = await get('SELECT id, text_task FROM tasks WHERE id = ?', [taskId]);
+    if (!task) throw Object.assign(new Error('Задание не найдено'), { status: 404 });
+    const active = await getActiveSubmission(tgId);
+    if (active) throw Object.assign(new Error('У игрока уже есть активное задание'), { status: 400 });
+    const currentCell = Math.max(0, Math.min(100, Number(user.current_cell || 0)));
+    const result = await run("INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, 'pending')", [tgId, currentCell, taskId]);
+    await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+    await addNewsEvent(`🛠 Администратор вручную назначил задание игроку ${formatUserHandle(user.username, user.tg_id)}. Кубик заморожен до проверки.`, { eventType: 'manual_task', tgId });
+    res.json({ ok: true, submission: await get('SELECT * FROM submissions WHERE id = ?', [result.id]), task });
   } catch (error) {
     next(error);
   }
