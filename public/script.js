@@ -951,7 +951,14 @@ async function openDuelModal() {
   els.duelModal.classList.remove('hidden');
   const data = await api(`/api/duels/players?tg_id=${encodeURIComponent(tgId)}`);
   if (data.active_duel) {
-    startPuzzle(data.active_duel);
+    const duel = data.active_duel;
+    const ownField = duel.challenger_tg_id === String(tgId) ? 'challenger_time' : 'opponent_time';
+    if (duel[ownField]) {
+      activeDuel = duel;
+      els.duelContent.innerHTML = '<div class="empty-state">Ваш результат уже отправлен. Ждём соперника — при перезаходе пятнашки не запускаются заново.</div>';
+      return;
+    }
+    startPuzzle(duel);
     return;
   }
   const players = data.players || [];
@@ -980,7 +987,14 @@ async function challengePlayer(opponentId) {
 async function submitPuzzleResult() {
   const seconds = Math.max(1, Math.ceil((Date.now() - puzzleStartedAt) / 1000));
   const result = await api('/api/duels/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, duel_id: activeDuel.id, seconds }) });
-  showToast(result.ticket ? 'Дуэль завершена! Победителю начислена Красочка.' : 'Результат отправлен, ждём соперника.');
+  if (puzzleTimer) window.clearInterval(puzzleTimer);
+  puzzleTimer = null;
+  if (result.ticket) {
+    const won = result.duel?.winner_tg_id === String(tgId);
+    window.alert(won ? 'Вы выиграли и получаете красочку! 🎉' : 'Вы всё равно умничка, повезёт в другой раз! ❤️');
+  } else {
+    showToast('Результат отправлен, ждём соперника.');
+  }
   activeDuel = null;
   await closeDuelModal();
   await loadState();
@@ -1337,6 +1351,10 @@ async function loadRaffle(force = true, animateNew = false) {
   const now = Date.now();
   if (!force && now - raffleLoadedAt < 2500) return;
   const data = await api('/api/raffle/status');
+  if (force && data.is_finished && tgId) {
+    const refreshedState = await api(`/api/me/${encodeURIComponent(tgId)}?username=${encodeURIComponent(tgUsername)}`).catch(() => null);
+    if (refreshedState) state = refreshedState;
+  }
   raffleLoadedAt = now;
   if (!force) {
     renderWinners(data.results || []);
@@ -1361,6 +1379,9 @@ async function loadRaffle(force = true, animateNew = false) {
     els.winnerReveal.textContent = 'Красочки еще не настроены администратором.';
   } else if (data.is_before_start) {
     els.winnerReveal.textContent = 'Подготовьте Красочки — скоро можно будет стирать!';
+  } else if (data.is_finished) {
+    const winnerTicket = (state?.tickets || []).find((ticket) => ticket.status === 'winner');
+    els.winnerReveal.textContent = winnerTicket ? 'Розыгрыш завершен! Поздравляем, вы выиграли! 🎉' : 'Розыгрыш завершен! В этот раз удача улыбнулась другим, но у тебя всё получится в следующий раз! ❤️';
   } else if (data.is_sold_out) {
     els.winnerReveal.textContent = 'Лотерея завершена, все призы разыграны.';
   } else if (data.is_active) {
