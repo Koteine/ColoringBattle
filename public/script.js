@@ -118,6 +118,7 @@ const paintGradients = [
 
 let state = null;
 let activeTab = 'game';
+let adminTasks = [];
 let pollingTimer = null;
 let lastSubmissionStatus = '';
 let isRolling = false;
@@ -823,11 +824,25 @@ async function openProfile(profileId) {
   const isAdminView = Boolean(profile.is_admin_view);
   const ownProfile = String(profile.tg_id) === String(tgId);
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
+  const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div><h3>Назначить задание вручную</h3><form class="manual-task-form" data-manual-task-form><select name="task_id" required>${(adminTasks || []).map((task) => `<option value="${Number(task.id)}">#${Number(task.id)} — ${escapeHtml(task.text_task)}</option>`).join('')}</select><div class="actions"><button type="submit"${profile.active_task ? ' disabled' : ''}>Назначить</button></div></form>` : '';
   const worksBlock = `<h3>Сданные работы</h3><div class="profile-works">${works.map((work, index) => {
     if (isAdminView) return `<button class="comparison-photo" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)} · задание #${Number(work.task_id || 0)}</strong>${work.photo_after ? `<img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа">` : ''}</button>`;
     return `<div class="item"><strong>Клетка ${Number(work.cell || 0)} · работа #${Number(work.id || 0)}</strong><p class="muted">Статус: ${escapeHtml(work.status || '')}</p>${ownProfile && Number(work.resubmission_required || 0) === 1 ? `<p class="notice">Ваша прошлая работа (№${Number(work.task_id || 0)}) отклонена. Комментарий: ${escapeHtml(work.admin_comment || '')}</p><button type="button" data-resubmit-id="${Number(work.id || 0)}">Загрузить заново</button>` : ''}</div>`;
   }).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div>`;
-  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${ticketsBlock}${worksBlock}`;
+  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${ticketsBlock}${worksBlock}`;
+
+  els.profileContent.querySelector('[data-manual-task-form]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const taskId = Number(new FormData(event.currentTarget).get('task_id'));
+    await api('/api/admin/assign-task', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ admin_tg_id: tgId, tg_id: profile.tg_id, task_id: taskId })
+    });
+    showToast('Задание назначено, кубик игрока заморожен');
+    await loadAdminPanel();
+    await openProfile(profile.tg_id);
+  });
   els.profileContent.querySelectorAll('[data-profile-ticket-index]').forEach((button) => {
     button.addEventListener('click', () => {
       const ticket = tickets[Number(button.dataset.profileTicketIndex)];
@@ -1426,6 +1441,7 @@ async function loadAdminPanel() {
     api(`/api/admin/raffle-config?${adminParam}`),
     api(`/api/admin/tasks?${adminParam}`)
   ]);
+  adminTasks = taskData.tasks || [];
   renderAllUsers(users.users);
   renderTicketRegistry(ticketData.tickets || []);
   renderAdminTasks(taskData.tasks || []);
