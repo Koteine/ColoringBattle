@@ -151,6 +151,8 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     assert.equal(checkApproved.tickets.length, 1);
 
     const paletteAfterApproval = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
+    assert.equal(Boolean(paletteAfterApproval.activeSubmission), false);
+    assert.equal(paletteAfterApproval.user.dice_frozen, 0);
     assert.equal(paletteAfterApproval.tickets.length, 1);
     assert.equal(paletteAfterApproval.tickets[0].submission_status, 'approved');
     assert.ok(paletteAfterApproval.tickets[0].source);
@@ -210,6 +212,20 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
       body: JSON.stringify({ tg_id: '200' })
     });
     await ensureRollCreatedSubmission(server.baseUrl, '200', secondRoll);
+
+    const stateAfterSecondRoll = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
+    assert.equal(stateAfterSecondRoll.user.dice_frozen, 1);
+    assert.equal(stateAfterSecondRoll.activeSubmission.status, 'pending');
+    assert.equal(stateAfterSecondRoll.activeSubmission.photo_before, null);
+    assert.equal(stateAfterSecondRoll.activeSubmission.photo_after, null);
+
+    const prematureSecondAfterForm = new FormData();
+    prematureSecondAfterForm.append('tg_id', '200');
+    prematureSecondAfterForm.append('photo_after', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'premature-after-2.png');
+    const prematureSecondAfterResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: prematureSecondAfterForm });
+    assert.equal(prematureSecondAfterResponse.ok, false);
+    const prematureSecondAfter = await prematureSecondAfterResponse.json();
+    assert.match(prematureSecondAfter.error, /Сначала загрузите фото ДО/);
 
     const secondBeforeForm = new FormData();
     secondBeforeForm.append('tg_id', '200');
