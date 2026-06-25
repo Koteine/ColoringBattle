@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import sqlite3 from 'sqlite3';
 
 const DATA_DB = '/data/game.db';
 const DATA_UPLOADS = '/data/uploads';
@@ -65,6 +66,17 @@ async function jsonRequest(baseUrl, path, options = {}) {
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
   return body;
+}
+
+async function dbRun(sql, params = []) {
+  const db = new sqlite3.Database(DATA_DB);
+  try {
+    await new Promise((resolve, reject) => {
+      db.run(sql, params, (error) => (error ? reject(error) : resolve()));
+    });
+  } finally {
+    await new Promise((resolve) => db.close(resolve));
+  }
 }
 
 test('approval, roll, image submit, polling status and admin approval flow', async () => {
@@ -144,6 +156,12 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     assert.ok(paletteAfterApproval.tickets[0].source);
     assert.equal(paletteAfterApproval.tickets[0].file_url, `/uploads/${paletteAfterApproval.tickets[0].source}`);
     assert.equal(paletteAfterApproval.tickets[0].image_url, paletteAfterApproval.tickets[0].file_url);
+
+    await dbRun(`INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status, created_at, updated_at)
+      VALUES ('200', 999, 1, 'Зависшее старое задание', 'pending', datetime('now', '-1 day'), datetime('now', '-1 day'))`);
+    const fixedStaleTask = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
+    assert.equal(fixedStaleTask.user.dice_frozen, 0);
+    assert.equal(fixedStaleTask.activeSubmission, null);
 
     const workId = paletteAfterApproval.tickets[0].submission_id;
     const ownerWorkDetails = await jsonRequest(server.baseUrl, `/api/work-details/${workId}?viewer_tg_id=200`);
@@ -267,11 +285,22 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     });
     assert.equal(moved.current_cell, 42);
 
+    const managedRoll = await jsonRequest(server.baseUrl, '/api/roll', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '201' })
+    });
+    await ensureRollCreatedSubmission(server.baseUrl, '201', managedRoll);
+
     const unfrozen = await jsonRequest(server.baseUrl, '/api/admin/reset-dice', {
       method: 'POST',
       body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '201' })
     });
     assert.equal(unfrozen.ok, true);
+    const rollAfterAdminReset = await jsonRequest(server.baseUrl, '/api/roll', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '201' })
+    });
+    assert.equal(rollAfterAdminReset.dice >= 1 && rollAfterAdminReset.dice <= 6, true);
 
     const moderator = await jsonRequest(server.baseUrl, '/api/admin/toggle-moderator', {
       method: 'POST',
