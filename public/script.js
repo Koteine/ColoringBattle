@@ -815,23 +815,11 @@ async function openProfile(profileId) {
   const ownProfile = String(profile.tg_id) === String(tgId);
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
   const adminToolsBlock = isAdminView ? `<div class="profile-admin-tools"><button class="ghost icon-button" type="button" data-player-log title="Лог действий">📜</button></div>` : '';
-  const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div><h3>Назначить задание вручную</h3><form class="manual-task-form" data-manual-task-form><select name="task_id" required>${(adminTasks || []).map((task) => `<option value="${Number(task.id)}">#${Number(task.id)} — ${escapeHtml(task.text_task)}</option>`).join('')}</select><div class="actions"><button type="submit"${profile.active_task ? ' disabled' : ''}>Назначить</button></div></form>` : '';
+  const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div>` : '';
   const worksBlock = `<h3>Сданные работы</h3><div class="work-cube-grid">${works.map((work, index) => `<button class="work-cube" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)}</strong><small>работа #${Number(work.id || 0)}</small></button>`).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div><div id="profileWorkDetails" class="profile-work-details"></div>`;
   const emergencyBlock = isAdminView ? `<div class="profile-emergency"><button class="danger" type="button" data-defibrillate>⚙️</button></div>` : '';
   els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2>${adminToolsBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
 
-  els.profileContent.querySelector('[data-manual-task-form]')?.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const taskId = Number(new FormData(event.currentTarget).get('task_id'));
-    await api('/api/admin/assign-task', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ admin_tg_id: tgId, tg_id: profile.tg_id, task_id: taskId })
-    });
-    showToast('Задание назначено, кубик игрока заморожен');
-    await loadAdminPanel();
-    await openProfile(profile.tg_id);
-  });
   els.profileContent.querySelectorAll('[data-profile-ticket-index]').forEach((button) => {
     button.addEventListener('click', () => {
       const ticket = tickets[Number(button.dataset.profileTicketIndex)];
@@ -868,11 +856,27 @@ function renderProfileWorkInline(work, isAdminView, ownProfile) {
   target.querySelector('[data-resubmit-id]')?.addEventListener('click', (event) => uploadResubmission(event.currentTarget.dataset.resubmitId).catch((error) => showToast(error.message)));
 }
 
-async function openPlayerLog(profileId) {
-  const logWindow = window.open('', `_blank`);
-  if (!logWindow) return showToast('Браузер заблокировал новое окно');
-  logWindow.document.write('<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Лог игрока</title><style>body{font-family:system-ui;margin:0;padding:20px;background:#fff7fb;color:#37213f}.close{position:fixed;right:16px;top:12px;border:0;border-radius:999px;padding:10px 14px;font-weight:900;background:#ffafcc}li{margin:10px 0;padding:10px;border:1px solid #ead7ef;border-radius:14px;background:#fff}.muted{color:#7b6b83}</style></head><body><button class="close" onclick="window.close()">×</button><main id="root">Загружаем лог...</main></body></html>');
-  const data = await api(`/api/admin/player-log/${encodeURIComponent(profileId)}?admin_tg_id=${encodeURIComponent(tgId)}`);
+function ensurePlayerLogModal() {
+  let modal = document.getElementById('playerLogModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'playerLogModal';
+  modal.className = 'profile-modal hidden';
+  modal.innerHTML = `
+    <div class="profile-dialog player-log-dialog">
+      <button class="profile-close" type="button" data-player-log-close>×</button>
+      <div id="playerLogContent"></div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal || event.target.closest('[data-player-log-close]')) {
+      modal.classList.add('hidden');
+    }
+  });
+  return modal;
+}
+
+function renderPlayerLogRows(data, profileId) {
   const rows = [];
   rows.push(`<li><strong>Текущий статус:</strong> клетка ${Number(data.user?.current_cell || 0)}, ${data.current_status?.active_submission ? `активное задание #${Number(data.current_status.active_submission.task_id || 0)}` : 'активного задания нет'}.</li>`);
   for (const work of data.completed_works || []) rows.push(`<li><strong>Сданная работа:</strong> клетка ${Number(work.cell || 0)}, задание #${Number(work.task_id || 0)}, статус ${escapeHtml(work.status)}<br><span class="muted">${escapeHtml(work.updated_at || '')} · ДО: ${escapeHtml(work.photo_before || '—')} · ПОСЛЕ: ${escapeHtml(work.photo_after || '—')}</span></li>`);
@@ -880,7 +884,21 @@ async function openPlayerLog(profileId) {
   for (const reaction of data.reactions_given || []) rows.push(`<li><strong>Реакция поставлена:</strong> ${escapeHtml(reaction.reaction_type)} игроку ID ${escapeHtml(reaction.to_tg_id)}<br><span class="muted">${escapeHtml(reaction.reacted_at || '')}</span></li>`);
   for (const reaction of data.reactions_received || []) rows.push(`<li><strong>Реакция получена:</strong> ${escapeHtml(reaction.reaction_type)} от ID ${escapeHtml(reaction.from_tg_id)}<br><span class="muted">${escapeHtml(reaction.reacted_at || '')}</span></li>`);
   for (const duel of data.duels || []) rows.push(`<li><strong>Пятнашки #${Number(duel.id)}:</strong> ${escapeHtml(duel.status)} · ${escapeHtml(duel.challenger_tg_id)} vs ${escapeHtml(duel.opponent_tg_id)}<br><span class="muted">${escapeHtml(duel.updated_at || duel.created_at || '')}</span></li>`);
-  logWindow.document.getElementById('root').innerHTML = `<h1>📜 Лог ${escapeHtml(data.user?.username || data.user?.tg_id || profileId)}</h1><ul>${rows.join('') || '<li>Записей пока нет.</li>'}</ul>`;
+  return `<h2>📜 Лог ${escapeHtml(data.user?.username || data.user?.tg_id || profileId)}</h2><ul class="player-log-list">${rows.join('') || '<li>Записей пока нет.</li>'}</ul>`;
+}
+
+async function openPlayerLog(profileId) {
+  const modal = ensurePlayerLogModal();
+  const content = modal.querySelector('#playerLogContent');
+  modal.classList.remove('hidden');
+  content.innerHTML = '<div class="empty-state">Загружаем лог...</div>';
+  try {
+    const data = await api(`/api/admin/player-log/${encodeURIComponent(profileId)}?admin_tg_id=${encodeURIComponent(tgId)}`);
+    content.innerHTML = renderPlayerLogRows(data, profileId);
+  } catch (error) {
+    content.innerHTML = `<h2>📜 Лог игрока</h2><div class="empty-state">Не удалось загрузить лог: ${escapeHtml(error.message || 'неизвестная ошибка')}</div>`;
+    showToast(error.message || 'Не удалось загрузить лог');
+  }
 }
 
 async function defibrillatePlayer(profileId) {
