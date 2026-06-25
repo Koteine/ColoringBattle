@@ -421,8 +421,9 @@ async function ensureAccumulatingTicketsTable() {
     ticket_number INTEGER PRIMARY KEY AUTOINCREMENT,
     tg_id TEXT NOT NULL,
     type TEXT DEFAULT 'standard' CHECK(type IN ('standard', 'bonus')),
-    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched')),
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched', 'revoked')),
     submission_id INTEGER DEFAULT NULL,
+    revoke_comment TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id),
     FOREIGN KEY (submission_id) REFERENCES submissions(id)
@@ -440,24 +441,29 @@ async function ensureAccumulatingTicketsTable() {
   const columnNames = new Set(columns.map((column) => column.name));
   const hasStatus = columnNames.has('status');
   const hasSubmissionId = columnNames.has('submission_id');
+  const hasRevokeComment = columnNames.has('revoke_comment');
 
-  if (hasProperPrimaryKey && !hasTgIdUniqueness && sql.includes("'scratched'")) {
-    if (!hasStatus) await run("ALTER TABLE tickets ADD COLUMN status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched'))");
+  if (hasProperPrimaryKey && !hasTgIdUniqueness && sql.includes("'scratched'") && sql.includes("'revoked'")) {
+    if (!hasStatus) await run("ALTER TABLE tickets ADD COLUMN status TEXT DEFAULT 'active' CHECK(status IN ('active', 'winner', 'scratched', 'revoked'))");
     if (!hasSubmissionId) await run('ALTER TABLE tickets ADD COLUMN submission_id INTEGER DEFAULT NULL REFERENCES submissions(id)');
+    if (!hasRevokeComment) await run("ALTER TABLE tickets ADD COLUMN revoke_comment TEXT DEFAULT ''");
     await run("UPDATE tickets SET status = 'active' WHERE status IS NULL OR status = ''");
+    await run("UPDATE tickets SET revoke_comment = '' WHERE revoke_comment IS NULL");
     return;
   }
 
   await run('ALTER TABLE tickets RENAME TO tickets_old');
   await run(desiredSql);
   const statusExpression = hasStatus
-    ? "CASE WHEN status IN ('active', 'winner', 'scratched') THEN status WHEN status = 'burnt' THEN 'scratched' ELSE 'active' END"
+    ? "CASE WHEN status IN ('active', 'winner', 'scratched', 'revoked') THEN status WHEN status = 'burnt' THEN 'scratched' ELSE 'active' END"
     : "'active'";
   const submissionExpression = hasSubmissionId ? 'submission_id' : 'NULL';
-  await run(`INSERT INTO tickets (ticket_number, tg_id, type, status, submission_id, created_at)
+  const revokeCommentExpression = hasRevokeComment ? 'COALESCE(revoke_comment, \'\')' : "''";
+  await run(`INSERT INTO tickets (ticket_number, tg_id, type, status, submission_id, revoke_comment, created_at)
     SELECT ticket_number, tg_id, COALESCE(type, 'standard'),
       ${statusExpression},
       ${submissionExpression},
+      ${revokeCommentExpression},
       COALESCE(created_at, CURRENT_TIMESTAMP)
     FROM tickets_old
     WHERE tg_id IS NOT NULL
@@ -970,9 +976,13 @@ function getSubmissionProgressStatus(submission) {
 async function reconcileDiceLock(tgId, user = null) {
   const currentUser = user || await get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
   if (!currentUser) return { user: null, activeSubmission: null };
+  const activeSubmission = await getActiveSubmission(tgId);
+  if (activeSubmission) {
+    if (Number(currentUser.dice_frozen || 0) !== 1) await run('UPDATE users SET dice_frozen = 1 WHERE tg_id = ?', [tgId]);
+    return { user: { ...currentUser, dice_frozen: 1 }, activeSubmission };
+  }
   const releasedUser = await releaseDiceAfterUnconsumedApproval(tgId, currentUser);
   if (releasedUser) return { user: releasedUser, activeSubmission: null };
-  const activeSubmission = await getActiveSubmission(tgId);
   const hasPendingLucky = currentUser.pending_lucky_cell !== null && currentUser.pending_lucky_cell !== undefined;
   if (!activeSubmission && !hasPendingLucky && Number(currentUser.dice_frozen || 0) === 1) {
     await run('UPDATE users SET dice_frozen = 0 WHERE tg_id = ?', [tgId]);
@@ -992,7 +1002,7 @@ async function getDiceFrozenState(tgId, user = null) {
 
 async function getPlayerTickets(tgId) {
   return all(`WITH numbered_tickets AS (
-      SELECT t.ticket_number, t.type, t.status, t.submission_id AS ticket_submission_id, t.created_at, r.place_number,
+      SELECT t.ticket_number, t.type, t.status, t.submission_id AS ticket_submission_id, t.revoke_comment, t.created_at, r.place_number,
         ROW_NUMBER() OVER (PARTITION BY t.tg_id, t.type ORDER BY t.ticket_number ASC) AS ticket_order
       FROM tickets t
       LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
@@ -1007,7 +1017,7 @@ async function getPlayerTickets(tgId) {
       JOIN tasks task ON task.id = s.task_id
       WHERE s.tg_id = ? AND s.status IN ('approved', 'auto_approved')
     )
-    SELECT nt.ticket_number, nt.type, nt.status, nt.created_at, nt.place_number,
+    SELECT nt.ticket_number, nt.type, nt.status, nt.revoke_comment, nt.created_at, nt.place_number,
       COALESCE(direct_work.submission_id, ordered_work.submission_id) AS submission_id,
       COALESCE(direct_work.cell, ordered_work.cell) AS cell,
       COALESCE(direct_work.text_task, ordered_work.text_task) AS text_task,
@@ -1194,7 +1204,7 @@ async function initializeRaffleDrawIfNeeded(config = null) {
 
   const totalPrizes = Number(drawConfig?.total_prizes || 0);
   if (totalPrizes <= 0) return;
-  const tickets = await all(`SELECT ticket_number FROM tickets ORDER BY ticket_number ASC`);
+  const tickets = await all(`SELECT ticket_number FROM tickets WHERE status = 'active' ORDER BY ticket_number ASC`);
   const shuffled = shuffleTickets(tickets).slice(0, Math.min(totalPrizes, tickets.length));
   for (const ticket of shuffled) {
     await run('INSERT OR IGNORE INTO raffle_winning_tickets (ticket_number) VALUES (?)', [ticket.ticket_number]);
@@ -1262,7 +1272,8 @@ async function getRaffleStatus() {
         COUNT(*) AS total_tickets,
         SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_tickets,
         SUM(CASE WHEN status = 'winner' THEN 1 ELSE 0 END) AS winner_tickets,
-        SUM(CASE WHEN status = 'scratched' THEN 1 ELSE 0 END) AS scratched_tickets
+        SUM(CASE WHEN status = 'scratched' THEN 1 ELSE 0 END) AS scratched_tickets,
+        SUM(CASE WHEN status = 'revoked' THEN 1 ELSE 0 END) AS revoked_tickets
       FROM tickets`)
   ]);
 
@@ -1275,6 +1286,7 @@ async function getRaffleStatus() {
     active_tickets: stats?.active_tickets || 0,
     winner_tickets: stats?.winner_tickets || 0,
     scratched_tickets: stats?.scratched_tickets || 0,
+    revoked_tickets: stats?.revoked_tickets || 0,
     remaining_prizes: Math.max(0, Number(config?.total_prizes || 0) - Number(results?.length || 0)),
     is_sold_out: Number(results?.length || 0) >= Number(config?.total_prizes || 0) && Number(config?.total_prizes || 0) > 0
   };
@@ -2336,7 +2348,7 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
 app.get('/api/admin/tickets', async (req, res, next) => {
   try {
     await requireAdmin(req.query.admin_tg_id);
-    const tickets = await all(`SELECT t.ticket_number, t.type, t.status, t.created_at,
+    const tickets = await all(`SELECT t.ticket_number, t.type, t.status, t.revoke_comment, t.created_at,
         u.username, u.tg_id, u.current_cell
       FROM tickets t
       JOIN users u ON u.tg_id = t.tg_id
@@ -2370,9 +2382,11 @@ app.post('/api/admin/remove-ticket', async (req, res, next) => {
     await requireAdmin(req.body.admin_tg_id);
     const ticketNumber = Number(req.body.ticket_number);
     if (!Number.isInteger(ticketNumber) || ticketNumber < 1) throw Object.assign(new Error('Некорректный номер Красочки'), { status: 400 });
+    const comment = String(req.body.admin_comment || req.body.comment || '').trim();
+    if (!comment) throw Object.assign(new Error('Укажите причину, почему Красочку отобрали'), { status: 400 });
     await run('DELETE FROM raffle_results WHERE ticket_number = ?', [ticketNumber]);
     await run('DELETE FROM raffle_winning_tickets WHERE ticket_number = ?', [ticketNumber]);
-    const result = await run('DELETE FROM tickets WHERE ticket_number = ?', [ticketNumber]);
+    const result = await run("UPDATE tickets SET status = 'revoked', revoke_comment = ? WHERE ticket_number = ? AND status <> 'revoked'", [comment, ticketNumber]);
     if (result.changes === 0) throw Object.assign(new Error('Красочка не найдена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -2383,7 +2397,7 @@ app.post('/api/admin/remove-ticket', async (req, res, next) => {
 app.get('/api/admin/tickets-export', async (req, res, next) => {
   try {
     await requireAdmin(req.query.admin_tg_id);
-    const tickets = await all(`SELECT t.ticket_number, t.type, t.status, t.created_at, u.username, u.tg_id, u.current_cell
+    const tickets = await all(`SELECT t.ticket_number, t.type, t.status, t.revoke_comment, t.created_at, u.username, u.tg_id, u.current_cell
       FROM tickets t
       JOIN users u ON u.tg_id = t.tg_id
       ORDER BY t.ticket_number ASC`);

@@ -299,16 +299,17 @@ function renderPalette(tickets = []) {
   els.paletteGrid.innerHTML = '';
   for (const [index, ticket] of tickets.entries()) {
     const card = document.createElement('article');
-    card.className = 'item archive-accordion player-ticket-archive';
+    card.className = `item archive-accordion player-ticket-archive ${ticket.status === 'revoked' ? 'revoked-ticket' : ''}`;
     const workSource = ticket.source || ticket.photo_after || '';
     const afterUrl = ticket.file_url || ticket.image_url || (workSource ? `/uploads/${encodeURIComponent(workSource)}` : '');
     const hasApprovedWork = ticket.type === 'standard' && Boolean(ticket.submission_id && afterUrl);
     card.innerHTML = `
       <button type="button" class="archive-toggle" style="background:${paintGradients[index % paintGradients.length]}">
         <strong>Красочка №${escapeHtml(ticket.ticket_number)}</strong>
-        <small>${ticket.type === 'bonus' ? 'Бонусная' : 'За задание'}</small>
+        <small>${ticket.status === 'revoked' ? 'Отобрана' : (ticket.type === 'bonus' ? 'Бонусная' : 'За задание')}</small>
       </button>
       <div class="archive-panel"><div class="archive-inner">
+        ${ticket.status === 'revoked' ? `<p class="notice">Красочка отобрана администратором и не участвует в розыгрыше. Причина: ${escapeHtml(ticket.revoke_comment || 'не указана')}</p>` : ''}
         ${hasApprovedWork ? `
           ${ticket.text_task ? `<p><strong>Квест:</strong> ${escapeHtml(ticket.text_task)}</p>` : ''}
           <div class="work-card">
@@ -1276,16 +1277,17 @@ function renderScratchCards(tickets = [], raffleActive = false) {
   for (const ticket of tickets) {
     const card = document.createElement('article');
     const revealed = ticket.status !== 'active';
-    card.className = `scratch-card ${revealed ? 'revealed' : ''} ${ticket.status === 'winner' ? 'won' : ''} ${ticket.status === 'scratched' ? 'lost' : ''}`;
+    card.className = `scratch-card ${revealed ? 'revealed' : ''} ${ticket.status === 'winner' ? 'won' : ''} ${ticket.status === 'scratched' ? 'lost' : ''} ${ticket.status === 'revoked' ? 'revoked-ticket' : ''}`;
     card.dataset.ticketNumber = ticket.ticket_number;
     card.innerHTML = `
-      <div class="scratch-prize">${cardResultMarkup(ticket)}</div>
+      <div class="scratch-prize">${ticket.status === 'revoked' ? `Отобрана администратором<br><small>${escapeHtml(ticket.revoke_comment || 'Причина не указана')}</small>` : cardResultMarkup(ticket)}</div>
       <canvas aria-label="Защитный слой Красочки №${escapeHtml(ticket.ticket_number)}"></canvas>
       <div class="scratch-label">Красочка №${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</div>
     `;
     els.scratchGrid.append(card);
     if (!revealed && raffleActive) setupScratchCanvas(card, ticket);
-    if (!raffleActive && !revealed) card.querySelector('.scratch-label').textContent = 'Ждем старта Красочек';
+    if (ticket.status === 'revoked') card.querySelector('.scratch-label').textContent = `Красочка №${ticket.ticket_number} отобрана`;
+    else if (!raffleActive && !revealed) card.querySelector('.scratch-label').textContent = 'Ждем старта Красочек';
   }
 }
 
@@ -1762,13 +1764,14 @@ function renderTicketRegistry(tickets = []) {
     remove.className = 'danger';
     remove.textContent = 'Отобрать';
     remove.addEventListener('click', async () => {
-      if (!window.confirm(`Отобрать Красочку №${ticket.ticket_number}?`)) return;
+      const comment = window.prompt(`Почему отобрать Красочку №${ticket.ticket_number}?`);
+      if (!comment?.trim()) return;
       await api('/api/admin/remove-ticket', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admin_tg_id: tgId, ticket_number: ticket.ticket_number })
+        body: JSON.stringify({ admin_tg_id: tgId, ticket_number: ticket.ticket_number, admin_comment: comment.trim() })
       });
-      showToast('Красочка удалена из реестра');
+      showToast('Красочка отобрана и исключена из розыгрыша');
       await loadAdminPanel();
       await loadState().catch(() => {});
       await loadRaffle(true).catch(() => {});
