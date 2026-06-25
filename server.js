@@ -137,6 +137,8 @@ async function initDb() {
   await ensureNewsEventsTable();
   await ensurePuzzleDuelsTable();
 
+  await ensureSingleActiveSubmissionIndex();
+
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_player_status ON submissions(tg_id, status, task_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_images ON submissions(status, image_name)');
   await run('CREATE INDEX IF NOT EXISTS idx_submissions_pending_photos ON submissions(status, photo_before, photo_after)');
@@ -167,6 +169,28 @@ async function initDb() {
   await loadMapConfig();
 }
 
+
+
+async function ensureSingleActiveSubmissionIndex() {
+  await run(`UPDATE submissions
+    SET resubmission_required = 1,
+      admin_comment = CASE
+        WHEN COALESCE(admin_comment, '') = '' THEN 'Скрыто автоматически: найдено более новое активное задание.'
+        ELSE admin_comment
+      END,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE status IN ('pending', 'rejected')
+      AND COALESCE(resubmission_required, 0) = 0
+      AND id NOT IN (
+        SELECT MAX(id)
+        FROM submissions
+        WHERE status IN ('pending', 'rejected') AND COALESCE(resubmission_required, 0) = 0
+        GROUP BY tg_id
+      )`);
+  await run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_one_active_per_player
+    ON submissions(tg_id)
+    WHERE status IN ('pending', 'rejected') AND COALESCE(resubmission_required, 0) = 0`);
+}
 
 async function ensureAssignedTasksTable() {
   const columns = await all('PRAGMA table_info(submissions)');
@@ -1683,7 +1707,7 @@ async function createPendingSubmissionForCell(tgId, cell) {
 
   const task = await pickUnusedTask(tgId);
   if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
-  const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status) VALUES (?, ?, ?, ?, ?)', [tgId, cell, task.id, task.text_task, 'pending']);
+  const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)', [tgId, cell, task.id, task.text_task, 'pending']);
   await rememberAssignedTask(tgId, task.id);
   await logPlayerAction(tgId, 'task_assigned', `Получено задание #${task.id} на клетке ${cell}: ${task.text_task}`, { cell, taskId: task.id, submissionId: submission.id });
   return { task, submission_id: submission.id };
@@ -1904,7 +1928,7 @@ app.post('/api/lucky-choice', async (req, res, next) => {
 
     const result = await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [choice]);
     const task = result.id ? await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]) : await get('SELECT id, text_task FROM tasks WHERE text_task = ?', [choice]);
-    const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status) VALUES (?, ?, ?, ?, ?)', [tgId, luckyCell, task.id, task.text_task, 'pending']);
+    const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)', [tgId, luckyCell, task.id, task.text_task, 'pending']);
     await rememberAssignedTask(tgId, task.id);
     await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [luckyCell, tgId]);
 
@@ -2222,7 +2246,7 @@ app.post('/api/admin/defibrillate-player', async (req, res, next) => {
         const task = await pickUnusedTask(tgId);
         if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
         const currentCell = Math.max(0, Math.min(100, Number(user.current_cell || 0)));
-        const created = await run("INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status) VALUES (?, ?, ?, ?, 'pending')", [tgId, currentCell, task.id, task.text_task]);
+        const created = await run("INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 'pending')", [tgId, currentCell, task.id, task.text_task]);
         await rememberAssignedTask(tgId, task.id);
         await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
         await logPlayerAction(tgId, 'task_assigned', `После аварийного сброса выдано чистое задание #${task.id} на текущей клетке ${currentCell}: ${task.text_task}`, { cell: currentCell, taskId: task.id, submissionId: created.id, actorTgId: req.body.admin_tg_id });
