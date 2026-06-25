@@ -147,7 +147,6 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_reaction_logs_limit ON reaction_logs(from_tg_id, to_tg_id, reacted_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_player_action_logs_tg_id ON player_action_logs(tg_id, created_at, id)');
 
-  await run('DELETE FROM users WHERE tg_id = 391995937');
   await restoreFrozenDiceFromActiveSubmissions();
 
   await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role)
@@ -161,6 +160,7 @@ async function initDb() {
       role = 'admin'`, [OWNER_TG_ID]);
 
   await seedTasks();
+  await repairOrphanSubmissionTaskIds();
   await loadMapConfig();
 }
 
@@ -617,10 +617,41 @@ async function seedTasks() {
 
   const tasks = parseSeedTasks(rawTasks);
 
-  await run('DELETE FROM tasks;');
-
+  // Never truncate tasks during server startup: submissions reference task IDs,
+  // and persistent player progress must survive restarts/deploys.
   for (const task of tasks) {
     await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [task]);
+  }
+}
+
+
+async function repairOrphanSubmissionTaskIds() {
+  const orphanedSubmissions = await all(`SELECT s.id, s.task_id
+    FROM submissions s
+    LEFT JOIN tasks t ON t.id = s.task_id
+    WHERE t.id IS NULL`);
+  if (!orphanedSubmissions.length) return;
+
+  const seededTasks = await all(`SELECT id, text_task
+    FROM tasks
+    WHERE text_task GLOB '[0-9]*. *'`);
+  const taskIdBySeedNumber = new Map();
+  for (const task of seededTasks) {
+    const match = String(task.text_task || '').match(/^(\d+)\.\s/);
+    if (!match) continue;
+    const seedNumber = Number(match[1]);
+    if (seedNumber >= 1 && seedNumber <= 80 && !taskIdBySeedNumber.has(seedNumber)) {
+      taskIdBySeedNumber.set(seedNumber, Number(task.id));
+    }
+  }
+
+  for (const submission of orphanedSubmissions) {
+    const originalTaskId = Number(submission.task_id || 0);
+    if (!originalTaskId) continue;
+    const seedNumber = ((originalTaskId - 1) % 80) + 1;
+    const restoredTaskId = taskIdBySeedNumber.get(seedNumber);
+    if (!restoredTaskId) continue;
+    await run('UPDATE submissions SET task_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [restoredTaskId, submission.id]);
   }
 }
 
@@ -811,9 +842,9 @@ async function getFinishSummary(tgId) {
 }
 
 async function getActiveSubmission(tgId) {
-  return get(`SELECT s.*, t.text_task
+  return get(`SELECT s.*, COALESCE(t.text_task, 'Задание #' || s.task_id || ' временно восстанавливается администратором') AS text_task
     FROM submissions s
-    JOIN tasks t ON t.id = s.task_id
+    LEFT JOIN tasks t ON t.id = s.task_id
     WHERE s.tg_id = ? AND s.status IN ('pending', 'rejected') AND COALESCE(s.resubmission_required, 0) = 0
     ORDER BY s.id DESC
     LIMIT 1`, [tgId]);
@@ -1825,9 +1856,9 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
     const finishSummary = await getFinishSummary(tgId);
-    const submission = await get(`SELECT s.*, t.text_task
+    const submission = await get(`SELECT s.*, COALESCE(t.text_task, 'Задание #' || s.task_id || ' временно восстанавливается администратором') AS text_task
       FROM submissions s
-      JOIN tasks t ON t.id = s.task_id
+      LEFT JOIN tasks t ON t.id = s.task_id
       WHERE s.tg_id = ?
       ORDER BY s.id DESC
       LIMIT 1`, [tgId]);

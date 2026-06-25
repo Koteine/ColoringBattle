@@ -4,16 +4,18 @@ import { spawn } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 
-const DATA_DB = '/data/database.json';
+const DATA_DB = '/data/game.db';
 const DATA_UPLOADS = '/data/uploads';
 
 async function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function startServer() {
-  await rm(DATA_DB, { force: true });
-  await rm(DATA_UPLOADS, { recursive: true, force: true });
+async function startServer({ clean = true } = {}) {
+  if (clean) {
+    await rm(DATA_DB, { force: true });
+    await rm(DATA_UPLOADS, { recursive: true, force: true });
+  }
 
   const port = 3400 + Math.floor(Math.random() * 1000);
   const child = spawn(process.execPath, ['server.js'], {
@@ -271,6 +273,59 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
       body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '201' })
     });
     assert.equal(removedUser.ok, true);
+  } finally {
+    await server.close();
+  }
+});
+
+
+test('active assignment survives server restart and still accepts before/after photos', async () => {
+  let server = await startServer();
+  const imagePath = '/tmp/coloring-restart-test.png';
+  await writeFile(imagePath, Buffer.from('89504e470d0a1a0a', 'hex'));
+
+  try {
+    await jsonRequest(server.baseUrl, '/api/apply', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '300', username: 'restart_player' })
+    });
+    await jsonRequest(server.baseUrl, '/api/admin/approve-user', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '300' })
+    });
+    await jsonRequest(server.baseUrl, '/api/roll', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '300' })
+    });
+
+    const beforeRestart = await jsonRequest(server.baseUrl, '/api/me/300?username=restart_player');
+    assert.ok(beforeRestart.activeSubmission?.text_task);
+    assert.equal(beforeRestart.user.dice_frozen, 1);
+  } finally {
+    await server.close();
+  }
+
+  server = await startServer({ clean: false });
+  try {
+    const afterRestart = await jsonRequest(server.baseUrl, '/api/me/300?username=restart_player');
+    assert.ok(afterRestart.activeSubmission?.text_task);
+    assert.equal(afterRestart.user.dice_frozen, 1);
+
+    const beforeForm = new FormData();
+    beforeForm.append('tg_id', '300');
+    beforeForm.append('photo_before', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'before.png');
+    const beforeResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: beforeForm });
+    const beforeSubmit = await beforeResponse.json();
+    assert.equal(beforeResponse.ok, true);
+    assert.equal(beforeSubmit.uploaded_stage, 'before');
+
+    const afterForm = new FormData();
+    afterForm.append('tg_id', '300');
+    afterForm.append('photo_after', new Blob([await readFile(imagePath)], { type: 'image/png' }), 'after.png');
+    const afterResponse = await fetch(`${server.baseUrl}/api/submit`, { method: 'POST', body: afterForm });
+    const afterSubmit = await afterResponse.json();
+    assert.equal(afterResponse.ok, true);
+    assert.equal(afterSubmit.uploaded_stage, 'after');
   } finally {
     await server.close();
   }
