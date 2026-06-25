@@ -1178,7 +1178,19 @@ async function checkStatus() {
     }
     const data = await api(`/api/check-status/${encodeURIComponent(tgId)}`);
     const submission = data.submission;
-    if (!submission) return;
+    const knownFrozen = Number(state?.user?.dice_frozen || 0);
+    const serverFrozen = Number(data.dice_frozen || 0);
+    const localHasActiveSubmission = Boolean(state?.activeSubmission || state?.pendingLucky);
+    if (!submission) {
+      if (knownFrozen !== serverFrozen || localHasActiveSubmission) await loadState();
+      return;
+    }
+
+    if (knownFrozen !== serverFrozen && serverFrozen === 0) {
+      showToast('Кубик снова доступен — можно бросать дальше!', 4200);
+      await loadState();
+      return;
+    }
 
     if (submission.status === 'approved' && lastSubmissionStatus !== 'approved') {
       showToast(data.finish_summary?.finished ? 'Финальная работа одобрена! Ты дошла до финиша!' : 'Работа одобрена! Красочка добавлена в палитру, кубик снова доступен.', 5200);

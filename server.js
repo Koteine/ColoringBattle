@@ -104,6 +104,7 @@ async function initDb() {
     tg_id TEXT NOT NULL,
     cell INTEGER NOT NULL,
     task_id INTEGER NOT NULL,
+    assigned_task_text TEXT DEFAULT '',
     image_name TEXT,
     photo_before TEXT,
     photo_after TEXT,
@@ -118,6 +119,7 @@ async function initDb() {
   )`);
 
   await ensureSubmissionSchema();
+  await ensureAssignedTasksTable();
   await ensureUserLuckyColumn();
   await ensureUserTarotColumns();
   await ensureUserDuelColumns();
@@ -131,6 +133,7 @@ async function initDb() {
   await ensureAccumulatingTicketsTable();
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
+  await ensureRaffleWinningTicketsTable();
   await ensureNewsEventsTable();
   await ensurePuzzleDuelsTable();
 
@@ -162,6 +165,35 @@ async function initDb() {
   await seedTasks();
   await repairOrphanSubmissionTaskIds();
   await loadMapConfig();
+}
+
+
+async function ensureAssignedTasksTable() {
+  const columns = await all('PRAGMA table_info(submissions)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('assigned_task_text')) {
+    await run("ALTER TABLE submissions ADD COLUMN assigned_task_text TEXT DEFAULT ''");
+  }
+  await run(`UPDATE submissions
+    SET assigned_task_text = COALESCE((SELECT text_task FROM tasks WHERE tasks.id = submissions.task_id), assigned_task_text, '')
+    WHERE assigned_task_text IS NULL OR assigned_task_text = ''`);
+
+  await run(`CREATE TABLE IF NOT EXISTS assigned_tasks (
+    tg_id TEXT NOT NULL,
+    task_id INTEGER NOT NULL,
+    assigned_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tg_id, task_id),
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id),
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+  )`);
+  await run(`INSERT OR IGNORE INTO assigned_tasks (tg_id, task_id, assigned_at)
+    SELECT tg_id, task_id, MIN(created_at)
+    FROM submissions
+    GROUP BY tg_id, task_id`);
+}
+
+async function rememberAssignedTask(tgId, taskId) {
+  await run('INSERT OR IGNORE INTO assigned_tasks (tg_id, task_id) VALUES (?, ?)', [tgId, taskId]);
 }
 
 
@@ -367,8 +399,8 @@ async function ensureSubmissionSchema() {
     if (!columnNames.has('resubmission_required')) await run('ALTER TABLE submissions_legacy ADD COLUMN resubmission_required INTEGER DEFAULT 0');
     if (!columnNames.has('resubmission_notice_shown')) await run('ALTER TABLE submissions_legacy ADD COLUMN resubmission_notice_shown INTEGER DEFAULT 0');
     await run(desiredSql);
-    await run(`INSERT INTO submissions (id, tg_id, cell, task_id, image_name, photo_before, photo_after, status, admin_comment, resubmission_required, resubmission_notice_shown, created_at, updated_at)
-      SELECT id, tg_id, cell, task_id, image_name, photo_before, COALESCE(photo_after, image_name),
+    await run(`INSERT INTO submissions (id, tg_id, cell, task_id, assigned_task_text, image_name, photo_before, photo_after, status, admin_comment, resubmission_required, resubmission_notice_shown, created_at, updated_at)
+      SELECT id, tg_id, cell, task_id, COALESCE((SELECT text_task FROM tasks WHERE tasks.id = submissions_legacy.task_id), ''), image_name, photo_before, COALESCE(photo_after, image_name),
         CASE WHEN status IN ('pending', 'approved', 'rejected', 'auto_approved') THEN status ELSE 'pending' END,
         COALESCE(admin_comment, ''), COALESCE(resubmission_required, 0), COALESCE(resubmission_notice_shown, 0), created_at, updated_at
       FROM submissions_legacy`);
@@ -484,6 +516,15 @@ async function ensureRaffleResultsTable() {
     WHERE ${ticketExpression} IS NOT NULL AND tg_id IS NOT NULL
     ORDER BY COALESCE(drawn_at, CURRENT_TIMESTAMP), id`);
   await run('DROP TABLE raffle_results_old');
+}
+
+
+async function ensureRaffleWinningTicketsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS raffle_winning_tickets (
+    ticket_number INTEGER PRIMARY KEY,
+    draw_started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (ticket_number) REFERENCES tickets(ticket_number)
+  )`);
 }
 
 
@@ -842,7 +883,7 @@ async function getFinishSummary(tgId) {
 }
 
 async function getActiveSubmission(tgId) {
-  return get(`SELECT s.*, COALESCE(t.text_task, 'Задание #' || s.task_id || ' временно восстанавливается администратором') AS text_task
+  return get(`SELECT s.*, COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id || ' временно восстанавливается администратором') AS text_task
     FROM submissions s
     LEFT JOIN tasks t ON t.id = s.task_id
     WHERE s.tg_id = ? AND s.status IN ('pending', 'rejected') AND COALESCE(s.resubmission_required, 0) = 0
@@ -870,6 +911,19 @@ function getSubmissionProgressStatus(submission) {
   return submission.status;
 }
 
+
+async function reconcileDiceLock(tgId, user = null) {
+  const currentUser = user || await get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
+  if (!currentUser) return { user: null, activeSubmission: null };
+  const activeSubmission = await getActiveSubmission(tgId);
+  const hasPendingLucky = currentUser.pending_lucky_cell !== null && currentUser.pending_lucky_cell !== undefined;
+  if (!activeSubmission && !hasPendingLucky && Number(currentUser.dice_frozen || 0) === 1) {
+    await run('UPDATE users SET dice_frozen = 0 WHERE tg_id = ?', [tgId]);
+    return { user: { ...currentUser, dice_frozen: 0 }, activeSubmission: null };
+  }
+  return { user: currentUser, activeSubmission };
+}
+
 async function getDiceFrozenState(tgId, user = null) {
   const activeSubmission = await getActiveSubmission(tgId);
   return {
@@ -890,7 +944,7 @@ async function getPlayerTickets(tgId) {
       SELECT s.id AS submission_id, s.cell, s.photo_before, s.photo_after, s.photo_after AS source,
         CASE WHEN s.photo_after IS NOT NULL AND s.photo_after != '' THEN '/uploads/' || s.photo_after ELSE '' END AS file_url,
         s.status AS submission_status,
-        s.updated_at, task.text_task,
+        s.updated_at, COALESCE(NULLIF(s.assigned_task_text, ''), task.text_task) AS text_task,
         ROW_NUMBER() OVER (PARTITION BY s.tg_id ORDER BY s.id ASC) AS work_order
       FROM submissions s
       JOIN tasks task ON task.id = s.task_id
@@ -929,14 +983,12 @@ function getCellType(cell) {
 async function pickUnusedTask(tgId) {
   const task = await get(`SELECT id, text_task
     FROM tasks
-    WHERE id NOT IN (
-      SELECT task_id FROM submissions WHERE tg_id = ? AND status IN ('approved', 'auto_approved', 'pending')
-    )
+    WHERE id NOT IN (SELECT task_id FROM assigned_tasks WHERE tg_id = ?)
     ORDER BY RANDOM()
     LIMIT 1`, [tgId]);
 
   if (task) return task;
-  return get('SELECT id, text_task FROM tasks ORDER BY RANDOM() LIMIT 1');
+  throw Object.assign(new Error('Все задания уже были выданы этому игроку до глобального сброса'), { status: 409 });
 }
 
 async function issueTicket(tgId, type = 'standard', submissionId = null) {
@@ -1070,6 +1122,23 @@ function buildRaffleWindow(config) {
   };
 }
 
+
+async function initializeRaffleDrawIfNeeded(config = null) {
+  const drawConfig = config || await getRaffleConfig();
+  const windowState = buildRaffleWindow(drawConfig);
+  if (!windowState.is_active && !windowState.is_finished) return;
+  const existing = await get('SELECT COUNT(*) AS count FROM raffle_winning_tickets');
+  if (Number(existing?.count || 0) > 0) return;
+
+  const totalPrizes = Number(drawConfig?.total_prizes || 0);
+  if (totalPrizes <= 0) return;
+  const tickets = await all(`SELECT ticket_number FROM tickets ORDER BY ticket_number ASC`);
+  const shuffled = shuffleTickets(tickets).slice(0, Math.min(totalPrizes, tickets.length));
+  for (const ticket of shuffled) {
+    await run('INSERT OR IGNORE INTO raffle_winning_tickets (ticket_number) VALUES (?)', [ticket.ticket_number]);
+  }
+}
+
 async function finalizeExpiredRaffleIfNeeded() {
   const config = await getRaffleConfig();
   const windowState = buildRaffleWindow(config);
@@ -1078,6 +1147,7 @@ async function finalizeExpiredRaffleIfNeeded() {
   await run('BEGIN IMMEDIATE TRANSACTION');
   try {
     const freshConfig = await getRaffleConfig();
+    await initializeRaffleDrawIfNeeded(freshConfig);
     const freshWindow = buildRaffleWindow(freshConfig);
     if (!freshWindow.is_finished) {
       await run('COMMIT');
@@ -1091,13 +1161,14 @@ async function finalizeExpiredRaffleIfNeeded() {
       return;
     }
 
-    const activeTickets = await all(`SELECT t.ticket_number, t.tg_id, t.type, u.username
-      FROM tickets t
+    const unclaimedWinners = await all(`SELECT t.ticket_number, t.tg_id, u.username
+      FROM raffle_winning_tickets w
+      JOIN tickets t ON t.ticket_number = w.ticket_number
       JOIN users u ON u.tg_id = t.tg_id
-      WHERE t.status = 'active'
-      ORDER BY t.ticket_number ASC`);
-    const draw = buildUniqueWinnerDraw(activeTickets);
-    for (const ticket of draw.winners.slice(0, totalPrizes - placeNumber)) {
+      LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
+      WHERE r.ticket_number IS NULL AND t.status = 'active'
+      ORDER BY w.draw_started_at ASC, t.ticket_number ASC`);
+    for (const ticket of unclaimedWinners.slice(0, totalPrizes - placeNumber)) {
       placeNumber += 1;
       await run("UPDATE tickets SET status = 'winner' WHERE ticket_number = ? AND status = 'active'", [ticket.ticket_number]);
       await run(`INSERT OR IGNORE INTO raffle_results (place_number, ticket_number, tg_id, username)
@@ -1114,6 +1185,7 @@ async function finalizeExpiredRaffleIfNeeded() {
 }
 
 async function getRaffleStatus() {
+  await initializeRaffleDrawIfNeeded();
   await finalizeExpiredRaffleIfNeeded();
   const [config, results, latestWinner, stats] = await Promise.all([
     getRaffleConfig(),
@@ -1176,7 +1248,9 @@ async function scratchTicket({ tgId, ticketNumber }) {
     const remainingPrizes = Math.max(0, totalPrizes - awardedCount);
     if (activeTickets <= 0) throw Object.assign(new Error('Активных Красочек не осталось'), { status: 400 });
 
-    const wins = remainingPrizes >= activeTickets || crypto.randomInt(activeTickets) < remainingPrizes;
+    await initializeRaffleDrawIfNeeded(config);
+    const winningTicket = await get('SELECT ticket_number FROM raffle_winning_tickets WHERE ticket_number = ?', [ticketNumber]);
+    const wins = Boolean(winningTicket);
 
     if (wins) {
       const placeNumber = awardedCount + 1;
@@ -1226,14 +1300,16 @@ app.get('/api/me/:tgId', async (req, res, next) => {
       return;
     }
 
-    const activeSubmission = Number(user.is_approved) === 1 ? await getActiveSubmission(tgId) : null;
-    const effectiveDiceFrozen = activeSubmission ? 1 : Number(user.dice_frozen || 0);
-    const tickets = Number(user.is_approved) === 1 && !isPrivilegedRole(user) ? await getPlayerTickets(tgId) : [];
-    const pendingLucky = Number(user.is_approved) === 1 && user.pending_lucky_cell !== null
-      ? { cell: Number(user.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
+    const reconciled = Number(user.is_approved) === 1 ? await reconcileDiceLock(tgId, user) : { user, activeSubmission: null };
+    const responseUser = reconciled.user || user;
+    const activeSubmission = reconciled.activeSubmission;
+    const pendingLucky = Number(responseUser.is_approved) === 1 && responseUser.pending_lucky_cell !== null
+      ? { cell: Number(responseUser.pending_lucky_cell), options: LUCKY_TASK_OPTIONS }
       : null;
+    const effectiveDiceFrozen = activeSubmission || pendingLucky ? 1 : Number(responseUser.dice_frozen || 0);
+    const tickets = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser) ? await getPlayerTickets(tgId) : [];
     const finishSummary = await getFinishSummary(tgId);
-    res.json({ user: { ...user, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(user.has_used_tarot) === 1, trap_immunity: Number(user.trap_immunity) === 1, next_roll_halved: Number(user.next_roll_halved) === 1, penalty_rerolls: Number(user.penalty_rerolls || 0), total_dice_rolls: Number(user.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(user.current_cell) >= 100, is_admin: user.role === 'admin', is_moderator: user.role === 'moderator', finish_summary: finishSummary });
+    res.json({ user: { ...responseUser, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, next_roll_halved: Number(responseUser.next_roll_halved) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -1533,7 +1609,8 @@ async function createPendingSubmissionForCell(tgId, cell) {
 
   const task = await pickUnusedTask(tgId);
   if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
-  const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, cell, task.id, 'pending']);
+  const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status) VALUES (?, ?, ?, ?, ?)', [tgId, cell, task.id, task.text_task, 'pending']);
+  await rememberAssignedTask(tgId, task.id);
   await logPlayerAction(tgId, 'task_assigned', `Получено задание #${task.id} на клетке ${cell}: ${task.text_task}`, { cell, taskId: task.id, submissionId: submission.id });
   return { task, submission_id: submission.id };
 }
@@ -1572,14 +1649,14 @@ app.post('/api/roll', async (req, res, next) => {
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
     assertGameNotFinished(user);
-    const { activeSubmission } = await getDiceFrozenState(tgId, user);
-    if (Number(user.dice_frozen) === 1 || activeSubmission) throw Object.assign(new Error('Кубик заморожен до выполнения и проверки текущего задания'), { status: 400 });
-    if (Number(user.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
+    const { user: playableUser, activeSubmission } = await reconcileDiceLock(tgId, user);
+    if (Number(playableUser.dice_frozen) === 1 || activeSubmission || playableUser.pending_lucky_cell !== null) throw Object.assign(new Error('Кубик заморожен до выполнения и проверки текущего задания'), { status: 400 });
+    if (Number(playableUser.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
     const rawDice = rollD6();
-    const dice = Number(user.next_roll_halved) === 1 ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice;
-    const result = await applyMoveAndCreateTask(tgId, user, dice, { raw_dice: rawDice, roll_halved: Number(user.next_roll_halved) === 1 });
-    await logPlayerAction(tgId, 'dice_roll', `Бросок кубика: выпало ${dice}. Игрок встал на клетку ${result.current_cell}.`, { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: Number(user.next_roll_halved) === 1, cell_type: result.cell_type, landed_cell: result.landed_cell } });
+    const dice = Number(playableUser.next_roll_halved) === 1 ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice;
+    const result = await applyMoveAndCreateTask(tgId, playableUser, dice, { raw_dice: rawDice, roll_halved: Number(playableUser.next_roll_halved) === 1 });
+    await logPlayerAction(tgId, 'dice_roll', `Бросок кубика: выпало ${dice}. Игрок встал на клетку ${result.current_cell}.`, { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: Number(playableUser.next_roll_halved) === 1, cell_type: result.cell_type, landed_cell: result.landed_cell } });
     res.json(result);
   } catch (error) {
     next(error);
@@ -1753,7 +1830,8 @@ app.post('/api/lucky-choice', async (req, res, next) => {
 
     const result = await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [choice]);
     const task = result.id ? await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]) : await get('SELECT id, text_task FROM tasks WHERE text_task = ?', [choice]);
-    const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, luckyCell, task.id, 'pending']);
+    const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status) VALUES (?, ?, ?, ?, ?)', [tgId, luckyCell, task.id, task.text_task, 'pending']);
+    await rememberAssignedTask(tgId, task.id);
     await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [luckyCell, tgId]);
 
     res.json({ ok: true, current_cell: luckyCell, task, submission_id: submission.id });
@@ -1856,15 +1934,16 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
     const finishSummary = await getFinishSummary(tgId);
-    const submission = await get(`SELECT s.*, COALESCE(t.text_task, 'Задание #' || s.task_id || ' временно восстанавливается администратором') AS text_task
+    const submission = await get(`SELECT s.*, COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id || ' временно восстанавливается администратором') AS text_task
       FROM submissions s
       LEFT JOIN tasks t ON t.id = s.task_id
       WHERE s.tg_id = ?
       ORDER BY s.id DESC
       LIMIT 1`, [tgId]);
     const tickets = await getPlayerTickets(tgId);
-    const activeSubmission = submission && ['pending', 'rejected'].includes(submission.status) && Number(submission.resubmission_required || 0) === 0 ? submission : null;
-    res.json({ submission, dice_frozen: activeSubmission ? 1 : user.dice_frozen, progress_status: getSubmissionProgressStatus(activeSubmission), tickets, is_finalist: Number(user.current_cell) >= 100, finish_summary: finishSummary });
+    const { user: reconciledUser, activeSubmission } = await reconcileDiceLock(tgId, user);
+    const pendingLucky = reconciledUser?.pending_lucky_cell !== null && reconciledUser?.pending_lucky_cell !== undefined;
+    res.json({ submission, dice_frozen: activeSubmission || pendingLucky ? 1 : reconciledUser.dice_frozen, progress_status: getSubmissionProgressStatus(activeSubmission), tickets, is_finalist: Number(reconciledUser.current_cell) >= 100, finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -2059,7 +2138,8 @@ app.post('/api/admin/defibrillate-player', async (req, res, next) => {
         const task = await pickUnusedTask(tgId);
         if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
         const currentCell = Math.max(0, Math.min(100, Number(user.current_cell || 0)));
-        const created = await run("INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, 'pending')", [tgId, currentCell, task.id]);
+        const created = await run("INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status) VALUES (?, ?, ?, ?, 'pending')", [tgId, currentCell, task.id, task.text_task]);
+        await rememberAssignedTask(tgId, task.id);
         await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
         await logPlayerAction(tgId, 'task_assigned', `После аварийного сброса выдано чистое задание #${task.id} на текущей клетке ${currentCell}: ${task.text_task}`, { cell: currentCell, taskId: task.id, submissionId: created.id, actorTgId: req.body.admin_tg_id });
       }
@@ -2219,6 +2299,7 @@ app.post('/api/admin/remove-ticket', async (req, res, next) => {
     const ticketNumber = Number(req.body.ticket_number);
     if (!Number.isInteger(ticketNumber) || ticketNumber < 1) throw Object.assign(new Error('Некорректный номер Красочки'), { status: 400 });
     await run('DELETE FROM raffle_results WHERE ticket_number = ?', [ticketNumber]);
+    await run('DELETE FROM raffle_winning_tickets WHERE ticket_number = ?', [ticketNumber]);
     const result = await run('DELETE FROM tickets WHERE ticket_number = ?', [ticketNumber]);
     if (result.changes === 0) throw Object.assign(new Error('Красочка не найдена'), { status: 404 });
     res.json({ ok: true });
@@ -2230,21 +2311,17 @@ app.post('/api/admin/remove-ticket', async (req, res, next) => {
 app.get('/api/admin/tickets-export', async (req, res, next) => {
   try {
     await requireAdmin(req.query.admin_tg_id);
-    const tickets = await all(`SELECT t.ticket_number, t.type, t.created_at, u.username, u.tg_id, u.current_cell
+    const tickets = await all(`SELECT t.ticket_number, t.type, t.status, t.created_at, u.username, u.tg_id, u.current_cell
       FROM tickets t
       JOIN users u ON u.tg_id = t.tg_id
       ORDER BY t.ticket_number ASC`);
-    const draw = buildUniqueWinnerDraw(tickets);
     const lines = [
       `Всего выдано Красочек: ${tickets.length}`,
-      `Уникальных претендентов: ${draw.winners.length}`,
       '',
-      'Симуляция очереди победителей (один игрок может победить только один раз):',
-      ...draw.winners.map((ticket, index) => `${index + 1}. №${ticket.ticket_number}${ticket.type === 'bonus' ? '★' : ''} — ${ticket.username || ticket.tg_id} — клетка ${ticket.current_cell}`),
-      '',
-      `Сгоревшие дубликаты после выбора победителей: ${draw.burnedTickets.length}`
+      'Реестр Красочек (выигрышные номера скрыты и не выгружаются):',
+      ...tickets.map((ticket) => `№${ticket.ticket_number}${ticket.type === 'bonus' ? '★' : ''} — ${ticket.username || ticket.tg_id} — клетка ${ticket.current_cell} — статус ${ticket.status}`)
     ];
-    res.json({ tickets, winners: draw.winners, burnedTickets: draw.burnedTickets, text: lines.join('\n') });
+    res.json({ tickets, text: lines.join('\n') });
   } catch (error) {
     next(error);
   }
@@ -2260,7 +2337,7 @@ async function collectDetailedPlayerExportRows() {
     WHERE COALESCE(u.role, 'user') = 'user'
     ORDER BY u.username COLLATE NOCASE ASC, u.tg_id ASC`);
 
-  const works = await all(`SELECT s.id, s.tg_id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.admin_comment, s.created_at, s.updated_at, t.text_task
+  const works = await all(`SELECT s.id, s.tg_id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.admin_comment, s.created_at, s.updated_at, COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task) AS text_task
     FROM submissions s
     JOIN tasks t ON t.id = s.task_id
     ORDER BY s.tg_id ASC, s.created_at ASC, s.id ASC`);
@@ -2334,8 +2411,9 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     await run('DELETE FROM submissions');
-    await run('DELETE FROM tickets');
+    await run('DELETE FROM assigned_tasks');
     await run('DELETE FROM raffle_results');
+    await run('DELETE FROM raffle_winning_tickets');
     await run('DELETE FROM reaction_logs');
     await run('DELETE FROM puzzle_duels');
     await run('DELETE FROM news_events');
@@ -2346,7 +2424,7 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
         has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0,
         penalty_rerolls = 0, total_dice_rolls = 0,
         reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1, duel_challenges_used = 0, duel_accepts_used = 0`);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'raffle_results', 'news_events', 'puzzle_duels']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
   } catch (error) {
     next(error);
@@ -2357,7 +2435,9 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
     await run('DELETE FROM submissions');
+    await run('DELETE FROM assigned_tasks');
     await run('DELETE FROM raffle_results');
+    await run('DELETE FROM raffle_winning_tickets');
     await run('DELETE FROM tickets');
     await run('DELETE FROM news_events');
     await run('DELETE FROM reaction_logs');
