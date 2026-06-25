@@ -48,6 +48,15 @@ async function startServer({ clean = true } = {}) {
   };
 }
 
+
+async function ensureRollCreatedSubmission(baseUrl, tgId, rollResult) {
+  if (!rollResult.lucky_options) return rollResult;
+  return jsonRequest(baseUrl, '/api/lucky-choice', {
+    method: 'POST',
+    body: JSON.stringify({ tg_id: tgId, choice: rollResult.lucky_options[0] })
+  });
+}
+
 async function jsonRequest(baseUrl, path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     ...options,
@@ -84,6 +93,7 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
       body: JSON.stringify({ tg_id: '200' })
     });
     assert.equal(roll.dice >= 1 && roll.dice <= 6, true);
+    await ensureRollCreatedSubmission(server.baseUrl, '200', roll);
 
     const imagePath = '/tmp/coloring-test.png';
     await writeFile(imagePath, Buffer.from('89504e470d0a1a0a', 'hex'));
@@ -166,10 +176,11 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     const news = await jsonRequest(server.baseUrl, '/api/news');
     assert.match(news.events[0].message, /Красочка №1 досталась @player/);
 
-    await jsonRequest(server.baseUrl, '/api/roll', {
+    const secondRoll = await jsonRequest(server.baseUrl, '/api/roll', {
       method: 'POST',
       body: JSON.stringify({ tg_id: '200' })
     });
+    await ensureRollCreatedSubmission(server.baseUrl, '200', secondRoll);
 
     const secondBeforeForm = new FormData();
     secondBeforeForm.append('tg_id', '200');
@@ -293,10 +304,11 @@ test('active assignment survives server restart and still accepts before/after p
       method: 'POST',
       body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '300' })
     });
-    await jsonRequest(server.baseUrl, '/api/roll', {
+    const roll = await jsonRequest(server.baseUrl, '/api/roll', {
       method: 'POST',
       body: JSON.stringify({ tg_id: '300' })
     });
+    await ensureRollCreatedSubmission(server.baseUrl, '300', roll);
 
     const beforeRestart = await jsonRequest(server.baseUrl, '/api/me/300?username=restart_player');
     assert.ok(beforeRestart.activeSubmission?.text_task);
