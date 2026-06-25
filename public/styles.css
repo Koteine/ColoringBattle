@@ -114,3 +114,6 @@ textarea { width: 100%; resize: vertical; border: 1px solid rgba(255,255,255,.12
 .profile-emergency { display: flex; justify-content: center; margin-top: 20px; padding-top: 14px; border-top: 1px dashed var(--line, rgba(132,90,150,.16)); }
 .profile-emergency button { min-width: 52px; min-height: 52px; border-radius: 999px; font-size: 22px; }
 @media (max-width: 560px) { .work-cube-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .comparison-grid { grid-template-columns: 1fr; } }
+.player-log-dialog { width: min(760px, 100%); }
+.player-log-list { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.player-log-list li { padding: 12px; border: 1px solid var(--line, rgba(132,90,150,.16)); border-radius: 16px; background: rgba(255,255,255,.72); }

@@ -2090,29 +2090,6 @@ app.post('/api/admin/tasks', async (req, res, next) => {
 });
 
 
-app.post('/api/admin/assign-task', async (req, res, next) => {
-  try {
-    await requireAdmin(req.body.admin_tg_id);
-    const tgId = normalizeTgId(req.body.tg_id);
-    const taskId = Number(req.body.task_id);
-    if (!Number.isInteger(taskId) || taskId < 1) throw Object.assign(new Error('Некорректный ID задания'), { status: 400 });
-    const user = await requireApproved(tgId);
-    assertPlayableUser(user);
-    assertGameNotFinished(user);
-    const task = await get('SELECT id, text_task FROM tasks WHERE id = ?', [taskId]);
-    if (!task) throw Object.assign(new Error('Задание не найдено'), { status: 404 });
-    const active = await getActiveSubmission(tgId);
-    if (active) throw Object.assign(new Error('У игрока уже есть активное задание'), { status: 400 });
-    const currentCell = Math.max(0, Math.min(100, Number(user.current_cell || 0)));
-    const result = await run("INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, 'pending')", [tgId, currentCell, taskId]);
-    await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
-    await addNewsEvent(`🛠 Администратор вручную назначил задание игроку ${formatUserHandle(user.username, user.tg_id)}. Кубик заморожен до проверки.`, { eventType: 'manual_task', tgId });
-    res.json({ ok: true, submission: await get('SELECT * FROM submissions WHERE id = ?', [result.id]), task });
-  } catch (error) {
-    next(error);
-  }
-});
-
 app.post('/api/admin/remove-task', async (req, res, next) => {
   try {
     await requireAdmin(req.body.admin_tg_id);
