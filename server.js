@@ -891,6 +891,61 @@ async function getActiveSubmission(tgId) {
     LIMIT 1`, [tgId]);
 }
 
+async function getUnconsumedApprovedSubmission(tgId) {
+  return get(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.updated_at
+    FROM submissions s
+    LEFT JOIN player_action_logs approval_log ON approval_log.submission_id = s.id
+      AND approval_log.tg_id = s.tg_id
+      AND approval_log.event_type IN ('submission_approved', 'submission_auto_approved')
+    WHERE s.tg_id = ? AND s.status IN ('approved', 'auto_approved')
+      AND (
+        approval_log.id > COALESCE((
+        SELECT MAX(id)
+        FROM player_action_logs
+        WHERE tg_id = ? AND event_type = 'dice_roll'
+        ), 0)
+        OR (
+          approval_log.id IS NULL
+          AND datetime(s.updated_at) >= COALESCE((
+            SELECT MAX(datetime(created_at))
+            FROM player_action_logs
+            WHERE tg_id = ? AND event_type = 'dice_roll'
+          ), datetime('1970-01-01'))
+        )
+      )
+    ORDER BY COALESCE(approval_log.id, 0) DESC, datetime(s.updated_at) DESC, s.id DESC
+    LIMIT 1`, [tgId, tgId, tgId]);
+}
+
+async function releaseDiceAfterUnconsumedApproval(tgId, currentUser) {
+  const approvedSubmission = await getUnconsumedApprovedSubmission(tgId);
+  if (!approvedSubmission) return null;
+
+  const hadLockedState = Number(currentUser.dice_frozen || 0) === 1
+    || (currentUser.pending_lucky_cell !== null && currentUser.pending_lucky_cell !== undefined);
+  const staleUpdate = await run(`UPDATE submissions
+    SET resubmission_required = 1,
+      admin_comment = CASE
+        WHEN COALESCE(admin_comment, '') = '' THEN 'Скрыто автоматически: после одобренной работы игроку открыт следующий бросок.'
+        ELSE admin_comment
+      END,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE tg_id = ?
+      AND status IN ('pending', 'rejected')
+      AND COALESCE(resubmission_required, 0) = 0
+      AND id <> ?
+      AND datetime(created_at) <= datetime(?)`, [tgId, approvedSubmission.id, approvedSubmission.updated_at]);
+
+  if (!hadLockedState && Number(staleUpdate.changes || 0) === 0) return null;
+  await run('UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+  await logPlayerAction(tgId, 'dice_unlocked_after_approval', 'Кубик автоматически открыт после одобренной работы; зависшее текущее задание скрыто.', {
+    cell: approvedSubmission.cell,
+    taskId: approvedSubmission.task_id,
+    submissionId: approvedSubmission.id
+  });
+  return { ...currentUser, dice_frozen: 0, pending_lucky_cell: null };
+}
+
 
 async function restoreFrozenDiceFromActiveSubmissions() {
   await run(`UPDATE users
@@ -915,6 +970,8 @@ function getSubmissionProgressStatus(submission) {
 async function reconcileDiceLock(tgId, user = null) {
   const currentUser = user || await get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
   if (!currentUser) return { user: null, activeSubmission: null };
+  const releasedUser = await releaseDiceAfterUnconsumedApproval(tgId, currentUser);
+  if (releasedUser) return { user: releasedUser, activeSubmission: null };
   const activeSubmission = await getActiveSubmission(tgId);
   const hasPendingLucky = currentUser.pending_lucky_cell !== null && currentUser.pending_lucky_cell !== undefined;
   if (!activeSubmission && !hasPendingLucky && Number(currentUser.dice_frozen || 0) === 1) {
@@ -1017,6 +1074,11 @@ async function approveSubmissionSideEffects(submission, source = 'admin') {
     eventType: source === 'auto' ? 'auto_approve_submission' : 'admin_approve_submission',
     tgId: userAfterApproval.tg_id,
     ticketNumber: issuedTickets[0].ticket_number
+  });
+  await logPlayerAction(submission.tg_id, source === 'auto' ? 'submission_auto_approved' : 'submission_approved', source === 'auto' ? 'Работа автоматически одобрена, кубик снова доступен.' : 'Модератор одобрил работу, кубик снова доступен.', {
+    cell: submission.cell,
+    taskId: submission.task_id,
+    submissionId: submission.id
   });
   await addApprovalNewsEvents(userAfterApproval, issuedTickets);
   return { issuedTickets, userAfterApproval, finishedNow, finishSummary: finishedNow ? await getFinishSummary(submission.tg_id) : null };
@@ -2044,9 +2106,19 @@ app.post('/api/admin/reset-dice', async (req, res, next) => {
     await requireAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
     const active = await getActiveSubmission(tgId);
-    if (active) throw Object.assign(new Error('Нельзя разморозить кубик: у игрока есть незавершенное или непроверенное задание'), { status: 400 });
+    if (active) {
+      await run(`UPDATE submissions
+        SET resubmission_required = 1,
+          admin_comment = CASE
+            WHEN COALESCE(admin_comment, '') = '' THEN 'Скрыто администратором при разморозке кубика.'
+            ELSE admin_comment
+          END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`, [active.id]);
+    }
     const result = await run('UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
+    await logPlayerAction(tgId, 'admin_reset_dice', 'Администратор разморозил кубик; следующий бросок доступен сразу.', { submissionId: active?.id || null, actorTgId: req.body.admin_tg_id });
     res.json({ ok: true });
   } catch (error) {
     next(error);
