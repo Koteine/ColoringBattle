@@ -195,6 +195,8 @@
     .archive-toggle { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 14px; border-radius: 22px; background: rgba(255,255,255,.56); box-shadow: none; text-align: left; }
     .archive-toggle::before { content: '▶'; margin-right: 8px; transition: transform .22s ease; }
     .archive-accordion.open > .archive-toggle::before { transform: rotate(90deg); }
+    .revoked-ticket .archive-toggle { filter: grayscale(1); background: linear-gradient(135deg, #d7d7d7, #9f9f9f) !important; color: #4a4a4a; }
+    .revoked-ticket { opacity: .82; }
     .archive-panel { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .28s ease; }
     .archive-accordion.open > .archive-panel { grid-template-rows: 1fr; }
     .archive-inner { min-height: 0; overflow: hidden; padding: 0 12px; display: grid; gap: 10px; }
@@ -288,6 +290,8 @@
     .scratch-prize .coin { width: 82px; height: 82px; border-radius: 50%; display: grid; place-items: center; font-size: 46px; background: radial-gradient(circle at 30% 25%, #fff8c4, #ffd166 48%, #c78300 100%); box-shadow: inset 0 -10px 16px rgba(132,79,0,.28), 0 14px 36px rgba(198,134,0,.3); transform: scale(.86); opacity: .75; transition: transform .35s ease, opacity .35s ease; }
     .scratch-card.won .coin { transform: scale(1.08); opacity: 1; animation: coinPop .72s ease; }
     .scratch-card.lost .scratch-prize { font-size: 44px; }
+    .scratch-card.revoked-ticket { filter: grayscale(1); background: linear-gradient(145deg, #eeeeee, #cfcfcf); }
+    .scratch-card.revoked-ticket .scratch-prize { font-size: 20px; color: #555; padding: 16px; text-align: center; }
     .scratch-card canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
     .scratch-label { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 2; padding: 8px 10px; border-radius: 999px; text-align: center; font-weight: 950; background: rgba(255,255,255,.82); border: 1px solid var(--line); pointer-events: none; }
     .scratch-card.revealed canvas, .scratch-card.revealed .scratch-label { opacity: 0; pointer-events: none; transition: opacity .35s ease; }

@@ -157,11 +157,22 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
     assert.equal(paletteAfterApproval.tickets[0].file_url, `/uploads/${paletteAfterApproval.tickets[0].source}`);
     assert.equal(paletteAfterApproval.tickets[0].image_url, paletteAfterApproval.tickets[0].file_url);
 
+    await jsonRequest(server.baseUrl, '/api/admin/remove-ticket', {
+      method: 'POST',
+      body: JSON.stringify({ admin_tg_id: '341995937', ticket_number: paletteAfterApproval.tickets[0].ticket_number, admin_comment: 'тестовая причина' })
+    });
+    const paletteAfterRevoke = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
+    assert.equal(paletteAfterRevoke.tickets.length, 1);
+    assert.equal(paletteAfterRevoke.tickets[0].status, 'revoked');
+    assert.equal(paletteAfterRevoke.tickets[0].revoke_comment, 'тестовая причина');
+
     await dbRun(`INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, status, created_at, updated_at)
       VALUES ('200', 999, 1, 'Зависшее старое задание', 'pending', datetime('now', '-1 day'), datetime('now', '-1 day'))`);
     const fixedStaleTask = await jsonRequest(server.baseUrl, '/api/me/200?username=player');
-    assert.equal(fixedStaleTask.user.dice_frozen, 0);
-    assert.equal(fixedStaleTask.activeSubmission, null);
+    assert.equal(fixedStaleTask.user.dice_frozen, 1);
+    assert.equal(fixedStaleTask.activeSubmission.text_task, 'Зависшее старое задание');
+    await dbRun("DELETE FROM submissions WHERE tg_id = '200' AND cell = 999");
+    await dbRun("UPDATE users SET dice_frozen = 0 WHERE tg_id = '200'");
 
     const workId = paletteAfterApproval.tickets[0].submission_id;
     const ownerWorkDetails = await jsonRequest(server.baseUrl, `/api/work-details/${workId}?viewer_tg_id=200`);
@@ -237,7 +248,7 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
 
     const scratch = await jsonRequest(server.baseUrl, '/api/raffle/scratch-ticket', {
       method: 'POST',
-      body: JSON.stringify({ tg_id: '200', ticket_number: checkAccumulated.tickets[0].ticket_number })
+      body: JSON.stringify({ tg_id: '200', ticket_number: checkAccumulated.tickets[1].ticket_number })
     });
     assert.equal(scratch.ok, true);
     assert.equal(scratch.result, 'win');
@@ -264,11 +275,14 @@ test('approval, roll, image submit, polling status and admin approval flow', asy
 
     await jsonRequest(server.baseUrl, '/api/admin/remove-ticket', {
       method: 'POST',
-      body: JSON.stringify({ admin_tg_id: '341995937', ticket_number: grant.ticket.ticket_number })
+      body: JSON.stringify({ admin_tg_id: '341995937', ticket_number: grant.ticket.ticket_number, admin_comment: 'ручная корректировка' })
     });
 
     const registryAfterRemoval = await jsonRequest(server.baseUrl, '/api/admin/tickets?admin_tg_id=341995937');
-    assert.equal(registryAfterRemoval.tickets.length, 2);
+    assert.equal(registryAfterRemoval.tickets.length, 3);
+    const revokedTicket = registryAfterRemoval.tickets.find((ticket) => ticket.ticket_number === grant.ticket.ticket_number);
+    assert.equal(revokedTicket.status, 'revoked');
+    assert.equal(revokedTicket.revoke_comment, 'ручная корректировка');
 
     await jsonRequest(server.baseUrl, '/api/apply', {
       method: 'POST',
