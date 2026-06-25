@@ -282,17 +282,6 @@ async function renderWorkArchive() {
     playerNode.innerHTML = `
       <button type="button" class="profile-link" data-profile-id="${escapeHtml(player.tg_id)}"><strong>${escapeHtml(username)}</strong> (ID: ${escapeHtml(player.tg_id)})</button>
       <p class="muted">Клетка: ${Number(player.current_cell || 0)} · кубик: ${escapeHtml(diceStatus)} · выполнено: ${Number(player.approved_submissions_count || 0)} · Красочек: ${Number(player.active_tickets_count || 0)}</p>`;
-    const worksWrap = document.createElement('div');
-    worksWrap.className = 'profile-works';
-    for (const work of player.works || []) {
-      const workNode = document.createElement('article');
-      workNode.className = 'item archive-accordion archive-work';
-      const beforeUrl = `/uploads/${encodeURIComponent(work.photo_before)}`;
-      const afterUrl = `/uploads/${encodeURIComponent(work.photo_after)}`;
-      workNode.innerHTML = `<button type="button" class="archive-toggle"><strong>Клетка ${escapeHtml(work.cell)} — ${escapeHtml(work.text_task)}</strong></button><div class="archive-panel"><div class="archive-inner archive-photos"><div class="comparison-grid"><a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a><a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a></div></div></div>`;
-      worksWrap.append(workNode);
-    }
-    playerNode.append(worksWrap);
     archiveInner.append(playerNode);
   }
   els.paletteGrid.append(archiveRoot);
@@ -800,11 +789,11 @@ function renderWorkDetails(work) {
   const privateDetails = canViewPrivate ? `
     <p><strong>Задание:</strong> ${escapeHtml(work.text_task || work.task || '')}</p>
     <p class="muted">Клетка: ${Number(work.cell || 0)} · статус: ${escapeHtml(work.status || '')}</p>
-  ` : '<p class="muted">Доступно только фото ПОСЛЕ. Задание и фото ДО скрыты.</p>';
+  ` : `<p class="muted">Клетка: ${Number(work.cell || 0)} · статус: ${escapeHtml(work.status || '')}</p>`;
   els.profileContent.innerHTML = `<h2>Красочка / работа #${Number(work.id || work.submission_id || 0)}</h2>
     ${privateDetails}
     <div class="comparison-grid ${canViewPrivate ? '' : 'after-only'}">
-      ${canViewPrivate ? (beforeUrl ? `<a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a>` : '<div class="empty-state">Фото ДО не загружено</div>') : ''}
+      ${beforeUrl ? `<a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a>` : '<div class="empty-state">Фото ДО не загружено</div>'}
       ${afterUrl ? `<a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a>` : '<div class="empty-state">Фото ПОСЛЕ не загружено</div>'}
     </div>`;
 }
@@ -825,12 +814,11 @@ async function openProfile(profileId) {
   const isAdminView = Boolean(profile.is_admin_view);
   const ownProfile = String(profile.tg_id) === String(tgId);
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
+  const adminToolsBlock = isAdminView ? `<div class="profile-admin-tools"><button class="ghost icon-button" type="button" data-player-log title="Лог действий">📜</button></div>` : '';
   const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div><h3>Назначить задание вручную</h3><form class="manual-task-form" data-manual-task-form><select name="task_id" required>${(adminTasks || []).map((task) => `<option value="${Number(task.id)}">#${Number(task.id)} — ${escapeHtml(task.text_task)}</option>`).join('')}</select><div class="actions"><button type="submit"${profile.active_task ? ' disabled' : ''}>Назначить</button></div></form>` : '';
-  const worksBlock = `<h3>Сданные работы</h3><div class="profile-works">${works.map((work, index) => {
-    if (isAdminView) return `<button class="comparison-photo" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)} · задание #${Number(work.task_id || 0)}</strong>${work.photo_after ? `<img src="/uploads/${encodeURIComponent(work.photo_after)}" alt="Готовая работа">` : ''}</button>`;
-    return `<div class="item"><strong>Клетка ${Number(work.cell || 0)} · работа #${Number(work.id || 0)}</strong><p class="muted">Статус: ${escapeHtml(work.status || '')}</p>${ownProfile && Number(work.resubmission_required || 0) === 1 ? `<p class="notice">Ваша прошлая работа (№${Number(work.task_id || 0)}) отклонена. Комментарий: ${escapeHtml(work.admin_comment || '')}</p><button type="button" data-resubmit-id="${Number(work.id || 0)}">Загрузить заново</button>` : ''}</div>`;
-  }).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div>`;
-  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2><p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${ticketsBlock}${worksBlock}`;
+  const worksBlock = `<h3>Сданные работы</h3><div class="work-cube-grid">${works.map((work, index) => `<button class="work-cube" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)}</strong><small>работа #${Number(work.id || 0)}</small></button>`).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div><div id="profileWorkDetails" class="profile-work-details"></div>`;
+  const emergencyBlock = isAdminView ? `<div class="profile-emergency"><button class="danger" type="button" data-defibrillate>⚙️</button></div>` : '';
+  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2>${adminToolsBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
 
   els.profileContent.querySelector('[data-manual-task-form]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -853,14 +841,55 @@ async function openProfile(profileId) {
   els.profileContent.querySelectorAll('[data-profile-work]').forEach((button) => {
     button.addEventListener('click', () => {
       const work = works[Number(button.dataset.profileWork)];
-      if (work?.id) openWorkDetails(work.id).catch((error) => showToast(error.message));
+      if (work?.id) renderProfileWorkInline(work, isAdminView, ownProfile);
     });
   });
+  els.profileContent.querySelector('[data-player-log]')?.addEventListener('click', () => openPlayerLog(profile.tg_id).catch((error) => showToast(error.message)));
+  els.profileContent.querySelector('[data-defibrillate]')?.addEventListener('click', () => defibrillatePlayer(profile.tg_id).catch((error) => showToast(error.message)));
   els.profileContent.querySelectorAll('[data-resubmit-id]').forEach((button) => {
     button.addEventListener('click', () => uploadResubmission(button.dataset.resubmitId).catch((error) => showToast(error.message)));
   });
 }
 
+
+function renderProfileWorkInline(work, isAdminView, ownProfile) {
+  const target = document.getElementById('profileWorkDetails');
+  if (!target) return;
+  const beforeUrl = work.photo_before ? `/uploads/${encodeURIComponent(work.photo_before)}` : '';
+  const afterUrl = work.photo_after ? `/uploads/${encodeURIComponent(work.photo_after)}` : '';
+  target.innerHTML = `<article class="item expanded-work"><h4>Клетка ${Number(work.cell || 0)}</h4>
+    ${isAdminView ? `<p><strong>Задание:</strong> ${escapeHtml(work.text_task || '')}</p>` : ''}
+    <div class="comparison-grid">
+      ${beforeUrl ? `<a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a>` : '<div class="empty-state">Фото ДО не загружено</div>'}
+      ${afterUrl ? `<a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a>` : '<div class="empty-state">Фото ПОСЛЕ не загружено</div>'}
+    </div>
+    ${ownProfile && Number(work.resubmission_required || 0) === 1 ? `<p class="notice">Работа отклонена. Комментарий: ${escapeHtml(work.admin_comment || '')}</p><button type="button" data-resubmit-id="${Number(work.id || 0)}">Загрузить заново</button>` : ''}
+  </article>`;
+  target.querySelector('[data-resubmit-id]')?.addEventListener('click', (event) => uploadResubmission(event.currentTarget.dataset.resubmitId).catch((error) => showToast(error.message)));
+}
+
+async function openPlayerLog(profileId) {
+  const logWindow = window.open('', `_blank`);
+  if (!logWindow) return showToast('Браузер заблокировал новое окно');
+  logWindow.document.write('<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Лог игрока</title><style>body{font-family:system-ui;margin:0;padding:20px;background:#fff7fb;color:#37213f}.close{position:fixed;right:16px;top:12px;border:0;border-radius:999px;padding:10px 14px;font-weight:900;background:#ffafcc}li{margin:10px 0;padding:10px;border:1px solid #ead7ef;border-radius:14px;background:#fff}.muted{color:#7b6b83}</style></head><body><button class="close" onclick="window.close()">×</button><main id="root">Загружаем лог...</main></body></html>');
+  const data = await api(`/api/admin/player-log/${encodeURIComponent(profileId)}?admin_tg_id=${encodeURIComponent(tgId)}`);
+  const rows = [];
+  rows.push(`<li><strong>Текущий статус:</strong> клетка ${Number(data.user?.current_cell || 0)}, ${data.current_status?.active_submission ? `активное задание #${Number(data.current_status.active_submission.task_id || 0)}` : 'активного задания нет'}.</li>`);
+  for (const work of data.completed_works || []) rows.push(`<li><strong>Сданная работа:</strong> клетка ${Number(work.cell || 0)}, задание #${Number(work.task_id || 0)}, статус ${escapeHtml(work.status)}<br><span class="muted">${escapeHtml(work.updated_at || '')} · ДО: ${escapeHtml(work.photo_before || '—')} · ПОСЛЕ: ${escapeHtml(work.photo_after || '—')}</span></li>`);
+  for (const action of data.logged_actions || []) rows.push(`<li><strong>${escapeHtml(action.event_type)}:</strong> ${escapeHtml(action.message)}<br><span class="muted">${escapeHtml(action.created_at || '')}</span></li>`);
+  for (const reaction of data.reactions_given || []) rows.push(`<li><strong>Реакция поставлена:</strong> ${escapeHtml(reaction.reaction_type)} игроку ID ${escapeHtml(reaction.to_tg_id)}<br><span class="muted">${escapeHtml(reaction.reacted_at || '')}</span></li>`);
+  for (const reaction of data.reactions_received || []) rows.push(`<li><strong>Реакция получена:</strong> ${escapeHtml(reaction.reaction_type)} от ID ${escapeHtml(reaction.from_tg_id)}<br><span class="muted">${escapeHtml(reaction.reacted_at || '')}</span></li>`);
+  for (const duel of data.duels || []) rows.push(`<li><strong>Пятнашки #${Number(duel.id)}:</strong> ${escapeHtml(duel.status)} · ${escapeHtml(duel.challenger_tg_id)} vs ${escapeHtml(duel.opponent_tg_id)}<br><span class="muted">${escapeHtml(duel.updated_at || duel.created_at || '')}</span></li>`);
+  logWindow.document.getElementById('root').innerHTML = `<h1>📜 Лог ${escapeHtml(data.user?.username || data.user?.tg_id || profileId)}</h1><ul>${rows.join('') || '<li>Записей пока нет.</li>'}</ul>`;
+}
+
+async function defibrillatePlayer(profileId) {
+  if (!window.confirm('Точно сбросить статус игрока?')) return;
+  await api('/api/admin/defibrillate-player', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ admin_tg_id: tgId, tg_id: profileId }) });
+  showToast('Статус игрока сброшен, данные сохранены');
+  await openProfile(profileId);
+  await loadAdminPanel().catch(() => {});
+}
 
 async function uploadResubmission(submissionId) {
   const input = document.createElement('input');

@@ -13,6 +13,7 @@ const PORT = process.env.PORT || 8080;
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DB_PATH = path.join(DATA_DIR, 'game.db');
+const LEGACY_DB_PATH = path.join(__dirname, 'game.db');
 const OWNER_TG_ID = '341995937';
 const ADMIN_TG_IDS = new Set([
   OWNER_TG_ID,
@@ -125,6 +126,7 @@ async function initDb() {
   await ensureUserReactionColumns();
   await ensureUserActivityColumns();
   await ensureReactionLogsTable();
+  await ensurePlayerActionLogsTable();
   await ensureMapConfigTable();
   await ensureAccumulatingTicketsTable();
   await ensureRaffleConfigTable();
@@ -143,6 +145,7 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_news_events_tg_id ON news_events(tg_id, id)');
   await run('CREATE INDEX IF NOT EXISTS idx_puzzle_duels_players_status ON puzzle_duels(challenger_tg_id, opponent_tg_id, status)');
   await run('CREATE INDEX IF NOT EXISTS idx_reaction_logs_limit ON reaction_logs(from_tg_id, to_tg_id, reacted_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_player_action_logs_tg_id ON player_action_logs(tg_id, created_at, id)');
 
   await run('DELETE FROM users WHERE tg_id = 391995937');
   await restoreFrozenDiceFromActiveSubmissions();
@@ -282,6 +285,40 @@ async function ensureReactionLogsTable() {
     reaction_type TEXT,
     reacted_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+}
+
+async function ensurePlayerActionLogsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS player_action_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    cell INTEGER,
+    task_id INTEGER,
+    submission_id INTEGER,
+    actor_tg_id TEXT DEFAULT '',
+    meta_json TEXT DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+}
+
+async function logPlayerAction(tgId, eventType, message, extra = {}) {
+  const normalizedTgId = String(tgId || '').trim();
+  const normalizedMessage = String(message || '').trim();
+  if (!normalizedTgId || !normalizedMessage) return null;
+  const meta = extra.meta ? JSON.stringify(extra.meta) : '';
+  return run(`INSERT INTO player_action_logs (tg_id, event_type, message, cell, task_id, submission_id, actor_tg_id, meta_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+    normalizedTgId,
+    String(eventType || 'system'),
+    normalizedMessage,
+    extra.cell ?? null,
+    extra.taskId ?? null,
+    extra.submissionId ?? null,
+    String(extra.actorTgId || ''),
+    meta
+  ]).catch((error) => console.error('Player action log failed:', error));
 }
 
 async function ensureUserLuckyColumn() {
@@ -1235,12 +1272,14 @@ app.get('/api/work-details/:workId', async (req, res, next) => {
       can_view_private: canViewPrivate
     };
 
+    details.photo_before = work.photo_before || '';
+    if (canViewPrivate && work.photo_before) {
+      details.image_before = `/uploads/${work.photo_before}`;
+    }
     if (canViewPrivate) {
       details.task_id = work.task_id;
       details.text_task = work.text_task;
       details.task = work.text_task;
-      details.image_before = work.photo_before ? `/uploads/${work.photo_before}` : '';
-      details.photo_before = work.photo_before || '';
     }
 
     res.json({ work: details });
@@ -1286,6 +1325,8 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
       task_id: work.task_id,
       cell: work.cell,
       status: work.status,
+      photo_before: work.photo_before || '',
+      photo_after: work.photo_after || '',
       admin_comment: isOwnProfile && Number(work.resubmission_required || 0) === 1 ? work.admin_comment : '',
       resubmission_required: isOwnProfile ? Number(work.resubmission_required || 0) : 0
     }));
@@ -1331,6 +1372,8 @@ app.post('/api/game/react', async (req, res, next) => {
     const column = reactionType === 'heart' ? 'reactions_hearts' : 'reactions_coffee';
     await run(`UPDATE users SET ${column} = COALESCE(${column}, 0) + 1 WHERE tg_id = ?`, [toTgId]);
     await run('INSERT INTO reaction_logs (from_tg_id, to_tg_id, reaction_type) VALUES (?, ?, ?)', [fromTgId, toTgId, reactionType]);
+    await logPlayerAction(fromTgId, 'reaction_given', `Поставлена реакция ${reactionType === 'heart' ? '💖' : '☕'} игроку ${formatUserHandle(toUser.username, toUser.tg_id)}.`, { actorTgId: fromTgId, meta: { to_tg_id: toTgId, reaction_type: reactionType } });
+    await logPlayerAction(toTgId, 'reaction_received', `Получена реакция ${reactionType === 'heart' ? '💖' : '☕'} от ${formatUserHandle(fromUser.username, fromUser.tg_id)}.`, { actorTgId: fromTgId, meta: { from_tg_id: fromTgId, reaction_type: reactionType } });
 
     const updatedUser = await get('SELECT tg_id, username, current_cell, reactions_hearts, reactions_coffee FROM users WHERE tg_id = ?', [toTgId]);
     const newCount = Number(updatedUser?.[column] || 0);
@@ -1460,6 +1503,7 @@ async function createPendingSubmissionForCell(tgId, cell) {
   const task = await pickUnusedTask(tgId);
   if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
   const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, ?)', [tgId, cell, task.id, 'pending']);
+  await logPlayerAction(tgId, 'task_assigned', `Получено задание #${task.id} на клетке ${cell}: ${task.text_task}`, { cell, taskId: task.id, submissionId: submission.id });
   return { task, submission_id: submission.id };
 }
 
@@ -1503,7 +1547,9 @@ app.post('/api/roll', async (req, res, next) => {
 
     const rawDice = rollD6();
     const dice = Number(user.next_roll_halved) === 1 ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice;
-    res.json(await applyMoveAndCreateTask(tgId, user, dice, { raw_dice: rawDice, roll_halved: Number(user.next_roll_halved) === 1 }));
+    const result = await applyMoveAndCreateTask(tgId, user, dice, { raw_dice: rawDice, roll_halved: Number(user.next_roll_halved) === 1 });
+    await logPlayerAction(tgId, 'dice_roll', `Бросок кубика: выпало ${dice}. Игрок встал на клетку ${result.current_cell}.`, { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: Number(user.next_roll_halved) === 1, cell_type: result.cell_type, landed_cell: result.landed_cell } });
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -1548,6 +1594,8 @@ app.post('/api/duels/challenge', async (req, res, next) => {
     if (existing) throw Object.assign(new Error('У одного из игроков уже есть активная дуэль'), { status: 400 });
     const result = await run(`INSERT INTO puzzle_duels (challenger_tg_id, opponent_tg_id, status) VALUES (?, ?, 'pending')`, [tgId, opponentId]);
     await run('UPDATE users SET can_challenge = 0, duel_challenges_used = COALESCE(duel_challenges_used, 0) + 1 WHERE tg_id = ?', [tgId]);
+    await logPlayerAction(tgId, 'puzzle_duel_challenge_sent', `Отправлен вызов в пятнашки игроку ${formatUserHandle(opponent.username, opponent.tg_id)}.`, { meta: { duel_id: result.id, opponent_tg_id: opponentId } });
+    await logPlayerAction(opponentId, 'puzzle_duel_challenge_received', `Получен вызов в пятнашки от ${formatUserHandle(user.username, user.tg_id)}.`, { meta: { duel_id: result.id, challenger_tg_id: tgId } });
     await run('UPDATE users SET can_accept = CASE WHEN COALESCE(duel_accepts_used, 0) + 1 >= 2 THEN 0 ELSE 1 END, duel_accepts_used = COALESCE(duel_accepts_used, 0) + 1 WHERE tg_id = ?', [opponentId]);
     await addNewsEvent(`🧩 ${formatUserHandle(user.username, user.tg_id)} вызывает ${formatUserHandle(opponent.username, opponent.tg_id)} на дуэль в пятнашки!`, { eventType: 'puzzle_duel_challenge', tgId: opponentId });
     res.json({ ok: true, duel: await get('SELECT * FROM puzzle_duels WHERE id = ?', [result.id]) });
@@ -1563,6 +1611,7 @@ app.post('/api/duels/decline', async (req, res, next) => {
     if (!duel) throw Object.assign(new Error('Дуэль не найдена'), { status: 404 });
     if (duel.opponent_tg_id !== tgId) throw Object.assign(new Error('Отклонить может только соперник'), { status: 403 });
     const ticket = await finishPuzzleDuel(duel, duel.challenger_tg_id, duel.opponent_tg_id, 'declined');
+    await logPlayerAction(tgId, 'puzzle_duel_declined', `Отклонен вызов в пятнашки #${duelId}.`, { meta: { duel_id: duelId } });
     res.json({ ok: true, ticket });
   } catch (error) { next(error); }
 });
@@ -1579,6 +1628,7 @@ app.post('/api/duels/submit', async (req, res, next) => {
     const field = tgId === duel.challenger_tg_id ? 'challenger_time' : 'opponent_time';
     if (duel[field] !== null && duel[field] !== undefined) throw Object.assign(new Error('Ваш результат уже отправлен'), { status: 400 });
     await run(`UPDATE puzzle_duels SET ${field} = ?, status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [seconds, duelId]);
+    await logPlayerAction(tgId, 'puzzle_duel_result', `Результат пятнашек #${duelId}: ${seconds} сек.`, { meta: { duel_id: duelId, seconds } });
     const updated = await get('SELECT * FROM puzzle_duels WHERE id = ?', [duelId]);
     if (updated.challenger_time !== null && updated.opponent_time !== null) {
       const challengerWins = Number(updated.challenger_time) <= Number(updated.opponent_time);
@@ -1723,6 +1773,7 @@ app.post('/api/submit', upload.fields([
         WHERE id = ?`, [photoAfter.filename, photoAfter.filename, active.id]);
     }
 
+    await logPlayerAction(tgId, uploadedStage === 'before' ? 'photo_before_uploaded' : 'photo_after_uploaded', uploadedStage === 'before' ? 'Отправлено фото ДО.' : 'Отправлено фото ПОСЛЕ.', { cell: active.cell, taskId: active.task_id, submissionId: active.id, meta: { filename } });
     const submission = await getActiveSubmission(tgId);
     res.json({ ok: true, uploaded_stage: uploadedStage, image_name: filename, submission });
   } catch (error) {
@@ -1934,6 +1985,61 @@ app.get('/api/admin/work-archive', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+
+app.get('/api/admin/player-log/:tgId', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
+    const targetTgId = normalizeTgId(req.params.tgId);
+    const user = await get('SELECT tg_id, username, current_cell, dice_frozen, pending_lucky_cell, finished_at FROM users WHERE tg_id = ?', [targetTgId]);
+    if (!user) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
+    const [completedWorks, activeSubmission, loggedActions, reactionsGiven, reactionsReceived, duels] = await Promise.all([
+      all(`SELECT s.id, s.cell, s.task_id, s.photo_before, s.photo_after, s.status, s.updated_at, t.text_task
+        FROM submissions s JOIN tasks t ON t.id = s.task_id
+        WHERE s.tg_id = ? AND s.status IN ('approved', 'auto_approved')
+        ORDER BY s.updated_at DESC, s.id DESC`, [targetTgId]),
+      getActiveSubmission(targetTgId),
+      all(`SELECT id, event_type, message, cell, task_id, submission_id, actor_tg_id, meta_json, created_at
+        FROM player_action_logs WHERE tg_id = ? ORDER BY datetime(created_at) DESC, id DESC LIMIT 200`, [targetTgId]),
+      all(`SELECT reaction_type, to_tg_id, reacted_at FROM reaction_logs WHERE from_tg_id = ? ORDER BY reacted_at DESC LIMIT 50`, [targetTgId]),
+      all(`SELECT reaction_type, from_tg_id, reacted_at FROM reaction_logs WHERE to_tg_id = ? ORDER BY reacted_at DESC LIMIT 50`, [targetTgId]),
+      all(`SELECT id, challenger_tg_id, opponent_tg_id, challenger_time, opponent_time, status, winner_tg_id, loser_tg_id, created_at, updated_at FROM puzzle_duels WHERE challenger_tg_id = ? OR opponent_tg_id = ? ORDER BY updated_at DESC, id DESC LIMIT 50`, [targetTgId, targetTgId])
+    ]);
+    res.json({ user, current_status: { active_submission: activeSubmission || null, dice_frozen: Number(user.dice_frozen || 0), pending_lucky_cell: user.pending_lucky_cell, finished_at: user.finished_at || '' }, completed_works: completedWorks, logged_actions: loggedActions, reactions_given: reactionsGiven, reactions_received: reactionsReceived, duels });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/defibrillate-player', async (req, res, next) => {
+  try {
+    await requireAdmin(req.body.admin_tg_id);
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    const active = await getActiveSubmission(tgId);
+    await run('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      if (active) {
+        await run(`UPDATE submissions
+          SET photo_before = NULL, photo_after = NULL, image_name = NULL, status = 'pending', admin_comment = '', resubmission_required = 0, resubmission_notice_shown = 0, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?`, [active.id]);
+        await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+      } else {
+        const task = await pickUnusedTask(tgId);
+        if (!task) throw Object.assign(new Error('В базе нет заданий'), { status: 500 });
+        const currentCell = Math.max(0, Math.min(100, Number(user.current_cell || 0)));
+        const created = await run("INSERT INTO submissions (tg_id, cell, task_id, status) VALUES (?, ?, ?, 'pending')", [tgId, currentCell, task.id]);
+        await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+        await logPlayerAction(tgId, 'task_assigned', `После аварийного сброса выдано чистое задание #${task.id} на текущей клетке ${currentCell}: ${task.text_task}`, { cell: currentCell, taskId: task.id, submissionId: created.id, actorTgId: req.body.admin_tg_id });
+      }
+      await run('COMMIT');
+    } catch (error) {
+      await run('ROLLBACK').catch(() => {});
+      throw error;
+    }
+    await logPlayerAction(tgId, 'admin_defibrillate', 'Администратор сбросил зависший статус: клетка, красочки и история работ сохранены; фото текущего задания очищены.', { cell: user.current_cell, submissionId: active?.id || null, actorTgId: req.body.admin_tg_id });
+    res.json({ ok: true, active_submission: await getActiveSubmission(tgId) });
+  } catch (error) { next(error); }
 });
 
 app.post('/api/admin/toggle-moderator', async (req, res, next) => {
