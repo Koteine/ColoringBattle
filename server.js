@@ -1865,6 +1865,13 @@ app.post('/api/tarot', async (req, res, next) => {
     await run('UPDATE users SET has_used_tarot = 1 WHERE tg_id = ?', [tgId]);
 
     const tarotExtra = { tarot_card: selectedCard.title, tarot_effect: selectedCard.id, tarot_deck: deck, selected_index: selectedIndex };
+    const tarotMessage = selectedCard.id === 'double_roll'
+      ? `Таро: открыта карта «${selectedCard.title}» — бафф двойного броска.`
+      : selectedCard.id === 'trap_immunity'
+        ? `Таро: открыта карта «${selectedCard.title}» — бафф иммунитета от ловушки.`
+        : `Таро: открыта карта «${selectedCard.title}» — ловушка, следующий бросок делится на 2.`;
+    await logPlayerAction(tgId, 'tarot_played', tarotMessage, { meta: { tarot_card: selectedCard.title, tarot_effect: selectedCard.id, selected_index: selectedIndex } });
+    await addNewsEvent(`🃏 ${tarotMessage}`, { eventType: 'tarot_played', tgId });
     if (selectedCard.id === 'double_roll') {
       const dice_rolls = [rollD6(), rollD6()];
       const dice = dice_rolls[0] + dice_rolls[1];
@@ -1958,10 +1965,6 @@ app.post('/api/submit', upload.fields([
 
     const active = await getActiveSubmission(tgId);
     if (!active) throw Object.assign(new Error('Сначала бросьте кубик и получите задание'), { status: 400 });
-    if (active.status === 'pending' && active.photo_before && active.photo_after) {
-      throw Object.assign(new Error('Пара фото уже ожидает проверки'), { status: 400 });
-    }
-
     let uploadedStage = 'before';
     let filename = photoBefore?.filename;
 
