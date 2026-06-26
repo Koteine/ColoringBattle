@@ -442,6 +442,22 @@ function configureSubmitStep({ fieldName, title, hint, buttonText }) {
   els.submitForm.classList.remove('hidden');
 }
 
+function ensureReconsiderButtons(submission) {
+  let box = document.getElementById('reconsiderPhotoActions');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'reconsiderPhotoActions';
+    box.className = 'actions reconsider-actions';
+    els.submitForm?.insertAdjacentElement('afterend', box);
+    box.addEventListener('click', handleReconsiderClick);
+  }
+  const buttons = [];
+  if (submission?.photo_before) buttons.push(['photo_before', 'Передумала: заменить Фото ДО']);
+  if (submission?.photo_after) buttons.push(['photo_after', 'Передумала: заменить Фото ПОСЛЕ']);
+  box.innerHTML = buttons.map(([field, label]) => `<button class="ghost tiny-reconsider" type="button" data-reconsider-field="${field}">${label}</button>`).join('');
+  box.classList.toggle('hidden', buttons.length === 0);
+}
+
 
 function shouldShowFinishModal(summary) {
   return summary?.finished && !summary.modal_shown && !finishModalOpen;
@@ -489,6 +505,7 @@ function renderTask(submission) {
   els.luckyChoice.classList.add('hidden');
   els.submitBtn.disabled = false;
   els.taskStatus.textContent = '';
+  ensureReconsiderButtons(submission);
 
   if (!submission) {
     els.taskText.textContent = 'Бросьте кубик, чтобы получить задание.';
@@ -599,8 +616,13 @@ function render() {
   const finished = Boolean(state.finish_summary?.finished) || Number(user.current_cell) >= 100;
   els.rollBtn.disabled = roleBlocked || frozen || finished || isRolling;
   els.rollBtn.classList.toggle('frozen', roleBlocked || frozen || finished);
-  setTarotDisabled(roleBlocked || frozen || finished || user.has_used_tarot === true || Number(user.has_used_tarot) === 1);
-  if (els.tarotBtn) els.tarotBtn.title = (user.has_used_tarot === true || Number(user.has_used_tarot) === 1) ? 'Карта удачи уже использована' : 'Карта удачи';
+  setTarotDisabled(roleBlocked || finished || user.has_used_tarot === true || Number(user.has_used_tarot) === 1);
+  if (els.tarotBtn) {
+    els.tarotBtn.dataset.tarotUnavailable = frozen ? '1' : '0';
+    els.tarotBtn.title = frozen
+      ? 'Разложить таро можно только до броска кубика'
+      : (user.has_used_tarot === true || Number(user.has_used_tarot) === 1) ? 'Карта удачи уже использована' : 'Карта удачи';
+  }
   els.diceHint.textContent = finished
     ? 'Игра завершена, ожидай розыгрыша.'
     : frozen
@@ -623,6 +645,7 @@ async function loadState() {
   state = await api(`/api/me/${encodeURIComponent(tgId)}?username=${encodeURIComponent(tgUsername)}`);
   lastSubmissionStatus = state.activeSubmission?.status || lastSubmissionStatus;
   render();
+  checkLatestDuelOutcomeNotice().catch(() => {});
   startPolling();
 }
 
@@ -723,6 +746,8 @@ function setTarotDisabled(disabled) {
 function renderTarotCards() {
   if (!els.tarotCards) return;
   els.tarotCards.innerHTML = '';
+  document.getElementById('tarotResultText')?.remove();
+  if (els.tarotCancelBtn) els.tarotCancelBtn.textContent = 'Отмена';
   for (let index = 0; index < 3; index += 1) {
     const card = document.createElement('button');
     card.className = 'tarot-card';
@@ -735,6 +760,10 @@ function renderTarotCards() {
 }
 
 function openTarotModal() {
+  if (els.tarotBtn?.dataset.tarotUnavailable === '1') {
+    showToast('Сыграть в таро можно только до того, как бросаешь кубик.');
+    return;
+  }
   if (els.tarotBtn?.disabled) return;
   renderTarotCards();
   els.tarotModal?.classList.remove('hidden');
@@ -742,6 +771,24 @@ function openTarotModal() {
 
 function closeTarotModal() {
   els.tarotModal?.classList.add('hidden');
+}
+
+function tarotResultText(result) {
+  if (result.tarot_effect === 'double_roll') return `🃏 ${result.tarot_card}: бафф — броски ${result.dice_rolls.join(' + ')} = ${result.dice}. Ты попала на клетку ${result.current_cell}.`;
+  if (result.tarot_effect === 'trap_immunity') return `🃏 ${result.tarot_card}: бафф — иммунитет от следующей ловушки активен.`;
+  return `🃏 ${result.tarot_card}: ловушка — следующий бросок будет делиться на 2.`;
+}
+
+function showTarotResult(text) {
+  let node = document.getElementById('tarotResultText');
+  if (!node) {
+    node = document.createElement('p');
+    node.id = 'tarotResultText';
+    node.className = 'tarot-picked-result';
+    els.tarotCards?.after(node);
+  }
+  node.textContent = text;
+  if (els.tarotCancelBtn) els.tarotCancelBtn.textContent = 'Закрыть';
 }
 
 function revealTarotDeck(deck = [], selectedIndex = 0) {
@@ -771,10 +818,9 @@ async function useTarot(selectedIndex, selectedCard) {
       body: JSON.stringify({ tg_id: tgId, selected_index: selectedIndex })
     });
     revealTarotDeck(result.tarot_deck, result.selected_index ?? selectedIndex);
-    if (result.tarot_effect === 'double_roll') showToast(`🃏 ${result.tarot_card}: броски ${result.dice_rolls.join(' + ')} = ${result.dice}. Клетка ${result.current_cell}.`);
-    else if (result.tarot_effect === 'trap_immunity') showToast(`🃏 ${result.tarot_card}: иммунитет от следующей ловушки активен.`);
-    else showToast(`🃏 ${result.tarot_card}: следующий бросок будет делиться на 2.`);
-    window.setTimeout(closeTarotModal, 2200);
+    const resultText = tarotResultText(result);
+    showToast(resultText, 6200);
+    showTarotResult(resultText);
     await loadState();
   } catch (error) {
     selectedCard?.classList.remove('flipped');
@@ -949,6 +995,31 @@ function closeConfirmModal(result = false) {
   pendingConfirmResolve = null;
 }
 
+function showDismissibleGameNotice(gameId, message) {
+  const key = `puzzle_notice_closed_${gameId || 'latest'}_${message.includes('выиг') ? 'win' : 'loss'}`;
+  if (window.localStorage.getItem(key) === '1') return;
+  document.querySelector('.game-result-notice')?.remove();
+  const notice = document.createElement('div');
+  notice.className = 'game-result-notice';
+  notice.innerHTML = `<button type="button" aria-label="Закрыть">×</button><strong>${escapeHtml(message)}</strong>`;
+  notice.querySelector('button').addEventListener('click', () => {
+    window.localStorage.setItem(key, '1');
+    notice.remove();
+  });
+  document.body.append(notice);
+}
+
+async function checkLatestDuelOutcomeNotice() {
+  if (!state?.user || !tgId) return;
+  const data = await api(`/api/notifications/${encodeURIComponent(state.user.tg_id || tgId)}?limit=10`);
+  const duel = (data.duels || []).find((item) => ['challenger_won', 'opponent_won', 'declined', 'expired'].includes(item.status) && (item.winner_tg_id || item.loser_tg_id));
+  if (!duel) return;
+  const won = String(duel.winner_tg_id || '') === String(tgId);
+  const lost = String(duel.loser_tg_id || '') === String(tgId);
+  if (!won && !lost) return;
+  showDismissibleGameNotice(duel.id, won ? '🧩 Вы выиграли пятнашки и получаете красочку! 🎉' : '🧩 Пятнашки закончились поражением. Вы всё равно умничка, повезёт в другой раз! ❤️');
+}
+
 async function openNotifications() {
   if (!state?.user || !els.notificationsModal) return;
   els.notificationsContent.innerHTML = '<div class="empty-state">Загружаем звоночки...</div>';
@@ -1055,7 +1126,7 @@ async function submitPuzzleResult() {
   puzzleTimer = null;
   if (result.ticket) {
     const won = result.duel?.winner_tg_id === String(tgId);
-    window.alert(won ? 'Вы выиграли и получаете красочку! 🎉' : 'Вы всё равно умничка, повезёт в другой раз! ❤️');
+    showDismissibleGameNotice(result.duel?.id, won ? '🧩 Вы выиграли пятнашки и получаете красочку! 🎉' : '🧩 Пятнашки закончились поражением. Вы всё равно умничка, повезёт в другой раз! ❤️');
   } else {
     showToast('Результат отправлен, ждём соперника.');
   }
@@ -1948,6 +2019,19 @@ els.luckyChoice.addEventListener('click', (event) => {
   if (button) chooseLuckyTask(button.dataset.luckyChoice).catch((error) => showToast(error.message));
 });
 els.submitForm.addEventListener('submit', submitWork);
+function handleReconsiderClick(event) {
+  const button = event.target.closest('[data-reconsider-field]');
+  if (!button) return;
+  const fieldName = button.dataset.reconsiderField;
+  const isBefore = fieldName === 'photo_before';
+  configureSubmitStep({
+    fieldName,
+    title: isBefore ? 'Заменить Фото ДО' : 'Заменить Фото ПОСЛЕ',
+    hint: isBefore ? 'Выберите новое Фото ДО. Если Фото ПОСЛЕ уже было отправлено, после замены ДО его нужно будет отправить заново.' : 'Выберите новое Фото ПОСЛЕ — администратор увидит последнюю отправленную версию.',
+    buttonText: isBefore ? 'Заменить Фото ДО' : 'Заменить Фото ПОСЛЕ'
+  });
+  els.workImage.click();
+}
 els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catch((error) => showToast(error.message)));
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
