@@ -1063,7 +1063,7 @@ async function getPlayerTickets(tgId) {
 let TRAP_CELLS = new Set([13, 26, 39, 52, 65, 78, 91]);
 let LUCKY_CELLS = new Set([7, 21, 35, 49, 63, 77, 88]);
 const LUCKY_TASK_OPTIONS = [
-  'Раскрасить что угодно',
+  'Раскрасить что угодно вне заданий',
   'Взять картинку формата менее А4'
 ];
 

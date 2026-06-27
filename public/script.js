@@ -44,6 +44,7 @@ const els = {
   taskActions: document.getElementById('taskActions'),
   rerollTaskBtn: document.getElementById('rerollTaskBtn'),
   luckyChoice: document.getElementById('luckyChoice'),
+  luckyChoiceActions: document.getElementById('luckyChoiceActions'),
   submitForm: document.getElementById('submitForm'),
   submitStepTitle: document.getElementById('submitStepTitle'),
   submitStepHint: document.getElementById('submitStepHint'),
@@ -560,6 +561,18 @@ function renderTask(submission) {
   }
 }
 
+function getLuckyOptions() {
+  const options = Array.isArray(state?.pendingLucky?.options) ? state.pendingLucky.options : [];
+  return options.length ? options : ['Раскрасить что угодно вне заданий', 'Взять картинку формата менее А4'];
+}
+
+function renderLuckyChoiceOptions() {
+  if (!els.luckyChoiceActions) return;
+  els.luckyChoiceActions.innerHTML = getLuckyOptions()
+    .map((option) => `<button class="success" type="button" data-lucky-choice="${escapeHtml(option)}">${escapeHtml(option)}</button>`)
+    .join('');
+}
+
 function render() {
   if (state?.needs_application || !state?.user) {
     showGate('welcome');
@@ -597,7 +610,8 @@ function render() {
   drawProgress(user.current_cell);
   if (!roleBlocked) renderTask(activeSubmission);
   if (!activeSubmission && state.pendingLucky) {
-    els.taskText.textContent = '🎉 Бонусная клетка! Выберите одно из двух условий.';
+    renderLuckyChoiceOptions();
+    els.taskText.textContent = `🎉 Бонусная клетка! Выберите одно из ${getLuckyOptions().length} условий.`;
     els.taskText.classList.remove('muted');
     els.taskStatus.textContent = `Клетка ${state.pendingLucky.cell}: после выбора откроется стандартная форма загрузки.`;
     els.luckyChoice.classList.remove('hidden');
