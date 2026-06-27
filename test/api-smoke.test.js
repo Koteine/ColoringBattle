@@ -425,24 +425,37 @@ test('lucky choices stay available per player even for reused bonus tasks', asyn
     const reset = await jsonRequest(server.baseUrl, '/api/admin/reset-round', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937' }) });
     const luckyCell = reset.lucky_cells[0];
 
-    for (const [tgId, username] of [['911', 'lucky_one'], ['912', 'lucky_two']]) {
+    for (const [tgId, username] of [['911', 'lucky_one'], ['912', 'lucky_two'], ['913', 'lucky_three'], ['914', 'lucky_four']]) {
       await jsonRequest(server.baseUrl, '/api/apply', { method: 'POST', body: JSON.stringify({ tg_id: tgId, username }) });
       await jsonRequest(server.baseUrl, '/api/admin/approve-user', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937', tg_id: tgId }) });
       await dbRun(`UPDATE users SET current_cell = ${luckyCell}, dice_frozen = 1, pending_lucky_cell = ${luckyCell} WHERE tg_id = '${tgId}'`);
     }
 
-    const first = await jsonRequest(server.baseUrl, '/api/lucky-choice', {
-      method: 'POST',
-      body: JSON.stringify({ tg_id: '911', choice: 'Раскрасить что угодно' })
-    });
-    assert.ok(first.task.id);
+    const state = await jsonRequest(server.baseUrl, '/api/me/911?username=lucky_one');
+    assert.deepEqual(state.pendingLucky.options, [
+      'Раскрасить что угодно вне заданий',
+      'Взять картинку формата менее А4'
+    ]);
 
-    const second = await jsonRequest(server.baseUrl, '/api/lucky-choice', {
-      method: 'POST',
-      body: JSON.stringify({ tg_id: '912', choice: 'Раскрасить что угодно' })
-    });
-    assert.ok(second.task.id);
-    assert.equal(second.task.id, first.task.id);
+    for (const [choice, firstTgId, secondTgId] of [
+      ['Раскрасить что угодно вне заданий', '911', '912'],
+      ['Взять картинку формата менее А4', '913', '914']
+    ]) {
+      const first = await jsonRequest(server.baseUrl, '/api/lucky-choice', {
+        method: 'POST',
+        body: JSON.stringify({ tg_id: firstTgId, choice })
+      });
+      assert.ok(first.task.id);
+      assert.equal(first.task.text_task, choice);
+
+      const second = await jsonRequest(server.baseUrl, '/api/lucky-choice', {
+        method: 'POST',
+        body: JSON.stringify({ tg_id: secondTgId, choice })
+      });
+      assert.ok(second.task.id);
+      assert.equal(second.task.id, first.task.id);
+      assert.equal(second.task.text_task, choice);
+    }
   } finally {
     await server.close();
   }
