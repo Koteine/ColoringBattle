@@ -716,6 +716,8 @@ async function rollDice() {
       showToast('✨ Магический щит сработал! Ловушка разрушена!');
     } else if (result.cell_type === 'trap') {
       showToast(`Ловушка! Выпало ${result.dice}, затем откат на ${result.trap_dice}. Новая клетка: ${result.current_cell}.`);
+    } else if (result.roll_doubled) {
+      showToast(`Рапунцель сработала: ${result.raw_dice} × 2 = ${result.dice}. Клетка ${result.current_cell}.`);
     } else if (result.roll_halved) {
       showToast(`Высохший маркер сработал: ${result.raw_dice} делится до ${result.dice}. Клетка ${result.current_cell}.`);
     } else if (result.cell_type === 'lucky') {
@@ -774,7 +776,7 @@ function closeTarotModal() {
 }
 
 function tarotResultText(result) {
-  if (result.tarot_effect === 'double_roll') return `🃏 ${result.tarot_card}: бафф — броски ${result.dice_rolls.join(' + ')} = ${result.dice}. Ты попала на клетку ${result.current_cell}.`;
+  if (result.tarot_effect === 'double_roll') return `🃏 ${result.tarot_card}: бафф — следующий бросок кубика обязательно умножится на 2.`;
   if (result.tarot_effect === 'trap_immunity') return `🃏 ${result.tarot_card}: бафф — иммунитет от следующей ловушки активен.`;
   return `🃏 ${result.tarot_card}: ловушка — следующий бросок будет делиться на 2.`;
 }
