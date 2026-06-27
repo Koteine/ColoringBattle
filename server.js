@@ -278,6 +278,9 @@ async function ensureUserTarotColumns() {
   if (!names.has('next_roll_halved')) {
     await run('ALTER TABLE users ADD COLUMN next_roll_halved INTEGER DEFAULT 0');
   }
+  if (!names.has('next_roll_doubled')) {
+    await run('ALTER TABLE users ADD COLUMN next_roll_doubled INTEGER DEFAULT 0');
+  }
 }
 
 async function ensureUserDuelColumns() {
@@ -1151,7 +1154,7 @@ function rollD6() {
 }
 
 const TAROT_CARDS = [
-  { id: 'double_roll', title: 'Золотая кисть Рапунцель', icon: '🖌️', kind: 'buff', description: 'Х2 к следующему шагу: два броска подряд складываются.' },
+  { id: 'double_roll', title: 'Золотая кисть Рапунцель', icon: '🖌️', kind: 'buff', description: 'Х2 к следующему броску кубика.' },
   { id: 'trap_immunity', title: 'Защитное яблоко Белоснежки', icon: '🍎', kind: 'buff', description: 'Единоразовый иммунитет от будущей ловушки.' },
   { id: 'halve_next_roll', title: 'Высохший маркер Шрама', icon: '🖊️', kind: 'curse', description: 'Следующий бросок кубика делится пополам.' }
 ];
@@ -1407,7 +1410,7 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const effectiveDiceFrozen = activeSubmission || pendingLucky ? 1 : Number(responseUser.dice_frozen || 0);
     const tickets = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser) ? await getPlayerTickets(tgId) : [];
     const finishSummary = await getFinishSummary(tgId);
-    res.json({ user: { ...responseUser, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, next_roll_halved: Number(responseUser.next_roll_halved) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary });
+    res.json({ user: { ...responseUser, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -1701,6 +1704,15 @@ app.get('/api/news', async (req, res, next) => {
   }
 });
 
+async function getOrCreateTaskByText(textTask) {
+  const normalized = String(textTask || '').trim();
+  if (!normalized) throw Object.assign(new Error('Текст задания не может быть пустым'), { status: 500 });
+  await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [normalized]);
+  const task = await get('SELECT id, text_task FROM tasks WHERE text_task = ?', [normalized]);
+  if (!task?.id) throw Object.assign(new Error('Не удалось подготовить бонусное задание'), { status: 500 });
+  return task;
+}
+
 async function createPendingSubmissionForCell(tgId, cell) {
   const active = await getActiveSubmission(tgId);
   if (active) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
@@ -1718,7 +1730,7 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   const cellType = getCellType(landedCell);
 
   if (cellType === 'lucky') {
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
     return { ok: true, dice, current_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
   }
 
@@ -1737,7 +1749,7 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   }
 
   const pending = await createPendingSubmissionForCell(tgId, currentCell);
-  await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
+  await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
   return { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...extra, ...pending };
 }
 
@@ -1752,9 +1764,11 @@ app.post('/api/roll', async (req, res, next) => {
     if (Number(playableUser.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
 
     const rawDice = rollD6();
-    const dice = Number(playableUser.next_roll_halved) === 1 ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice;
-    const result = await applyMoveAndCreateTask(tgId, playableUser, dice, { raw_dice: rawDice, roll_halved: Number(playableUser.next_roll_halved) === 1 });
-    await logPlayerAction(tgId, 'dice_roll', `Бросок кубика: выпало ${dice}. Игрок встал на клетку ${result.current_cell}.`, { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: Number(playableUser.next_roll_halved) === 1, cell_type: result.cell_type, landed_cell: result.landed_cell } });
+    const rollDoubled = Number(playableUser.next_roll_doubled) === 1;
+    const rollHalved = !rollDoubled && Number(playableUser.next_roll_halved) === 1;
+    const dice = rollDoubled ? rawDice * 2 : (rollHalved ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice);
+    const result = await applyMoveAndCreateTask(tgId, playableUser, dice, { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled });
+    await logPlayerAction(tgId, 'dice_roll', `Бросок кубика: выпало ${dice}. Игрок встал на клетку ${result.current_cell}.`, { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled, cell_type: result.cell_type, landed_cell: result.landed_cell } });
     res.json(result);
   } catch (error) {
     next(error);
@@ -1873,11 +1887,8 @@ app.post('/api/tarot', async (req, res, next) => {
     await logPlayerAction(tgId, 'tarot_played', tarotMessage, { meta: { tarot_card: selectedCard.title, tarot_effect: selectedCard.id, selected_index: selectedIndex } });
     await addNewsEvent(`🃏 ${tarotMessage}`, { eventType: 'tarot_played', tgId });
     if (selectedCard.id === 'double_roll') {
-      const dice_rolls = [rollD6(), rollD6()];
-      const dice = dice_rolls[0] + dice_rolls[1];
-      await run('UPDATE users SET total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [tgId]);
-      const freshUser = await get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
-      res.json(await applyMoveAndCreateTask(tgId, freshUser, dice, { ...tarotExtra, dice_rolls }));
+      await run('UPDATE users SET next_roll_doubled = 1, next_roll_halved = 0, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [tgId]);
+      res.json({ ok: true, ...tarotExtra, next_roll_doubled: true });
       return;
     }
     if (selectedCard.id === 'trap_immunity') {
@@ -1933,11 +1944,10 @@ app.post('/api/lucky-choice', async (req, res, next) => {
     const active = await getActiveSubmission(tgId);
     if (active) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
 
-    const result = await run('INSERT OR IGNORE INTO tasks (text_task) VALUES (?)', [choice]);
-    const task = result.id ? await get('SELECT id, text_task FROM tasks WHERE id = ?', [result.id]) : await get('SELECT id, text_task FROM tasks WHERE text_task = ?', [choice]);
+    const task = await getOrCreateTaskByText(choice);
     const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)', [tgId, luckyCell, task.id, task.text_task, 'pending']);
     await rememberAssignedTask(tgId, task.id);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0 WHERE tg_id = ?', [luckyCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0 WHERE tg_id = ?', [luckyCell, tgId]);
 
     res.json({ ok: true, current_cell: luckyCell, task, submission_id: submission.id });
   } catch (error) {
@@ -2067,7 +2077,7 @@ app.post('/api/admin/approve-user', async (req, res, next) => {
   try {
     await requireModeratorOrAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
-    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL, has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, penalty_rerolls = 0, total_dice_rolls = 0 WHERE tg_id = ?', [tgId]);
+    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL, has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, next_roll_doubled = 0, penalty_rerolls = 0, total_dice_rolls = 0 WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Заявка не найдена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -2534,7 +2544,7 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await loadMapConfig();
     await run(`UPDATE users
       SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
-        has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0,
+        has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, next_roll_doubled = 0,
         penalty_rerolls = 0, total_dice_rolls = 0,
         reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1, duel_challenges_used = 0, duel_accepts_used = 0`);
     await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'raffle_results', 'news_events', 'puzzle_duels']);
@@ -2569,6 +2579,7 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
         has_used_tarot = 0,
         trap_immunity = 0,
         next_roll_halved = 0,
+        next_roll_doubled = 0,
         penalty_rerolls = 0,
         total_dice_rolls = 0,
         can_challenge = 1,

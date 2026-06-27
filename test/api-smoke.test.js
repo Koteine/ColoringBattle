@@ -401,3 +401,49 @@ test('active assignment survives server restart and still accepts before/after p
     await server.close();
   }
 });
+
+test('Rapunzel buff doubles the next dice roll and is consumed', async () => {
+  const server = await startServer();
+  try {
+    await jsonRequest(server.baseUrl, '/api/apply', { method: 'POST', body: JSON.stringify({ tg_id: '901', username: 'rapunzel' }) });
+    await jsonRequest(server.baseUrl, '/api/admin/approve-user', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '901' }) });
+    await dbRun("UPDATE users SET next_roll_doubled = 1 WHERE tg_id = '901'");
+
+    const roll = await jsonRequest(server.baseUrl, '/api/roll', { method: 'POST', body: JSON.stringify({ tg_id: '901' }) });
+    assert.equal(roll.roll_doubled, true);
+    assert.equal(roll.dice, roll.raw_dice * 2);
+    const state = await jsonRequest(server.baseUrl, '/api/me/901?username=rapunzel');
+    assert.equal(state.user.next_roll_doubled, false);
+  } finally {
+    await server.close();
+  }
+});
+
+test('lucky choices stay available per player even for reused bonus tasks', async () => {
+  const server = await startServer();
+  try {
+    const reset = await jsonRequest(server.baseUrl, '/api/admin/reset-round', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937' }) });
+    const luckyCell = reset.lucky_cells[0];
+
+    for (const [tgId, username] of [['911', 'lucky_one'], ['912', 'lucky_two']]) {
+      await jsonRequest(server.baseUrl, '/api/apply', { method: 'POST', body: JSON.stringify({ tg_id: tgId, username }) });
+      await jsonRequest(server.baseUrl, '/api/admin/approve-user', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937', tg_id: tgId }) });
+      await dbRun(`UPDATE users SET current_cell = ${luckyCell}, dice_frozen = 1, pending_lucky_cell = ${luckyCell} WHERE tg_id = '${tgId}'`);
+    }
+
+    const first = await jsonRequest(server.baseUrl, '/api/lucky-choice', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '911', choice: 'Раскрасить что угодно' })
+    });
+    assert.ok(first.task.id);
+
+    const second = await jsonRequest(server.baseUrl, '/api/lucky-choice', {
+      method: 'POST',
+      body: JSON.stringify({ tg_id: '912', choice: 'Раскрасить что угодно' })
+    });
+    assert.ok(second.task.id);
+    assert.equal(second.task.id, first.task.id);
+  } finally {
+    await server.close();
+  }
+});
