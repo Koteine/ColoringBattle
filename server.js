@@ -1725,13 +1725,39 @@ async function createPendingSubmissionForCell(tgId, cell) {
   return { task, submission_id: submission.id };
 }
 
+function buildMoveNotification(result) {
+  const dicePart = result.roll_doubled
+    ? `выпало ${result.raw_dice}, бафф Рапунцель удвоил бросок до ${result.dice}`
+    : result.roll_halved
+      ? `выпало ${result.raw_dice}, проклятие Шрама уменьшило бросок до ${result.dice}`
+      : `выпало ${result.dice}`;
+
+  if (result.cell_type === 'lucky') {
+    return `🎉 Бросок кубика: ${dicePart}. Вы попали на бонусную клетку ${result.current_cell}: выберите одно из двух особых заданий — «${LUCKY_TASK_OPTIONS.join('» или «')}».`;
+  }
+
+  if (result.cell_type === 'trap' && result.trap_immunity_used) {
+    return `🛡️ Бросок кубика: ${dicePart}. Вы попали на ловушку ${result.landed_cell}, но Защитное яблоко Белоснежки погасило откат. Вы остались на клетке ${result.current_cell}.`;
+  }
+
+  if (result.cell_type === 'trap') {
+    return `🪤 Бросок кубика: ${dicePart}. Вы попали на ловушку ${result.landed_cell}: ловушка бросила ${result.trap_dice} и откатила вас назад на клетку ${result.current_cell}.`;
+  }
+
+  return `🎲 Бросок кубика: ${dicePart}. Вы перешли на клетку ${result.current_cell}.`;
+}
+
 async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   const landedCell = Math.min(100, Number(user.current_cell || 0) + dice);
   const cellType = getCellType(landedCell);
 
   if (cellType === 'lucky') {
     await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
-    return { ok: true, dice, current_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
+    const result = { ok: true, dice, current_cell: landedCell, landed_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
+    const message = buildMoveNotification(result);
+    await addNewsEvent(message, { eventType: 'lucky_cell', tgId });
+    await logPlayerAction(tgId, 'lucky_cell', message, { cell: landedCell, meta: { dice, ...extra, lucky_options: LUCKY_TASK_OPTIONS } });
+    return result;
   }
 
   let currentCell = landedCell;
@@ -1750,7 +1776,13 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
 
   const pending = await createPendingSubmissionForCell(tgId, currentCell);
   await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
-  return { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...extra, ...pending };
+  const result = { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...extra, ...pending };
+  if (cellType === 'trap') {
+    const message = buildMoveNotification(result);
+    await addNewsEvent(message, { eventType: trapImmunityUsed ? 'trap_immunity_used' : 'trap_cell', tgId });
+    await logPlayerAction(tgId, trapImmunityUsed ? 'trap_immunity_used' : 'trap_cell', message, { cell: currentCell, taskId: result.task?.id, submissionId: result.submission_id, meta: { dice, trap_dice: trapDice, landed_cell: landedCell, trap_immunity_used: trapImmunityUsed, ...extra } });
+  }
+  return result;
 }
 
 app.post('/api/roll', async (req, res, next) => {
@@ -1768,7 +1800,7 @@ app.post('/api/roll', async (req, res, next) => {
     const rollHalved = !rollDoubled && Number(playableUser.next_roll_halved) === 1;
     const dice = rollDoubled ? rawDice * 2 : (rollHalved ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice);
     const result = await applyMoveAndCreateTask(tgId, playableUser, dice, { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled });
-    await logPlayerAction(tgId, 'dice_roll', `Бросок кубика: выпало ${dice}. Игрок встал на клетку ${result.current_cell}.`, { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled, cell_type: result.cell_type, landed_cell: result.landed_cell } });
+    await logPlayerAction(tgId, 'dice_roll', buildMoveNotification(result), { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled, cell_type: result.cell_type, landed_cell: result.landed_cell, trap_dice: result.trap_dice, trap_immunity_used: result.trap_immunity_used } });
     res.json(result);
   } catch (error) {
     next(error);
@@ -1948,6 +1980,9 @@ app.post('/api/lucky-choice', async (req, res, next) => {
     const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)', [tgId, luckyCell, task.id, task.text_task, 'pending']);
     await rememberAssignedTask(tgId, task.id);
     await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0 WHERE tg_id = ?', [luckyCell, tgId]);
+    const message = `🎁 Бонусная клетка ${luckyCell}: выбрано особое задание «${choice}». Выполните его и загрузите фото как обычно.`;
+    await addNewsEvent(message, { eventType: 'lucky_choice', tgId });
+    await logPlayerAction(tgId, 'lucky_choice', message, { cell: luckyCell, taskId: task.id, submissionId: submission.id, meta: { choice } });
 
     res.json({ ok: true, current_cell: luckyCell, task, submission_id: submission.id });
   } catch (error) {
