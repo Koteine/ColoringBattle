@@ -447,6 +447,9 @@ test('lucky choices stay available per player even for reused bonus tasks', asyn
       });
       assert.ok(first.task.id);
       assert.equal(first.task.text_task, choice);
+      const notifications = await jsonRequest(server.baseUrl, `/api/notifications/${firstTgId}`);
+      assert.match(notifications.events[0].message, /Бонусная клетка/);
+      assert.match(notifications.events[0].message, new RegExp(choice));
 
       const second = await jsonRequest(server.baseUrl, '/api/lucky-choice', {
         method: 'POST',
