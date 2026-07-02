@@ -298,6 +298,7 @@ function renderCloudMap() {
     cell.dataset.cell = String(cellNumber);
     const occupants = grouped.get(cellNumber) || [];
     const firstOccupant = occupants[0] || null;
+    if (occupants.length) cell.classList.add('occupied');
     const token = firstOccupant
       ? `<span class="cell-token ${String(firstOccupant.tg_id) === String(tgId) ? 'me' : ''}"><span class="token-emoji">${escapeHtml(playerEmoji(firstOccupant))}</span>${occupants.length ? `<span class="token-count">×${occupants.length}</span>` : ''}</span>`
       : '';
@@ -1081,7 +1082,7 @@ async function openProfile(profileId) {
   const isAdminView = Boolean(profile.is_admin_view);
   const ownProfile = String(profile.tg_id) === String(tgId);
   const emojiPool = Array.isArray(profile.emoji_pool) ? profile.emoji_pool : playerEmojiPool;
-  const emojiSettingsBlock = ownProfile ? `<h3>Фишка для карты</h3><div class="item"><p>Текущая фишка: <strong style="font-size:32px">${escapeHtml(profile.map_emoji || playerEmoji(profile))}</strong></p>${profile.can_change_map_emoji ? `<p class="muted">Можно выбрать один раз за игру.</p><div class="actions emoji-picker">${emojiPool.map((emoji) => `<button type="button" class="ghost" data-map-emoji="${escapeHtml(emoji)}">${escapeHtml(emoji)}</button>`).join('')}</div>` : '<p class="muted">Вы уже использовали единственную смену фишки.</p>'}</div>` : '';
+  const emojiSettingsBlock = ownProfile ? `<h3>Фишка для карты</h3><div class="item"><p>Текущая фишка: <strong style="font-size:32px">${escapeHtml(profile.map_emoji || playerEmoji(profile))}</strong></p>${profile.can_change_map_emoji ? `<p class="muted">Можно выбрать один раз за игру.</p><div class="actions emoji-picker">${emojiPool.map((emoji) => `<button type="button" class="ghost" data-map-emoji="${escapeHtml(emoji)}">${escapeHtml(emoji)}</button>`).join('')}</div>` : '<p class="muted">* — ваша фишка</p>'}</div>` : '';
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
   const adminToolsBlock = isAdminView ? `<div class="profile-admin-tools"><button class="ghost icon-button" type="button" data-player-log title="Лог действий">📜</button></div>` : '';
   const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div>` : '';
