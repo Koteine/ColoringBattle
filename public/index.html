@@ -458,10 +458,60 @@
     .profile-dialog { position: relative; width: min(720px, 100%); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 28px; background: rgba(255, 250, 255, .96); box-shadow: 0 24px 70px rgba(50, 30, 62, .32); }
     .profile-close { position: sticky; top: 0; float: right; min-width: 42px; height: 42px; border-radius: 50%; padding: 0; }
     .profile-works { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+
+    .fixed-map-bg {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: -1;
+      background: url('/map_backgroung.png') center / cover no-repeat;
+    }
+    body { overflow: hidden; padding-bottom: 0; background: #bde0fe; }
+    .map-app { width: 100%; height: 100vh; padding: 0; overflow: hidden; }
+    .app-header, .legacy-nav { display: none !important; }
+    .map-screen { position: fixed; inset: 0; overflow: hidden; display: block; }
+    .map-container { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; padding: 16vh 0 22vh; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; transform: translateZ(0); will-change: scroll-position; contain: layout paint size; }
+    .cloud-map { position: relative; width: 100%; min-height: 1000vh; }
+    .map-roads { position: absolute; inset: 0; width: 100%; height: 1000vh; pointer-events: none; overflow: visible; }
+    .map-road-path { fill: none; stroke: rgba(255,255,255,.72); stroke-width: clamp(10px, 3vw, 18px); stroke-linecap: round; stroke-linejoin: round; }
+    .map-cell { position: absolute; width: clamp(70px, 21vw, 112px); height: clamp(50px, 15vw, 80px); transform: translate3d(-50%, -50%, 0); will-change: transform; contain: layout paint; border: 3px solid rgba(255,255,255,.9); color: #5b4162; background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(238,248,255,.94)); border-radius: 52% 48% 50% 50% / 62% 60% 42% 44%; box-shadow: inset 0 -3px 0 rgba(162,210,255,.22); display: grid; place-items: center; font-weight: 1000; font-size: clamp(20px, 6vw, 32px); }
+    .map-cell::before, .map-cell::after { content: ''; position: absolute; z-index: -1; background: inherit; border: inherit; }
+    .map-cell::before { width: 48%; height: 66%; left: 9%; top: -18%; border-radius: 50%; }
+    .map-cell::after { width: 58%; height: 78%; right: 8%; top: -26%; border-radius: 50%; }
+    .map-cell.lucky { border-color: #ffd166; outline: 4px solid rgba(255,209,102,.38); }
+    .map-cell.trap { border-color: #fb6f92; outline: 4px solid rgba(251,111,146,.34); }
+    .map-cell.current { animation: cloudPulse 1.8s ease-in-out infinite; }
+    @keyframes cloudPulse { 50% { filter: drop-shadow(0 0 10px rgba(255,175,204,.8)); transform: translate3d(-50%, -50%, 0) scale(1.04); } }
+    .cell-number { position: relative; z-index: 2; }
+    .cell-token { position: absolute; z-index: 3; left: 50%; top: -32%; transform: translate3d(-50%, 0, 0); will-change: transform; display: grid; justify-items: center; gap: 0; font-size: clamp(22px, 7vw, 34px); text-shadow: 0 2px 4px rgba(0,0,0,.16); pointer-events: none; }
+    .cell-token.me { font-size: clamp(28px, 8vw, 42px); animation: tokenGlow 1.5s ease-in-out infinite; }
+    @keyframes tokenGlow { 50% { filter: drop-shadow(0 0 12px #fff1a8) drop-shadow(0 0 18px #ff8fab); } }
+    .token-name { max-width: 82px; padding: 1px 5px; border-radius: 999px; background: rgba(255,255,255,.82); color: #5b4162; font-size: 10px; font-weight: 900; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .token-count { margin-left: 2px; padding: 1px 5px; border-radius: 999px; background: #fff; font-size: 12px; }
+    .top-hud { position: fixed; inset: max(12px, env(safe-area-inset-top)) 14px auto 14px; z-index: 24; display: flex; justify-content: space-between; align-items: flex-start; pointer-events: none; }
+    .top-hud-left { display: grid; gap: 10px; pointer-events: auto; }
+    .hud-icon { min-width: 52px; min-height: 52px; padding: 0 12px; border-radius: 999px; font-size: 24px; background: rgba(255,255,255,.86); border: 1px solid var(--line); box-shadow: 0 14px 34px rgba(97,70,120,.22); backdrop-filter: blur(12px); pointer-events: auto; }
+    .hud-wide { font-size: 22px; }
+    .map-hud { position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 25; display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 30px; background: rgba(255,255,255,.8); border: 1px solid var(--line); box-shadow: 0 18px 54px rgba(97,70,120,.24); backdrop-filter: blur(16px); }
+    .map-hud .dice-button { width: 72px; }
+    .scroll-btn { background: linear-gradient(135deg, #fff1a8, #ffafcc); }
+    .admin-gear { position: fixed; right: -78px; bottom: 0; }
+    .offscreen-control { position: absolute !important; width: 1px !important; height: 1px !important; opacity: 0 !important; pointer-events: none !important; }
+    .task-modal-content { display: none; }
+    .profile-content-task, .profile-dialog .task-modal-content { display: block; }
+    .movement-lock .map-hud, .movement-lock .top-hud, .movement-lock .map-container { pointer-events: none; }
+    .roll-result-modal { position: fixed; z-index: 80; top: max(18px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: min(360px, calc(100vw - 28px)); padding: 16px 48px 16px 16px; border-radius: 24px; background: rgba(255,250,255,.97); color: #3b2342; border: 1px solid rgba(132,90,150,.18); box-shadow: 0 14px 34px rgba(97,70,120,.22); font-weight: 950; }
+    .roll-result-modal button { position: absolute; right: 10px; top: 10px; min-width: 32px; height: 32px; padding: 0; border-radius: 50%; }
+    .players-popover { display: grid; gap: 8px; }
+    .map-role-notice { position: fixed; left: 50%; top: 46%; transform: translate(-50%, -50%); z-index: 18; width: min(520px, calc(100% - 32px)); }
+
   </style>
 </head>
 <body data-owner-tg-id="341995937">
-  <main class="app">
+  <div class="fixed-map-bg" aria-hidden="true"></div>
+  <main class="app map-app">
     <header class="app-header">
       <h1 class="brand-title">Красочки</h1>
     <p style="color: var(--muted); font-size: 14px; margin-top: 4px;">Бери и крась</p>
@@ -492,60 +542,60 @@
       </div>
     </section>
 
-    <section id="gameScreen" class="screen hidden" data-screen="game">
-      <section class="card">
-        <div class="stats-grid">
-          <div class="stat"><span>Игрок</span><strong id="username">—</strong><button id="notificationsBtn" class="bell-btn" type="button" aria-label="Личные уведомления">🔔</button></div>
-          <div class="stat"><span>Клетка</span><strong id="currentCell">0/100</strong></div>
-          <div class="stat"><span>Кубик</span><strong id="diceState">—</strong></div>
-        </div>
-
-        <div class="route" aria-label="Прогресс маршрута от 0 до 100 клеток">
-          <div id="routeRunner" class="route-runner">🧑‍🎨</div>
-          <div class="route-line"><div id="routeFill" class="route-fill"></div></div>
-          <div class="route-labels"><span>0</span><span>50</span><span>100</span></div>
-        </div>
+    <section id="gameScreen" class="screen hidden map-screen" data-screen="game">
+      <section id="mapContainer" class="map-container" aria-label="Карта пути из 100 облачков">
+        <svg id="mapRoads" class="map-roads" aria-hidden="true"></svg>
+        <div id="cloudMap" class="cloud-map"></div>
       </section>
 
-      <section id="roleNotice" class="card role-notice hidden">Режим администратора/модератора активен. Игровой процесс для данного аккаунта недоступен</section>
-
-      <div class="game-grid">
-        <section id="gamePlayCard" class="card dice-zone">
-          <div class="dice-actions"><button id="rollBtn" class="dice-button" type="button" aria-label="Бросить кубик">
-            <span id="diceFace" class="dice-face" data-value="1" aria-hidden="true">
-              <i class="pip"></i><i class="pip"></i><i class="pip"></i>
-              <i class="pip"></i><i class="pip"></i><i class="pip"></i>
-              <i class="pip"></i><i class="pip"></i><i class="pip"></i>
-            </span>
-          </button><div class="games-box"><p class="games-title">Игры</p><button id="tarotBtn" class="tarot-button" type="button" aria-label="Карты удачи">🃏</button><button id="duelBtn" class="tarot-button puzzle-button" type="button" aria-label="Дуэль в пятнашки">🧩</button></div></div>
-          <p id="diceHint" class="dice-caption muted">После броска кубик заморозится до проверки задания.</p>
-          <div class="news-feed" aria-live="polite">
-            <h3>Глобальные новости</h3>
-            <div class="news-marquee"><div id="newsTrack" class="news-track">Загружаем новости...</div></div>
-          </div>
-        </section>
-
-        <section id="taskCard" class="card">
-          <h2>Текущее задание</h2>
-          <p id="taskText" class="task-text muted">Бросьте кубик, чтобы получить задание.</p>
-          <p id="taskStatus" class="muted"></p>
-          <div id="taskActions" class="actions hidden">
-            <button id="rerollTaskBtn" class="ghost" type="button">Сменить задание (Штрафной откат от 1 до 3 клеток назад) 🔄</button>
-          </div>
-          <div id="luckyChoice" class="lucky-choice hidden">
-            <h3>🎉 Бонусная клетка!</h3>
-            <p class="muted">Выберите условие задания, чтобы открыть загрузку Фото ДО и Фото ПОСЛЕ.</p>
-            <div id="luckyChoiceActions" class="actions"></div>
-          </div>
-          <form id="submitForm" class="submit-step hidden">
-            <h3 id="submitStepTitle">Шаг 1: Зафиксируй начало работы</h3>
-            <p id="submitStepHint" class="muted">Загрузите фото ДО — незакрашенную страницу перед началом.</p>
-            <input id="workImage" name="photo_before" type="file" accept="image/*">
-            <div class="actions"><button id="submitBtn" type="submit">Отправить Фото ДО</button></div>
-          </form>
-          <div id="finalistLine" class="finalist hidden">🏁 Финалист! Финишные бонусные Красочки выданы.</div>
-        </section>
+      <div id="topHud" class="top-hud hidden" aria-label="Навигация по разделам">
+        <div class="top-hud-left">
+          <button id="profileHudBtn" class="hud-icon" type="button" aria-label="Профиль">👤</button>
+          <button id="raffleHudBtn" class="hud-icon" type="button" aria-label="Розыгрыш">🎟️</button>
+          <button id="paletteHudBtn" class="hud-icon" type="button" aria-label="Моя палитра">🎨</button>
+        </div>
+        <button id="playersHudBtn" class="hud-icon hud-wide" type="button" aria-label="Список игроков">👥</button>
       </div>
+
+      <section id="roleNotice" class="card role-notice hidden map-role-notice">Режим администратора/модератора активен. Игровой процесс для данного аккаунта недоступен</section>
+
+      <section id="taskCard" class="card task-modal-content hidden">
+        <h2>Текущее задание</h2>
+        <p id="taskText" class="task-text muted">Бросьте кубик, чтобы получить задание.</p>
+        <p id="taskStatus" class="muted"></p>
+        <div id="taskActions" class="actions hidden">
+          <button id="rerollTaskBtn" class="ghost" type="button">Сменить задание (Штрафной откат от 1 до 3 клеток назад) 🔄</button>
+        </div>
+        <div id="luckyChoice" class="lucky-choice hidden">
+          <h3>🎉 Бонусная клетка!</h3>
+          <p class="muted">Выберите условие задания, чтобы открыть загрузку Фото ДО и Фото ПОСЛЕ.</p>
+          <div id="luckyChoiceActions" class="actions"></div>
+        </div>
+        <form id="submitForm" class="submit-step hidden">
+          <h3 id="submitStepTitle">Шаг 1: Зафиксируй начало работы</h3>
+          <p id="submitStepHint" class="muted">Загрузите фото ДО — незакрашенную страницу перед началом.</p>
+          <input id="workImage" name="photo_before" type="file" accept="image/*">
+          <div class="actions"><button id="submitBtn" type="submit">Отправить Фото ДО</button></div>
+        </form>
+        <div id="finalistLine" class="finalist hidden">🏁 Финалист! Финишные бонусные Красочки выданы.</div>
+      </section>
+
+      <section id="gamePlayCard" class="map-hud hidden" aria-label="Панель управления">
+        <button id="rollBtn" class="dice-button" type="button" aria-label="Бросить кубик">
+          <span id="diceFace" class="dice-face" data-value="1" aria-hidden="true">
+            <i class="pip"></i><i class="pip"></i><i class="pip"></i>
+            <i class="pip"></i><i class="pip"></i><i class="pip"></i>
+            <i class="pip"></i><i class="pip"></i><i class="pip"></i>
+          </span>
+        </button>
+        <button id="taskHudBtn" class="hud-icon scroll-btn" type="button" aria-label="Открыть задание">📜</button>
+        <button id="adminGearBtn" class="hud-icon admin-gear hidden" type="button" aria-label="Админка">⚙️</button>
+        <button id="tarotBtn" class="tarot-button offscreen-control" type="button" aria-label="Карты удачи">🃏</button>
+        <button id="duelBtn" class="tarot-button offscreen-control" type="button" aria-label="Дуэль в пятнашки">🧩</button>
+        <button id="notificationsBtn" class="bell-btn offscreen-control" type="button" aria-label="Личные уведомления">🔔</button>
+        <span id="username" class="hidden">—</span><span id="currentCell" class="hidden">0/100</span><span id="diceState" class="hidden">—</span>
+        <span id="routeRunner" class="hidden"></span><span id="routeFill" class="hidden"></span><span id="diceHint" class="hidden"></span><div id="newsTrack" class="hidden"></div>
+      </section>
     </section>
 
     <section id="paletteScreen" class="screen hidden" data-screen="palette">
@@ -702,7 +752,7 @@
     </section>
   </main>
 
-  <nav id="bottomNav" class="bottom-nav hidden" aria-label="Основные вкладки">
+  <nav id="bottomNav" class="bottom-nav hidden legacy-nav" aria-label="Основные вкладки">
     <button class="nav-btn active" type="button" data-tab="game"><span>🎲</span>Игра</button>
     <button class="nav-btn" type="button" data-tab="palette"><span>🎨</span>Моя Палитра</button>
     <button class="nav-btn" type="button" data-tab="raffle"><span>🎟</span>Розыгрыш</button>

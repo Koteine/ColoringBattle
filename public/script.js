@@ -17,6 +17,16 @@ const els = {
   waitingScreen: document.getElementById('waitingScreen'),
   waitingTgId: document.getElementById('waitingTgId'),
   gameScreen: document.getElementById('gameScreen'),
+  mapContainer: document.getElementById('mapContainer'),
+  cloudMap: document.getElementById('cloudMap'),
+  mapRoads: document.getElementById('mapRoads'),
+  topHud: document.getElementById('topHud'),
+  profileHudBtn: document.getElementById('profileHudBtn'),
+  raffleHudBtn: document.getElementById('raffleHudBtn'),
+  paletteHudBtn: document.getElementById('paletteHudBtn'),
+  playersHudBtn: document.getElementById('playersHudBtn'),
+  taskHudBtn: document.getElementById('taskHudBtn'),
+  adminGearBtn: document.getElementById('adminGearBtn'),
   paletteScreen: document.getElementById('paletteScreen'),
   raffleScreen: document.getElementById('raffleScreen'),
   whereScreen: document.getElementById('whereScreen'),
@@ -135,6 +145,12 @@ let puzzleStartedAt = 0;
 let puzzleTimer = null;
 let countdownTimer = null;
 let leaderboardPlayers = [];
+let mapAutofocused = false;
+let lastMapKey = '';
+let displayedPlayerCell = null;
+let movementTimer = null;
+let rollResultTimer = null;
+const playerEmojiPool = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀','🍄','✨','🧸','🔮','👽','🙈','💅','👅','🧚‍♀️','👸','🧟‍♀️','🧜‍♀️','🧛','🐭','🐷','🌹','🐌','🍼','🍬','🍭','🎁','🕶️','🗿','💊','🧨'];
 const scratchers = new Map();
 const trapCells = new Set([13, 26, 39, 52, 65, 78, 91]);
 const luckyCells = new Set([7, 21, 35, 49, 63, 77, 88]);
@@ -205,6 +221,10 @@ async function api(path, options = {}) {
   return data;
 }
 
+function currentMapCell() {
+  return Math.max(0, Math.min(100, Number(displayedPlayerCell ?? state?.user?.current_cell ?? 0)));
+}
+
 function progressPercent(cell) {
   return Math.max(0, Math.min(100, Number(cell || 0)));
 }
@@ -213,6 +233,107 @@ function drawProgress(cell) {
   const percent = progressPercent(cell);
   els.routeFill.style.width = `${percent}%`;
   els.routeRunner.style.left = `${percent}%`;
+}
+
+function playerEmoji(player = {}) {
+  if (player.map_emoji) return player.map_emoji;
+  const seed = String(player.tg_id || '').split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return playerEmojiPool[seed % playerEmojiPool.length];
+}
+
+function mapPoint(cell) {
+  const index = Number(cell) - 1;
+  const rowFromBottom = Math.floor(index / 5);
+  const columnInRow = index % 5;
+  const leftToRight = rowFromBottom % 2 === 0;
+  const col = leftToRight ? columnInRow : 4 - columnInRow;
+  const x = 14 + col * 18 + Math.sin(rowFromBottom * .8) * 3;
+  const y = 990 - rowFromBottom * 50;
+  return { x, y };
+}
+
+function playersByCell() {
+  const map = new Map();
+  for (const player of leaderboardPlayers || []) {
+    const cell = Math.max(0, Math.min(100, Number(player.current_cell || 0)));
+    if (!cell) continue;
+    if (!map.has(cell)) map.set(cell, []);
+    map.get(cell).push(player);
+  }
+  if (state?.user && !isPrivilegedUser(state.user)) {
+    const cell = currentMapCell();
+    if (cell) {
+      const list = map.get(cell) || [];
+      if (!list.some((player) => String(player.tg_id) === String(state.user.tg_id))) list.push(state.user);
+      map.set(cell, list);
+    }
+  }
+  return map;
+}
+
+function renderCloudMap() {
+  if (!els.cloudMap || !els.mapRoads) return;
+  renderStaticRoadsOnce();
+  const grouped = playersByCell();
+  const key = `${currentMapCell()}:${leaderboardPlayers.map((p) => `${p.tg_id}-${p.current_cell}-${p.map_emoji || ''}`).join('|')}`;
+  if (key === lastMapKey && els.cloudMap.children.length) return;
+  lastMapKey = key;
+  els.cloudMap.innerHTML = '';
+  for (let cellNumber = 1; cellNumber <= 100; cellNumber += 1) {
+    const point = mapPoint(cellNumber);
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = `map-cell ${getClientCellType(cellNumber)}${currentMapCell() === cellNumber ? ' current' : ''}`;
+    cell.style.left = `${point.x}%`;
+    cell.style.top = `${point.y}vh`;
+    cell.dataset.cell = String(cellNumber);
+    const occupants = grouped.get(cellNumber) || [];
+    const meHere = occupants.find((player) => String(player.tg_id) === String(tgId));
+    const single = occupants.length === 1 ? occupants[0] : null;
+    const token = occupants.length ? (occupants.length === 1
+      ? `<span class="cell-token ${single && String(single.tg_id) === String(tgId) ? 'me' : ''}"><span>${escapeHtml(playerEmoji(single))}</span><span class="token-name">${escapeHtml(single.username || single.tg_id)}</span></span>`
+      : `<span class="cell-token ${meHere ? 'me' : ''}"><span>${escapeHtml(meHere ? playerEmoji(meHere) : '⭐️')}<span class="token-count">×${occupants.length}</span></span></span>`) : '';
+    cell.innerHTML = `${token}<span class="cell-number">${cellNumber}</span>`;
+    if (occupants.length > 1) cell.addEventListener('click', () => showCellPlayers(cellNumber, occupants));
+    els.cloudMap.append(cell);
+  }
+  if (!mapAutofocused) focusCurrentCell();
+}
+
+function renderStaticRoadsOnce() {
+  if (!els.mapRoads || els.mapRoads.dataset.ready === '1') return;
+  const points = Array.from({ length: 100 }, (_, index) => mapPoint(index + 1));
+  const path = points.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ');
+  els.mapRoads.setAttribute('viewBox', '0 0 100 1000');
+  els.mapRoads.innerHTML = `<path class="map-road-path" d="${path}"></path>`;
+  els.mapRoads.dataset.ready = '1';
+}
+
+function focusCurrentCell() {
+  if (!els.mapContainer || !state?.user) return;
+  const point = mapPoint(Math.max(1, currentMapCell() || 1));
+  const target = point.y * window.innerHeight / 100 - window.innerHeight * .48;
+  mapAutofocused = true;
+  requestAnimationFrame(() => els.mapContainer.scrollTo({ top: Math.max(0, target), behavior: 'smooth' }));
+}
+
+function showCellPlayers(cellNumber, players) {
+  els.profileModal.classList.remove('hidden');
+  els.profileContent.innerHTML = `<h2>Клетка ${cellNumber}</h2><div class="players-popover">${players.map((player) => `<button class="profile-link item" type="button" data-profile-id="${escapeHtml(player.tg_id)}">${escapeHtml(playerEmoji(player))} ${escapeHtml(formatHandle(player.username, player.tg_id))}</button>`).join('')}</div>`;
+  els.profileContent.querySelectorAll('[data-profile-id]').forEach((button) => button.addEventListener('click', () => openProfile(button.dataset.profileId).catch((error) => showToast(error.message))));
+}
+
+function openOverlayWithNode(title, node, beforeOpen) {
+  beforeOpen?.();
+  els.profileModal.classList.remove('hidden');
+  els.profileContent.innerHTML = `<h2>${escapeHtml(title)}</h2>`;
+  els.profileContent.append(node);
+}
+
+function openSectionOverlay(title, section, beforeOpen) {
+  if (!section) return;
+  openOverlayWithNode(title, section, beforeOpen);
+  section.classList.remove('hidden');
 }
 
 function showGate(screen) {
@@ -229,22 +350,13 @@ function showGate(screen) {
 function setActiveTab(tab) {
   const adminAllowed = hasStaffAccess(state?.user);
   activeTab = tab === 'admin' && !adminAllowed ? 'game' : tab;
-
-  els.gameScreen.classList.toggle('hidden', activeTab !== 'game');
-  els.paletteScreen.classList.toggle('hidden', activeTab !== 'palette');
-  els.raffleScreen.classList.toggle('hidden', activeTab !== 'raffle');
-  els.whereScreen.classList.toggle('hidden', activeTab !== 'where');
-  els.adminPanel.classList.toggle('hidden', activeTab !== 'admin' || !adminAllowed);
-
-  document.querySelectorAll('.nav-btn').forEach((button) => {
-    button.classList.toggle('active', button.dataset.tab === activeTab);
-  });
-
-  if (activeTab === 'raffle') startRafflePolling(true);
-  else stopRafflePolling();
-  if (activeTab === 'where') loadLeaderboard().catch((error) => showToast(error.message));
-  if (activeTab === 'admin' && adminAllowed) loadAdminPanel().catch((error) => showToast(error.message));
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  els.gameScreen.classList.remove('hidden');
+  els.paletteScreen.classList.add('hidden');
+  els.raffleScreen.classList.add('hidden');
+  els.whereScreen.classList.add('hidden');
+  els.adminPanel.classList.add('hidden');
+  document.querySelectorAll('.nav-btn').forEach((button) => button.classList.toggle('active', button.dataset.tab === activeTab));
+  if (activeTab === 'raffle') startRafflePolling(true); else stopRafflePolling();
 }
 
 function updateDiceFace(value) {
@@ -379,6 +491,7 @@ async function loadLeaderboard() {
   els.leaderboardTable.innerHTML = '<div class="empty-state">Загружаем игроков...</div>';
   const data = await api('/api/game/leaderboard');
   renderLeaderboard(data.players || []);
+  renderCloudMap();
 }
 
 async function sendReaction(toTgId, reactionType, button) {
@@ -594,12 +707,15 @@ function render() {
 
   els.welcomeScreen.classList.add('hidden');
   els.waitingScreen.classList.add('hidden');
-  els.bottomNav.classList.remove('hidden');
+  els.bottomNav.classList.add('hidden');
+  els.topHud?.classList.remove('hidden');
+  els.gamePlayCard?.classList.remove('hidden');
+  els.adminGearBtn?.classList.toggle('hidden', !adminAccess);
   els.adminTabBtn.classList.toggle('hidden', !adminAccess);
   document.querySelectorAll('.owner-only').forEach((el) => el.classList.toggle('hidden', !hasAdminAccess(user)));
   const roleBlocked = isPrivilegedUser(user);
   els.roleNotice.classList.toggle('hidden', !roleBlocked);
-  els.gamePlayCard.classList.toggle('hidden', roleBlocked);
+  els.gamePlayCard.classList.remove('hidden');
   els.taskCard.classList.toggle('hidden', roleBlocked);
   startNewsPolling();
 
@@ -608,6 +724,7 @@ function render() {
   const hasActiveSubmission = Boolean(activeSubmission || state.pendingLucky);
   els.diceState.textContent = hasActiveSubmission || Number(user.dice_frozen) === 1 ? 'Заморожен' : 'Готов';
   drawProgress(user.current_cell);
+  renderCloudMap();
   if (!roleBlocked) renderTask(activeSubmission);
   if (!activeSubmission && state.pendingLucky) {
     renderLuckyChoiceOptions();
@@ -645,7 +762,7 @@ function render() {
   els.finalistLine.classList.toggle('hidden', !isFinalist);
 
   if (!adminAccess && activeTab === 'admin') activeTab = 'game';
-  setActiveTab(activeTab);
+  setActiveTab('game');
   if (shouldShowFinishModal(state.finish_summary)) showFinishModal(state.finish_summary);
 }
 
@@ -659,6 +776,7 @@ async function loadState() {
   state = await api(`/api/me/${encodeURIComponent(tgId)}?username=${encodeURIComponent(tgUsername)}`);
   lastSubmissionStatus = state.activeSubmission?.status || lastSubmissionStatus;
   render();
+  loadLeaderboard().catch(() => {});
   checkLatestDuelOutcomeNotice().catch(() => {});
   startPolling();
 }
@@ -716,7 +834,9 @@ function animateDiceTo(serverDice) {
 async function rollDice() {
   if (isRolling || els.rollBtn.disabled) return;
   isRolling = true;
+  document.body.classList.add('movement-lock');
   els.rollBtn.disabled = true;
+  const fromCell = currentMapCell();
 
   try {
     const result = await api('/api/roll', {
@@ -726,6 +846,11 @@ async function rollDice() {
     });
     await animateDiceTo(result.dice);
     updateDiceFace(result.dice);
+    showRollResultModal(result.dice);
+    const path = buildMovePath(fromCell, result);
+    await animatePlayerPath(path);
+    await loadState();
+    openTaskOverlayForCurrentCell(result.current_cell);
     if (result.cell_type === 'trap' && result.trap_immunity_used) {
       showToast('✨ Магический щит сработал! Ловушка разрушена!');
     } else if (result.cell_type === 'trap') {
@@ -739,16 +864,71 @@ async function rollDice() {
     } else {
       showToast(`Выпало ${result.dice}. Вы перешли на клетку ${result.current_cell}.`);
     }
-    await loadState();
   } catch (error) {
     els.rollBtn.classList.remove('rolling');
     showToast(error.message);
     await loadState().catch(() => {});
   } finally {
+    window.clearTimeout(movementTimer);
+    movementTimer = null;
+    displayedPlayerCell = null;
+    document.body.classList.remove('movement-lock');
     isRolling = false;
     render();
   }
 }
+
+function buildMovePath(fromCell, result) {
+  const path = [];
+  const addSegment = (start, end) => {
+    const from = Number(start || 0);
+    const to = Number(end || 0);
+    if (from === to) return;
+    const step = to > from ? 1 : -1;
+    for (let cell = from + step; step > 0 ? cell <= to : cell >= to; cell += step) path.push(cell);
+  };
+  const landed = Number(result.landed_cell || result.current_cell || fromCell);
+  addSegment(fromCell, landed);
+  addSegment(landed, Number(result.current_cell || landed));
+  return path.length ? path : [Number(result.current_cell || fromCell)];
+}
+
+function animatePlayerPath(path, delay = 340) {
+  return new Promise((resolve) => {
+    const steps = path.map((cell) => Math.max(0, Math.min(100, Number(cell || 0))));
+    const next = () => {
+      const cell = steps.shift();
+      if (cell === undefined) { resolve(); return; }
+      displayedPlayerCell = cell;
+      lastMapKey = '';
+      renderCloudMap();
+      movementTimer = window.setTimeout(next, delay);
+    };
+    next();
+  });
+}
+
+function showRollResultModal(dice) {
+  document.getElementById('rollResultModal')?.remove();
+  window.clearTimeout(rollResultTimer);
+  const modal = document.createElement('div');
+  modal.id = 'rollResultModal';
+  modal.className = 'roll-result-modal';
+  modal.innerHTML = `<button type="button" aria-label="Закрыть">×</button><span>Кубик брошен! Выпало: ${escapeHtml(dice)}</span>`;
+  const close = () => {
+    window.clearTimeout(rollResultTimer);
+    modal.remove();
+  };
+  modal.querySelector('button').addEventListener('click', close);
+  document.body.append(modal);
+  rollResultTimer = window.setTimeout(close, 15000);
+}
+
+function openTaskOverlayForCurrentCell(cell) {
+  if (!state?.activeSubmission && !state?.pendingLucky) return;
+  openOverlayWithNode(`Клетка ${Number(cell || state.activeSubmission?.cell || state.pendingLucky?.cell || currentMapCell())}`, els.taskCard, () => renderTask(state.activeSubmission));
+}
+
 
 
 
@@ -876,13 +1056,18 @@ async function openProfile(profileId) {
   const tickets = profile.tickets || [];
   const isAdminView = Boolean(profile.is_admin_view);
   const ownProfile = String(profile.tg_id) === String(tgId);
+  const emojiPool = Array.isArray(profile.emoji_pool) ? profile.emoji_pool : playerEmojiPool;
+  const emojiSettingsBlock = ownProfile ? `<h3>Фишка для карты</h3><div class="item"><p>Текущая фишка: <strong style="font-size:32px">${escapeHtml(profile.map_emoji || playerEmoji(profile))}</strong></p>${profile.can_change_map_emoji ? `<p class="muted">Можно выбрать один раз за игру.</p><div class="actions emoji-picker">${emojiPool.map((emoji) => `<button type="button" class="ghost" data-map-emoji="${escapeHtml(emoji)}">${escapeHtml(emoji)}</button>`).join('')}</div>` : '<p class="muted">Вы уже использовали единственную смену фишки.</p>'}</div>` : '';
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
   const adminToolsBlock = isAdminView ? `<div class="profile-admin-tools"><button class="ghost icon-button" type="button" data-player-log title="Лог действий">📜</button></div>` : '';
   const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div>` : '';
   const worksBlock = `<h3>Сданные работы</h3><div class="work-cube-grid">${works.map((work, index) => `<button class="work-cube" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)}</strong><small>работа #${Number(work.id || 0)}</small></button>`).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div><div id="profileWorkDetails" class="profile-work-details"></div>`;
   const emergencyBlock = isAdminView ? `<div class="profile-emergency"><button class="danger" type="button" data-defibrillate>⚙️</button></div>` : '';
-  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2>${adminToolsBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
+  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2>${adminToolsBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${emojiSettingsBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
 
+  els.profileContent.querySelectorAll('[data-map-emoji]').forEach((button) => {
+    button.addEventListener('click', () => saveMapEmoji(button.dataset.mapEmoji).catch((error) => showToast(error.message)));
+  });
   els.profileContent.querySelectorAll('[data-profile-ticket-index]').forEach((button) => {
     button.addEventListener('click', () => {
       const ticket = tickets[Number(button.dataset.profileTicketIndex)];
@@ -902,6 +1087,23 @@ async function openProfile(profileId) {
   });
 }
 
+
+
+async function saveMapEmoji(emoji) {
+  const result = await api('/api/profile/map-emoji', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tg_id: tgId, map_emoji: emoji })
+  });
+  if (state?.user) {
+    state.user.map_emoji = result.map_emoji;
+    state.user.map_emoji_changed = 1;
+  }
+  showToast('Фишка сохранена');
+  lastMapKey = '';
+  renderCloudMap();
+  await openProfile(tgId);
+}
 
 function renderProfileWorkInline(work, isAdminView, ownProfile) {
   const target = document.getElementById('profileWorkDetails');
@@ -995,6 +1197,12 @@ async function uploadResubmission(submissionId) {
 function closeProfile() {
   els.profileContent.innerHTML = '';
   els.profileModal.classList.add('hidden');
+  els.gameScreen?.append(els.taskCard);
+  document.querySelector('main.app')?.append(els.paletteScreen, els.raffleScreen, els.whereScreen, els.adminPanel);
+  els.paletteScreen.classList.add('hidden');
+  els.raffleScreen.classList.add('hidden');
+  els.whereScreen.classList.add('hidden');
+  els.adminPanel.classList.add('hidden');
 }
 
 
@@ -2012,6 +2220,12 @@ els.rollBtn.addEventListener('click', rollDice);
 els.tarotBtn?.addEventListener('click', openTarotModal);
 els.duelBtn?.addEventListener('click', openDuelModal);
 els.notificationsBtn?.addEventListener('click', () => openNotifications().catch((error) => showToast(error.message)));
+els.profileHudBtn?.addEventListener('click', () => openProfile(tgId).catch((error) => showToast(error.message)));
+els.taskHudBtn?.addEventListener('click', () => openTaskOverlayForCurrentCell(state?.activeSubmission?.cell || state?.pendingLucky?.cell || currentMapCell()));
+els.paletteHudBtn?.addEventListener('click', () => openSectionOverlay('🎨 Моя палитра', els.paletteScreen));
+els.raffleHudBtn?.addEventListener('click', () => openSectionOverlay('🎟️ Розыгрыш', els.raffleScreen, () => startRafflePolling(true)));
+els.playersHudBtn?.addEventListener('click', () => openSectionOverlay('👥 Список игроков', els.whereScreen, () => loadLeaderboard().catch((error) => showToast(error.message))));
+els.adminGearBtn?.addEventListener('click', () => openSectionOverlay('⚙️ Админка', els.adminPanel, () => loadAdminPanel().catch((error) => showToast(error.message))));
 els.notificationsCloseBtn?.addEventListener('click', closeNotifications);
 els.notificationsModal?.addEventListener('click', (event) => { if (event.target === els.notificationsModal) closeNotifications(); });
 els.duelCloseBtn?.addEventListener('click', () => closeDuelModal().catch((error) => showToast(error.message)));
