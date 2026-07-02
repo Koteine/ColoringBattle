@@ -93,7 +93,8 @@ async function initDb() {
     reactions_hearts INTEGER DEFAULT 0,
     reactions_coffee INTEGER DEFAULT 0,
     registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    last_login_at TEXT DEFAULT CURRENT_TIMESTAMP
+    last_login_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    cell_arrived_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
   await run(`CREATE TABLE IF NOT EXISTS tasks (
@@ -338,7 +339,10 @@ async function ensureUserActivityColumns() {
   if (!columnNames.has('last_login_at')) {
     await run('ALTER TABLE users ADD COLUMN last_login_at TEXT');
   }
-  await run('UPDATE users SET registered_at = COALESCE(registered_at, CURRENT_TIMESTAMP), last_login_at = COALESCE(last_login_at, registered_at, CURRENT_TIMESTAMP)');
+  if (!columnNames.has('cell_arrived_at')) {
+    await run('ALTER TABLE users ADD COLUMN cell_arrived_at TEXT');
+  }
+  await run('UPDATE users SET registered_at = COALESCE(registered_at, CURRENT_TIMESTAMP), last_login_at = COALESCE(last_login_at, registered_at, CURRENT_TIMESTAMP), cell_arrived_at = COALESCE(cell_arrived_at, last_login_at, registered_at, CURRENT_TIMESTAMP)');
 }
 
 
@@ -813,8 +817,8 @@ async function findOrRefreshKnownUser(tgId, username = '') {
 async function createOrRefreshApplication(tgId, username = '') {
   const role = ADMIN_TG_IDS.has(String(tgId)) ? 'admin' : 'user';
   const approved = role === 'admin' ? 1 : 0;
-  await run(`INSERT INTO users (tg_id, username, current_cell, is_approved, dice_frozen, role, registered_at, last_login_at)
-    VALUES (?, ?, 0, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  await run(`INSERT INTO users (tg_id, username, current_cell, cell_arrived_at, is_approved, dice_frozen, role, registered_at, last_login_at)
+    VALUES (?, ?, 0, CURRENT_TIMESTAMP, ?, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     ON CONFLICT(tg_id) DO UPDATE SET
       username = CASE WHEN excluded.username <> '' THEN excluded.username ELSE users.username END,
       role = CASE WHEN users.role = 'admin' OR excluded.role = 'admin' THEN 'admin' ELSE users.role END,
@@ -1474,7 +1478,7 @@ app.post('/api/profile/map-emoji', async (req, res, next) => {
 
 app.get('/api/game/leaderboard', async (_req, res, next) => {
   try {
-    const players = await all(`SELECT u.tg_id, u.username, u.current_cell, u.map_emoji, u.reactions_hearts, u.reactions_coffee,
+    const players = await all(`SELECT u.tg_id, u.username, u.current_cell, u.cell_arrived_at, u.map_emoji, u.reactions_hearts, u.reactions_coffee,
         COUNT(DISTINCT t.ticket_number) AS tickets_count,
         MIN(CASE WHEN s.status = 'approved' THEN s.updated_at END) AS first_approved_at,
         MAX(CASE WHEN s.status = 'approved' THEN s.updated_at END) AS last_approved_at
@@ -1796,7 +1800,7 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   const cellType = getCellType(landedCell);
 
   if (cellType === 'lucky') {
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
     const result = { ok: true, dice, current_cell: landedCell, landed_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
     const message = buildMoveNotification(result);
     await addNewsEvent(message, { eventType: 'lucky_cell', tgId });
@@ -1819,7 +1823,7 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   }
 
   const pending = await createPendingSubmissionForCell(tgId, currentCell);
-  await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
+  await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
   const result = { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...extra, ...pending };
   if (cellType === 'trap') {
     const message = buildMoveNotification(result);
@@ -1998,7 +2002,7 @@ app.post('/api/reroll-task', async (req, res, next) => {
     const currentCell = Math.max(0, Number(user.current_cell || 0) - penalty);
     await run('DELETE FROM submissions WHERE id = ?', [active.id]);
     const pending = await createPendingSubmissionForCell(tgId, currentCell);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, penalty_rerolls = COALESCE(penalty_rerolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, penalty_rerolls = COALESCE(penalty_rerolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
 
     res.json({ ok: true, penalty, current_cell: currentCell, penalty_rerolls: Number(user.penalty_rerolls || 0) + 1, penalty_rerolls_limit: 3, ...pending });
   } catch (error) {
@@ -2023,7 +2027,7 @@ app.post('/api/lucky-choice', async (req, res, next) => {
     const task = await getOrCreateTaskByText(choice);
     const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)', [tgId, luckyCell, task.id, task.text_task, 'pending']);
     await rememberAssignedTask(tgId, task.id);
-    await run('UPDATE users SET current_cell = ?, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0 WHERE tg_id = ?', [luckyCell, tgId]);
+    await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0 WHERE tg_id = ?', [luckyCell, tgId]);
     const message = `🎁 Бонусная клетка ${luckyCell}: выбрано особое задание «${choice}». Выполните его и загрузите фото как обычно.`;
     await addNewsEvent(message, { eventType: 'lucky_choice', tgId });
     await logPlayerAction(tgId, 'lucky_choice', message, { cell: luckyCell, taskId: task.id, submissionId: submission.id, meta: { choice } });
@@ -2156,7 +2160,7 @@ app.post('/api/admin/approve-user', async (req, res, next) => {
   try {
     await requireModeratorOrAdmin(req.body.admin_tg_id);
     const tgId = normalizeTgId(req.body.tg_id);
-    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL, has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, next_roll_doubled = 0, penalty_rerolls = 0, total_dice_rolls = 0 WHERE tg_id = ?', [tgId]);
+    const result = await run('UPDATE users SET is_approved = 1, current_cell = 0, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 0, pending_lucky_cell = NULL, has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, next_roll_doubled = 0, penalty_rerolls = 0, total_dice_rolls = 0 WHERE tg_id = ?', [tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Заявка не найдена'), { status: 404 });
     res.json({ ok: true });
   } catch (error) {
@@ -2215,7 +2219,7 @@ app.post('/api/admin/change-cell', async (req, res, next) => {
     if (!Number.isInteger(currentCell) || currentCell < 0 || currentCell > 100) {
       throw Object.assign(new Error('Клетка должна быть целым числом от 0 до 100'), { status: 400 });
     }
-    const result = await run('UPDATE users SET current_cell = ?, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
+    const result = await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, pending_lucky_cell = NULL WHERE tg_id = ?', [currentCell, tgId]);
     if (result.changes === 0) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
     const user = await get('SELECT tg_id, username FROM users WHERE tg_id = ?', [tgId]);
     await addNewsEvent(`🔧 Модератор переместил игрока ${formatUserHandle(user?.username, tgId)} на клетку ${currentCell}`, {
@@ -2622,7 +2626,7 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await regenerateMapConfig();
     await loadMapConfig();
     await run(`UPDATE users
-      SET current_cell = 0, dice_frozen = 0, pending_lucky_cell = NULL,
+      SET current_cell = 0, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 0, pending_lucky_cell = NULL,
         has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, next_roll_doubled = 0,
         penalty_rerolls = 0, total_dice_rolls = 0,
         reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1, duel_challenges_used = 0, duel_accepts_used = 0`);
@@ -2653,6 +2657,7 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
       VALUES (?, 'Owner', 0, 1, 0, 'admin')
       ON CONFLICT(tg_id) DO UPDATE SET
         current_cell = 0,
+        cell_arrived_at = CURRENT_TIMESTAMP,
         dice_frozen = 0,
         pending_lucky_cell = NULL,
         has_used_tarot = 0,

@@ -273,14 +273,18 @@ function playersByCell() {
       map.set(cell, list);
     }
   }
+  for (const list of map.values()) {
+    list.sort((a, b) => String(a.cell_arrived_at || '').localeCompare(String(b.cell_arrived_at || ''))
+      || String(a.tg_id || '').localeCompare(String(b.tg_id || '')));
+  }
   return map;
 }
 
 function renderCloudMap() {
   if (!els.cloudMap || !els.mapRoads) return;
-  renderStaticRoadsOnce();
+
   const grouped = playersByCell();
-  const key = `${currentMapCell()}:${leaderboardPlayers.map((p) => `${p.tg_id}-${p.current_cell}-${p.map_emoji || ''}`).join('|')}`;
+  const key = `${currentMapCell()}:${leaderboardPlayers.map((p) => `${p.tg_id}-${p.current_cell}-${p.cell_arrived_at || ''}-${p.map_emoji || ''}`).join('|')}`;
   if (key === lastMapKey && els.cloudMap.children.length) return;
   lastMapKey = key;
   els.cloudMap.innerHTML = '';
@@ -293,13 +297,12 @@ function renderCloudMap() {
     cell.style.top = `${point.y}vh`;
     cell.dataset.cell = String(cellNumber);
     const occupants = grouped.get(cellNumber) || [];
-    const meHere = occupants.find((player) => String(player.tg_id) === String(tgId));
-    const single = occupants.length === 1 ? occupants[0] : null;
-    const token = occupants.length ? (occupants.length === 1
-      ? `<span class="cell-token ${single && String(single.tg_id) === String(tgId) ? 'me' : ''}"><span>${escapeHtml(playerEmoji(single))}</span><span class="token-name">${escapeHtml(single.username || single.tg_id)}</span></span>`
-      : `<span class="cell-token ${meHere ? 'me' : ''}"><span>${escapeHtml(meHere ? playerEmoji(meHere) : '⭐️')}<span class="token-count">×${occupants.length}</span></span></span>`) : '';
+    const firstOccupant = occupants[0] || null;
+    const token = firstOccupant
+      ? `<span class="cell-token ${String(firstOccupant.tg_id) === String(tgId) ? 'me' : ''}"><span class="token-emoji">${escapeHtml(playerEmoji(firstOccupant))}</span>${occupants.length ? `<span class="token-count">×${occupants.length}</span>` : ''}</span>`
+      : '';
     cell.innerHTML = `${token}<span class="cell-number">${cellNumber}</span>`;
-    if (occupants.length > 1) cell.addEventListener('click', () => showCellPlayers(cellNumber, occupants));
+    if (occupants.length) cell.addEventListener('click', () => showCellPlayers(cellNumber, occupants));
     els.cloudMap.append(cell);
   }
   if (!mapAutofocused) focusCurrentCell();
@@ -735,7 +738,7 @@ function render() {
   els.adminTabBtn.classList.toggle('hidden', !adminAccess);
   document.querySelectorAll('.owner-only').forEach((el) => el.classList.toggle('hidden', !hasAdminAccess(user)));
   const roleBlocked = isPrivilegedUser(user);
-  els.roleNotice.classList.toggle('hidden', !roleBlocked);
+  els.roleNotice.classList.add('hidden');
   els.gamePlayCard.classList.remove('hidden');
   els.taskCard.classList.toggle('hidden', roleBlocked);
   startNewsPolling();
