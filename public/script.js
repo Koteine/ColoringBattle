@@ -242,24 +242,18 @@ function playerEmoji(player = {}) {
 }
 
 const MAP_TOTAL_CELLS = 100;
-const MAP_CELLS_PER_LEVEL = 2;
-const MAP_LEVEL_STEP_VH = 14;
+const MAP_CELL_STEP_VH = 7;
 const MAP_VERTICAL_PADDING_VH = 16;
-const MAP_LEVELS = Math.ceil(MAP_TOTAL_CELLS / MAP_CELLS_PER_LEVEL);
-const MAP_HEIGHT_VH = (MAP_LEVELS - 1) * MAP_LEVEL_STEP_VH + MAP_VERTICAL_PADDING_VH * 2;
+const MAP_HORIZONTAL_CENTER_PERCENT = 50;
+const MAP_HORIZONTAL_AMPLITUDE_PERCENT = 30;
+const MAP_HEIGHT_VH = (MAP_TOTAL_CELLS - 1) * MAP_CELL_STEP_VH + MAP_VERTICAL_PADDING_VH * 2;
 
 function mapPoint(cell) {
   const normalizedCell = Math.max(1, Math.min(MAP_TOTAL_CELLS, Number(cell) || 1));
   const index = normalizedCell - 1;
-  const levelFromBottom = Math.floor(index / MAP_CELLS_PER_LEVEL);
-  const slotOnLevel = index % MAP_CELLS_PER_LEVEL;
-  const progress = MAP_LEVELS <= 1 ? 0 : levelFromBottom / (MAP_LEVELS - 1);
-  const wave = Math.sin((progress * Math.PI * 2 * 3.25) - (Math.PI / 2));
-  const baseX = 50 + wave * 25;
-  const direction = levelFromBottom % 2 === 0 ? 1 : -1;
-  const slotOffset = (slotOnLevel === 0 ? -1 : 1) * 7 * direction;
-  const x = Math.max(15, Math.min(85, baseX + slotOffset));
-  const y = MAP_HEIGHT_VH - MAP_VERTICAL_PADDING_VH - (levelFromBottom * MAP_LEVEL_STEP_VH);
+  const wave = Math.sin(index * (Math.PI / 2));
+  const x = MAP_HORIZONTAL_CENTER_PERCENT + (wave * MAP_HORIZONTAL_AMPLITUDE_PERCENT);
+  const y = MAP_HEIGHT_VH - MAP_VERTICAL_PADDING_VH - (index * MAP_CELL_STEP_VH);
   return { x, y };
 }
 
