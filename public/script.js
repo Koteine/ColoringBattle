@@ -241,14 +241,25 @@ function playerEmoji(player = {}) {
   return playerEmojiPool[seed % playerEmojiPool.length];
 }
 
+const MAP_TOTAL_CELLS = 100;
+const MAP_CELLS_PER_LEVEL = 2;
+const MAP_LEVEL_STEP_VH = 14;
+const MAP_VERTICAL_PADDING_VH = 16;
+const MAP_LEVELS = Math.ceil(MAP_TOTAL_CELLS / MAP_CELLS_PER_LEVEL);
+const MAP_HEIGHT_VH = (MAP_LEVELS - 1) * MAP_LEVEL_STEP_VH + MAP_VERTICAL_PADDING_VH * 2;
+
 function mapPoint(cell) {
-  const index = Number(cell) - 1;
-  const rowFromBottom = Math.floor(index / 5);
-  const columnInRow = index % 5;
-  const leftToRight = rowFromBottom % 2 === 0;
-  const col = leftToRight ? columnInRow : 4 - columnInRow;
-  const x = 14 + col * 18 + Math.sin(rowFromBottom * .8) * 3;
-  const y = 990 - rowFromBottom * 50;
+  const normalizedCell = Math.max(1, Math.min(MAP_TOTAL_CELLS, Number(cell) || 1));
+  const index = normalizedCell - 1;
+  const levelFromBottom = Math.floor(index / MAP_CELLS_PER_LEVEL);
+  const slotOnLevel = index % MAP_CELLS_PER_LEVEL;
+  const progress = MAP_LEVELS <= 1 ? 0 : levelFromBottom / (MAP_LEVELS - 1);
+  const wave = Math.sin((progress * Math.PI * 2 * 3.25) - (Math.PI / 2));
+  const baseX = 50 + wave * 25;
+  const direction = levelFromBottom % 2 === 0 ? 1 : -1;
+  const slotOffset = (slotOnLevel === 0 ? -1 : 1) * 7 * direction;
+  const x = Math.max(15, Math.min(85, baseX + slotOffset));
+  const y = MAP_HEIGHT_VH - MAP_VERTICAL_PADDING_VH - (levelFromBottom * MAP_LEVEL_STEP_VH);
   return { x, y };
 }
 
@@ -300,11 +311,27 @@ function renderCloudMap() {
   if (!mapAutofocused) focusCurrentCell();
 }
 
+function buildSmoothRoadPath(points) {
+  if (!points.length) return '';
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  const commands = [`M ${points[0].x} ${points[0].y}`];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const current = points[index];
+    const next = points[index + 1];
+    const midX = (current.x + next.x) / 2;
+    const midY = (current.y + next.y) / 2;
+    commands.push(`Q ${current.x} ${current.y} ${midX} ${midY}`);
+  }
+  const last = points[points.length - 1];
+  commands.push(`T ${last.x} ${last.y}`);
+  return commands.join(' ');
+}
+
 function renderStaticRoadsOnce() {
   if (!els.mapRoads || els.mapRoads.dataset.ready === '1') return;
-  const points = Array.from({ length: 100 }, (_, index) => mapPoint(index + 1));
-  const path = points.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ');
-  els.mapRoads.setAttribute('viewBox', '0 0 100 1000');
+  const points = Array.from({ length: MAP_TOTAL_CELLS }, (_, index) => mapPoint(index + 1));
+  const path = buildSmoothRoadPath(points);
+  els.mapRoads.setAttribute('viewBox', `0 0 100 ${MAP_HEIGHT_VH}`);
   els.mapRoads.innerHTML = `<path class="map-road-path" d="${path}"></path>`;
   els.mapRoads.dataset.ready = '1';
 }
