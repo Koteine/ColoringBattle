@@ -424,6 +424,12 @@
     .puzzle-tile { width: 68px; height: 68px; border-radius: 16px; font-size: 24px; font-weight: 1000; }
     .puzzle-tile.empty { visibility: hidden; }
     .duel-player-list { display: grid; gap: 8px; margin-top: 12px; }
+    .mini-games-grid { display: grid; gap: 12px; margin-top: 12px; }
+    .mini-game-card { display: grid; grid-template-columns: 54px 1fr; gap: 12px; align-items: center; padding: 14px; border: 1px solid var(--line); border-radius: 22px; background: rgba(255,255,255,.62); text-align: left; box-shadow: 0 12px 28px rgba(97,70,120,.12); }
+    .mini-game-card:disabled { opacity: .58; }
+    .mini-game-icon { display: grid; place-items: center; width: 54px; height: 54px; border-radius: 18px; font-size: 28px; background: linear-gradient(135deg, #fff1a8, #ffafcc, #bde0fe); }
+    .mini-game-card strong, .mini-game-card span { display: block; }
+    .mini-game-status { margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 800; }
     .tarot-modal { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .48); }
     .tarot-modal.hidden { display: none; }
     .tarot-dialog { width: min(460px, 100%); padding: 24px; border-radius: 30px; text-align: center; background: rgba(255,250,255,.97); box-shadow: 0 24px 70px rgba(50, 30, 62, .34); border: 1px solid rgba(255,255,255,.75); }
@@ -554,6 +560,7 @@
           <button id="profileHudBtn" class="hud-icon" type="button" aria-label="Профиль">👤</button>
           <button id="raffleHudBtn" class="hud-icon" type="button" aria-label="Розыгрыш">🎟️</button>
           <button id="paletteHudBtn" class="hud-icon" type="button" aria-label="Моя палитра">🎨</button>
+          <button id="miniGamesHudBtn" class="hud-icon" type="button" aria-label="Мини-игры">🎲</button>
         </div>
         <button id="playersHudBtn" class="hud-icon hud-wide" type="button" aria-label="Список игроков">👥</button>
       </div>
@@ -605,6 +612,14 @@
         <p id="paletteHint" class="muted">Здесь хранятся все накопленные Красочки текущего игрока.</p>
         <div id="pendingSubmissions" class="list"></div>
         <div id="paletteGrid" class="palette-grid"></div>
+      </section>
+    </section>
+
+    <section id="miniGamesScreen" class="screen hidden" data-screen="mini-games">
+      <section class="card">
+        <h2>Мини-игры</h2>
+        <p class="muted">Здесь собраны доступные мини-игры. Их правила, ограничения и награды остаются такими же, как в основной игре.</p>
+        <div id="miniGamesList" class="mini-games-grid"></div>
       </section>
     </section>
 

@@ -24,10 +24,13 @@ const els = {
   profileHudBtn: document.getElementById('profileHudBtn'),
   raffleHudBtn: document.getElementById('raffleHudBtn'),
   paletteHudBtn: document.getElementById('paletteHudBtn'),
+  miniGamesHudBtn: document.getElementById('miniGamesHudBtn'),
   playersHudBtn: document.getElementById('playersHudBtn'),
   taskHudBtn: document.getElementById('taskHudBtn'),
   adminGearBtn: document.getElementById('adminGearBtn'),
   paletteScreen: document.getElementById('paletteScreen'),
+  miniGamesScreen: document.getElementById('miniGamesScreen'),
+  miniGamesList: document.getElementById('miniGamesList'),
   raffleScreen: document.getElementById('raffleScreen'),
   whereScreen: document.getElementById('whereScreen'),
   adminPanel: document.getElementById('adminPanel'),
@@ -366,6 +369,7 @@ function showGate(screen) {
   els.waitingScreen.classList.toggle('hidden', screen !== 'waiting');
   els.gameScreen.classList.add('hidden');
   els.paletteScreen.classList.add('hidden');
+  els.miniGamesScreen?.classList.add('hidden');
   els.raffleScreen.classList.add('hidden');
   els.whereScreen.classList.add('hidden');
   els.adminPanel.classList.add('hidden');
@@ -377,6 +381,7 @@ function setActiveTab(tab) {
   activeTab = tab === 'admin' && !adminAllowed ? 'game' : tab;
   els.gameScreen.classList.remove('hidden');
   els.paletteScreen.classList.add('hidden');
+  els.miniGamesScreen?.classList.add('hidden');
   els.raffleScreen.classList.add('hidden');
   els.whereScreen.classList.add('hidden');
   els.adminPanel.classList.add('hidden');
@@ -1223,8 +1228,9 @@ function closeProfile() {
   els.profileContent.innerHTML = '';
   els.profileModal.classList.add('hidden');
   els.gameScreen?.append(els.taskCard);
-  document.querySelector('main.app')?.append(els.paletteScreen, els.raffleScreen, els.whereScreen, els.adminPanel);
+  document.querySelector('main.app')?.append(els.paletteScreen, els.miniGamesScreen, els.raffleScreen, els.whereScreen, els.adminPanel);
   els.paletteScreen.classList.add('hidden');
+  els.miniGamesScreen?.classList.add('hidden');
   els.raffleScreen.classList.add('hidden');
   els.whereScreen.classList.add('hidden');
   els.adminPanel.classList.add('hidden');
@@ -1267,6 +1273,33 @@ async function checkLatestDuelOutcomeNotice() {
   const lost = String(duel.loser_tg_id || '') === String(tgId);
   if (!won && !lost) return;
   showDismissibleGameNotice(duel.id, won ? '🧩 Вы выиграли пятнашки и получаете красочку! 🎉' : '🧩 Пятнашки закончились поражением. Вы всё равно умничка, повезёт в другой раз! ❤️');
+}
+
+
+function renderMiniGamesList() {
+  if (!els.miniGamesList) return;
+  const user = state?.user || {};
+  const tarotUsed = user.has_used_tarot === true || Number(user.has_used_tarot) === 1;
+  const frozen = Number(user.dice_frozen || 0) === 1 || Boolean(state?.activeSubmission) || Boolean(state?.pendingLucky);
+  const games = [
+    { id: 'tarot', icon: '🃏', title: 'Карты удачи', status: tarotUsed ? 'Уже использованы в этой игре' : (frozen ? 'Доступны только до броска кубика' : 'Испытать удачу один раз за игру'), disabled: tarotUsed, action: openTarotModal },
+    { id: 'duel', icon: '🧩', title: 'Дуэль в пятнашки', status: 'Вызови игрока или ответь на приглашение: победитель получает +1 Красочку', disabled: false, action: openDuelModal }
+  ];
+  els.miniGamesList.innerHTML = '';
+  for (const game of games) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'mini-game-card';
+    button.disabled = Boolean(game.disabled);
+    button.innerHTML = `<span class="mini-game-icon" aria-hidden="true">${game.icon}</span><span><strong>${escapeHtml(game.title)}</strong><span class="mini-game-status">${escapeHtml(game.status)}</span></span>`;
+    button.addEventListener('click', () => game.action?.());
+    els.miniGamesList.append(button);
+  }
+}
+
+function openMiniGamesOverlay() {
+  renderMiniGamesList();
+  openSectionOverlay('🎲 Мини-игры', els.miniGamesScreen, renderMiniGamesList);
 }
 
 async function openNotifications() {
@@ -2248,6 +2281,7 @@ els.notificationsBtn?.addEventListener('click', () => openNotifications().catch(
 els.profileHudBtn?.addEventListener('click', () => openProfile(tgId).catch((error) => showToast(error.message)));
 els.taskHudBtn?.addEventListener('click', () => openTaskOverlayForCurrentCell(state?.activeSubmission?.cell || state?.pendingLucky?.cell || currentMapCell()));
 els.paletteHudBtn?.addEventListener('click', () => openSectionOverlay('🎨 Моя палитра', els.paletteScreen));
+els.miniGamesHudBtn?.addEventListener('click', () => openMiniGamesOverlay());
 els.raffleHudBtn?.addEventListener('click', () => openSectionOverlay('🎟️ Розыгрыш', els.raffleScreen, () => startRafflePolling(true)));
 els.playersHudBtn?.addEventListener('click', () => openSectionOverlay('👥 Список игроков', els.whereScreen, () => loadLeaderboard().catch((error) => showToast(error.message))));
 els.adminGearBtn?.addEventListener('click', () => openSectionOverlay('⚙️ Админка', els.adminPanel, () => loadAdminPanel().catch((error) => showToast(error.message))));
