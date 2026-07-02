@@ -15,6 +15,8 @@ const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const DB_PATH = path.join(DATA_DIR, 'game.db');
 const LEGACY_DB_PATH = path.join(__dirname, 'game.db');
 const OWNER_TG_ID = '341995937';
+const PLAYER_EMOJI_POOL = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀','🍄','✨','🧸','🔮','👽','🙈','💅','👅','🧚‍♀️','👸','🧟‍♀️','🧜‍♀️','🧛','🐭','🐷','🌹','🐌','🍼','🍬','🍭','🎁','🕶️','🗿','💊','🧨'];
+
 const ADMIN_TG_IDS = new Set([
   OWNER_TG_ID,
   ...String(process.env.ADMIN_TG_IDS || '')
@@ -36,6 +38,7 @@ db.serialize();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(UPLOADS_DIR));
+app.get('/map_backgroung.png', (_req, res) => res.sendFile(path.join(__dirname, 'map_backgroung.png')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const storage = multer.diskStorage({
@@ -127,6 +130,7 @@ async function initDb() {
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
   await ensureUserActivityColumns();
+  await ensureUserMapEmojiColumns();
   await ensureReactionLogsTable();
   await ensurePlayerActionLogsTable();
   await ensureMapConfigTable();
@@ -336,6 +340,30 @@ async function ensureUserActivityColumns() {
   }
   await run('UPDATE users SET registered_at = COALESCE(registered_at, CURRENT_TIMESTAMP), last_login_at = COALESCE(last_login_at, registered_at, CURRENT_TIMESTAMP)');
 }
+
+
+async function ensureUserMapEmojiColumns() {
+  const columns = await all('PRAGMA table_info(users)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('map_emoji')) await run("ALTER TABLE users ADD COLUMN map_emoji TEXT DEFAULT ''");
+  if (!names.has('map_emoji_changed')) await run('ALTER TABLE users ADD COLUMN map_emoji_changed INTEGER DEFAULT 0');
+  const users = await all("SELECT tg_id FROM users WHERE COALESCE(map_emoji, '') = ''");
+  for (const user of users) {
+    await run('UPDATE users SET map_emoji = ? WHERE tg_id = ?', [defaultEmojiForTgId(user.tg_id), user.tg_id]);
+  }
+}
+
+function defaultEmojiForTgId(tgId) {
+  const seed = String(tgId || '').split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return PLAYER_EMOJI_POOL[seed % PLAYER_EMOJI_POOL.length];
+}
+
+function normalizeMapEmoji(value) {
+  const emoji = String(value || '').trim();
+  if (!PLAYER_EMOJI_POOL.includes(emoji)) throw Object.assign(new Error('Выберите фишку из предложенного списка'), { status: 400 });
+  return emoji;
+}
+
 
 async function ensureReactionLogsTable() {
   await run(`CREATE TABLE IF NOT EXISTS reaction_logs (
@@ -791,8 +819,9 @@ async function createOrRefreshApplication(tgId, username = '') {
       username = CASE WHEN excluded.username <> '' THEN excluded.username ELSE users.username END,
       role = CASE WHEN users.role = 'admin' OR excluded.role = 'admin' THEN 'admin' ELSE users.role END,
       is_approved = CASE WHEN users.role = 'admin' OR excluded.role = 'admin' THEN 1 ELSE users.is_approved END,
+      map_emoji = CASE WHEN COALESCE(users.map_emoji, '') = '' THEN ? ELSE users.map_emoji END,
       last_login_at = CURRENT_TIMESTAMP`,
-    [tgId, username, approved, role]);
+    [tgId, username, approved, role, defaultEmojiForTgId(tgId)]);
   return get('SELECT * FROM users WHERE tg_id = ?', [tgId]);
 }
 
@@ -1428,9 +1457,24 @@ app.post('/api/apply', async (req, res, next) => {
 });
 
 
+
+app.post('/api/profile/map-emoji', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const emoji = normalizeMapEmoji(req.body.map_emoji);
+    const user = await get('SELECT tg_id, map_emoji_changed FROM users WHERE tg_id = ?', [tgId]);
+    if (!user) throw Object.assign(new Error('Игрок не найден'), { status: 404 });
+    if (Number(user.map_emoji_changed || 0) === 1) throw Object.assign(new Error('Фишку можно поменять только один раз за игру'), { status: 400 });
+    await run('UPDATE users SET map_emoji = ?, map_emoji_changed = 1 WHERE tg_id = ?', [emoji, tgId]);
+    res.json({ ok: true, map_emoji: emoji, map_emoji_changed: 1 });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/game/leaderboard', async (_req, res, next) => {
   try {
-    const players = await all(`SELECT u.tg_id, u.username, u.current_cell, u.reactions_hearts, u.reactions_coffee,
+    const players = await all(`SELECT u.tg_id, u.username, u.current_cell, u.map_emoji, u.reactions_hearts, u.reactions_coffee,
         COUNT(DISTINCT t.ticket_number) AS tickets_count,
         MIN(CASE WHEN s.status = 'approved' THEN s.updated_at END) AS first_approved_at,
         MAX(CASE WHEN s.status = 'approved' THEN s.updated_at END) AS last_approved_at
@@ -1503,7 +1547,7 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
     const viewer = viewerTgId ? await get('SELECT role FROM users WHERE tg_id = ?', [viewerTgId]) : null;
     const isStaffViewer = viewer?.role === 'admin' || viewer?.role === 'moderator' || ADMIN_TG_IDS.has(String(viewerTgId));
     const isOwnProfile = viewerTgId && viewerTgId === tgId;
-    const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen, finished_at
+    const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen, finished_at, map_emoji, map_emoji_changed
       FROM users WHERE tg_id = ? AND is_approved = 1`, [tgId]);
     if (!user) throw Object.assign(new Error('Профиль не найден'), { status: 404 });
     const works = await all(`SELECT s.id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.admin_comment, s.resubmission_required, s.updated_at, t.text_task
@@ -1540,7 +1584,7 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
     }));
     const counts = await get(`SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?`, [tgId]);
     const activeTask = isStaffViewer ? await getActiveSubmission(tgId) : null;
-    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), local_status: user.finished_at ? 'Игра завершена, ожидай розыгрыша' : (Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску'), active_task: activeTask, tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
+    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), map_emoji: user.map_emoji || defaultEmojiForTgId(user.tg_id), map_emoji_changed: Number(user.map_emoji_changed || 0), can_change_map_emoji: Number(user.map_emoji_changed || 0) === 0, emoji_pool: PLAYER_EMOJI_POOL, local_status: user.finished_at ? 'Игра завершена, ожидай розыгрыша' : (Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску'), active_task: activeTask, tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
   } catch (error) {
     next(error);
   }
