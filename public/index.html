@@ -218,6 +218,18 @@
     .paint-card small { color: rgba(59,35,66,.68); font-weight: 850; }
     .empty-state { padding: 28px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 24px; background: rgba(255,255,255,.38); }
 
+    .admin-palette-actions { display: grid; gap: 12px; margin: 16px 0; }
+    .admin-palette-button { position: relative; width: 100%; min-height: 58px; text-align: left; padding-right: 54px; }
+    .admin-palette-button.has-pending::after { content: '!'; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: #fb3f6c; box-shadow: 0 8px 20px rgba(251, 63, 108, .34); font-weight: 1000; }
+    .admin-fullscreen-modal { position: fixed; inset: 0; z-index: 95; display: grid; background: rgba(43, 28, 58, .52); }
+    .admin-fullscreen-modal.hidden { display: none; }
+    .admin-fullscreen-dialog { position: relative; width: 100vw; height: 100vh; overflow: auto; padding: max(22px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); background: linear-gradient(145deg, var(--bg), var(--bg-2)); }
+    .admin-fullscreen-dialog h2 { margin: 0 58px 18px 0; }
+    .admin-fullscreen-close { position: fixed; right: max(14px, env(safe-area-inset-right)); top: max(14px, env(safe-area-inset-top)); z-index: 1; min-width: 44px; height: 44px; padding: 0; border-radius: 50%; }
+    .admin-fullscreen-content { width: min(980px, 100%); margin: 0 auto; }
+    .admin-palette-player { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+
     .raffle-hero { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(280px, 1.2fr); gap: 16px; align-items: center; }
     .big-number { font-size: clamp(44px, 16vw, 88px); font-weight: 1000; line-height: 1; margin: 0; background: linear-gradient(120deg, #fb6f92, #7c6bc4, #31a8b8); -webkit-background-clip: text; background-clip: text; color: transparent; }
     .magic-palette {

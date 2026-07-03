@@ -151,6 +151,8 @@ let leaderboardPlayers = [];
 let mapAutofocused = false;
 let lastMapKey = '';
 let displayedPlayerCell = null;
+let adminPendingSubmissionsCache = [];
+let adminArchivePlayersCache = [];
 let movementTimer = null;
 let rollResultTimer = null;
 const playerEmojiPool = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀','🍄','✨','🧸','🔮','👽','🙈','💅','👅','🧚‍♀️','👸','🧟‍♀️','🧜‍♀️','🧛','🐭','🐷','🌹','🐌','🍼','🍬','🍭','🎁','🕶️','🗿','💊','🧨'];
@@ -395,39 +397,20 @@ function updateDiceFace(value) {
 
 async function renderWorkArchive() {
   els.paletteGrid.classList.add('archive-mode');
-  els.paletteHint.textContent = 'Проверка ожидающих работ и архив всех игроков со статистикой по клеткам и выполненным заданиям.';
-  els.pendingSubmissions.innerHTML = '<article class="item archive-accordion open"><button type="button" class="archive-toggle"><strong>⏳ Ожидают одобрения</strong></button><div class="archive-panel"><div class="archive-inner"><div class="empty-state">Загружаем работы...</div></div></div></article>';
-  els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем архив...</div>';
+  els.paletteHint.textContent = 'Админские разделы палитры открываются отдельными полноэкранными окнами.';
+  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
+  els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем админские разделы...</div>';
 
-  const [pendingData, archiveData] = await Promise.all([
+  const [pendingData, archiveData, usersData] = await Promise.all([
     api(`/api/admin/submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
-    api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`)
+    api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`),
+    hasAdminAccess(state?.user) ? api(`/api/admin/users?admin_tg_id=${encodeURIComponent(tgId)}`) : Promise.resolve(null)
   ]);
 
-  renderPendingSubmissions(pendingData.submissions || []);
-
-  if (!archiveData.players?.length) {
-    els.paletteGrid.innerHTML = '<article class="item archive-accordion open"><button type="button" class="archive-toggle"><strong>👥 Все игроки</strong></button><div class="archive-panel"><div class="archive-inner"><div class="empty-state">Одобренных работ пока нет.</div></div></div></article>';
-    return;
-  }
-
-  els.paletteGrid.innerHTML = '';
-  const archiveRoot = document.createElement('article');
-  archiveRoot.className = 'item archive-accordion open';
-  archiveRoot.innerHTML = '<button type="button" class="archive-toggle"><strong>👥 Все игроки</strong></button><div class="archive-panel"><div class="archive-inner"></div></div>';
-  const archiveInner = archiveRoot.querySelector('.archive-inner');
-
-  for (const player of archiveData.players) {
-    const playerNode = document.createElement('article');
-    playerNode.className = 'item';
-    const username = player.username ? `@${String(player.username).replace(/^@/, '')}` : 'Без ника';
-    const diceStatus = Number(player.dice_frozen) === 1 ? 'Заморожен (ждет проверки)' : 'Свободен';
-    playerNode.innerHTML = `
-      <button type="button" class="profile-link" data-profile-id="${escapeHtml(player.tg_id)}"><strong>${escapeHtml(username)}</strong> (ID: ${escapeHtml(player.tg_id)})</button>
-      <p class="muted">Клетка: ${Number(player.current_cell || 0)} · кубик: ${escapeHtml(diceStatus)} · выполнено: ${Number(player.approved_submissions_count || 0)} · Красочек: ${Number(player.active_tickets_count || 0)}</p>`;
-    archiveInner.append(playerNode);
-  }
-  els.paletteGrid.append(archiveRoot);
+  adminPendingSubmissionsCache = pendingData.submissions || [];
+  adminArchivePlayersCache = usersData?.users || archiveData.players || [];
+  renderAdminPaletteButtons();
+  els.paletteGrid.innerHTML = '<div class="empty-state">Выберите «Ожидают одобрения» или «Все игроки», чтобы открыть список.</div>';
 }
 
 function renderPalette(tickets = []) {
@@ -1918,14 +1901,91 @@ function renderPendingUsers(users) {
   }
 }
 
-function renderPendingSubmissions(submissions) {
-  els.pendingSubmissions.innerHTML = '';
-  const root = document.createElement('article');
-  root.className = 'item archive-accordion open';
-  root.innerHTML = '<button type="button" class="archive-toggle"><strong>⏳ Ожидают одобрения</strong></button><div class="archive-panel"><div class="archive-inner pending-submissions-inner"></div></div>';
-  const pendingInner = root.querySelector('.pending-submissions-inner');
-  if (!submissions.length) pendingInner.innerHTML = '<p class="muted">Все работы проверены!</p>';
-  els.pendingSubmissions.append(root);
+
+function renderAdminPaletteButtons() {
+  const pendingButton = document.getElementById('pendingApprovalsBtn');
+  const playersButton = document.getElementById('allPlayersPaletteBtn');
+  if (pendingButton) {
+    pendingButton.classList.toggle('has-pending', adminPendingSubmissionsCache.length > 0);
+    pendingButton.setAttribute('aria-label', adminPendingSubmissionsCache.length > 0 ? `Ожидают одобрения: ${adminPendingSubmissionsCache.length}` : 'Ожидают одобрения');
+    pendingButton.addEventListener('click', () => openPendingApprovalsModal());
+  }
+  if (playersButton) playersButton.addEventListener('click', () => openAllPlayersModal());
+}
+
+function ensureAdminFullscreenModal() {
+  let modal = document.getElementById('adminPaletteModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'adminPaletteModal';
+  modal.className = 'admin-fullscreen-modal hidden';
+  modal.innerHTML = `
+    <section class="admin-fullscreen-dialog" role="dialog" aria-modal="true" aria-labelledby="adminPaletteModalTitle">
+      <button class="admin-fullscreen-close" type="button" aria-label="Закрыть">×</button>
+      <h2 id="adminPaletteModalTitle"></h2>
+      <div id="adminPaletteModalContent" class="admin-fullscreen-content"></div>
+    </section>
+  `;
+  document.body.append(modal);
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal || event.target.closest('.admin-fullscreen-close')) closeAdminFullscreenModal();
+  });
+  modal.addEventListener('click', (event) => {
+    const profileButton = event.target.closest('[data-profile-id]');
+    if (profileButton) {
+      closeAdminFullscreenModal();
+      openProfile(profileButton.dataset.profileId).catch((error) => showToast(error.message));
+    }
+  });
+  return modal;
+}
+
+function openAdminFullscreenModal(title, contentNode) {
+  const modal = ensureAdminFullscreenModal();
+  modal.querySelector('#adminPaletteModalTitle').textContent = title;
+  const content = modal.querySelector('#adminPaletteModalContent');
+  content.innerHTML = '';
+  content.append(contentNode);
+  modal.classList.remove('hidden');
+}
+
+function closeAdminFullscreenModal() {
+  document.getElementById('adminPaletteModal')?.classList.add('hidden');
+}
+
+function openPendingApprovalsModal() {
+  const content = document.createElement('div');
+  content.className = 'list';
+  renderPendingSubmissions(adminPendingSubmissionsCache, content);
+  openAdminFullscreenModal('Ожидают одобрения', content);
+}
+
+function openAllPlayersModal() {
+  const content = document.createElement('div');
+  content.className = 'list';
+  if (!adminArchivePlayersCache.length) {
+    content.innerHTML = '<div class="empty-state">Игроков пока нет.</div>';
+  } else {
+    for (const player of adminArchivePlayersCache) {
+      const playerNode = document.createElement('article');
+      playerNode.className = 'item admin-palette-player';
+      const username = player.username ? `@${String(player.username).replace(/^@/, '')}` : 'Без ника';
+      playerNode.innerHTML = `
+        <button type="button" class="profile-link" data-profile-id="${escapeHtml(player.tg_id)}"><strong>${escapeHtml(username)}</strong></button>
+        <span class="muted">TG ID: ${escapeHtml(player.tg_id)}</span>
+      `;
+      content.append(playerNode);
+    }
+  }
+  openAdminFullscreenModal('Все игроки', content);
+}
+
+function renderPendingSubmissions(submissions, target = els.pendingSubmissions) {
+  target.innerHTML = '';
+  const pendingInner = document.createElement('div');
+  pendingInner.className = 'pending-submissions-inner';
+  if (!submissions.length) pendingInner.innerHTML = '<div class="empty-state">Все работы проверены!</div>';
+  target.append(pendingInner);
   for (const submission of submissions) {
     const beforeUrl = `/uploads/${encodeURIComponent(submission.photo_before)}`;
     const afterUrl = `/uploads/${encodeURIComponent(submission.photo_after)}`;
@@ -1966,6 +2026,7 @@ function renderPendingSubmissions(submissions) {
       const ticketNumbers = (result.issuedTickets || []).map((ticket) => `№${ticket.ticket_number}`).join(', ');
       showToast(ticketNumbers ? `Работа одобрена. Выданы Красочки: ${ticketNumbers}` : 'Автоодобренная работа подтверждена');
       await renderWorkArchive();
+      openPendingApprovalsModal();
       await loadNews().catch(() => {});
       if (submission.tg_id === tgId) await loadState();
     });
@@ -1984,6 +2045,7 @@ function renderPendingSubmissions(submissions) {
       });
       showToast('Работа отклонена');
       await renderWorkArchive();
+      openPendingApprovalsModal();
     });
 
     actions.append(approve, reject);
