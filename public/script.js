@@ -158,8 +158,23 @@ let movementTimer = null;
 let rollResultTimer = null;
 const playerEmojiPool = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀','🍄','✨','🧸','🔮','👽','🙈','💅','👅','🧚‍♀️','👸','🧟‍♀️','🧜‍♀️','🧛','🐭','🐷','🌹','🐌','🍼','🍬','🍭','🎁','🕶️','🗿','💊','🧨'];
 const scratchers = new Map();
-const trapCells = new Set([13, 26, 39, 52, 65, 78, 91]);
-const luckyCells = new Set([7, 21, 35, 49, 63, 77, 88]);
+let trapCells = new Set([13, 26, 39, 52, 65, 78, 91]);
+let luckyCells = new Set([7, 21, 35, 49, 63, 77, 88]);
+
+function normalizeMapCells(cells) {
+  return Array.isArray(cells)
+    ? cells.map((cell) => Number(cell)).filter((cell) => Number.isInteger(cell) && cell >= 1 && cell <= 100)
+    : [];
+}
+
+function applyMapConfig(config = {}) {
+  const serverTrapCells = normalizeMapCells(config.trap_cells);
+  const serverLuckyCells = normalizeMapCells(config.lucky_cells);
+  if (!serverTrapCells.length && !serverLuckyCells.length) return;
+  trapCells = new Set(serverTrapCells);
+  luckyCells = new Set(serverLuckyCells.filter((cell) => !trapCells.has(cell)));
+  lastMapKey = '';
+}
 
 function getClientCellType(cell) {
   const normalized = Number(cell || 0);
@@ -290,7 +305,8 @@ function renderCloudMap() {
   if (!els.cloudMap || !els.mapRoads) return;
 
   const grouped = playersByCell();
-  const key = `${currentMapCell()}:${leaderboardPlayers.map((p) => `${p.tg_id}-${p.current_cell}-${p.cell_arrived_at || ''}-${p.map_emoji || ''}`).join('|')}`;
+  const mapConfigKey = `${[...trapCells].join(',')}:${[...luckyCells].join(',')}`;
+  const key = `${mapConfigKey}:${currentMapCell()}:${leaderboardPlayers.map((p) => `${p.tg_id}-${p.current_cell}-${p.cell_arrived_at || ''}-${p.map_emoji || ''}`).join('|')}`;
   if (key === lastMapKey && els.cloudMap.children.length) return;
   lastMapKey = key;
   els.cloudMap.innerHTML = '';
@@ -790,6 +806,7 @@ async function loadState() {
   }
 
   state = await api(`/api/me/${encodeURIComponent(tgId)}?username=${encodeURIComponent(tgUsername)}`);
+  applyMapConfig(state.map_config);
   lastSubmissionStatus = state.activeSubmission?.status || lastSubmissionStatus;
   render();
   loadLeaderboard().catch(() => {});
@@ -1808,7 +1825,10 @@ async function loadRaffle(force = true, animateNew = false) {
   const data = await api('/api/raffle/status');
   if (force && data.is_finished && tgId) {
     const refreshedState = await api(`/api/me/${encodeURIComponent(tgId)}?username=${encodeURIComponent(tgUsername)}`).catch(() => null);
-    if (refreshedState) state = refreshedState;
+    if (refreshedState) {
+      state = refreshedState;
+      applyMapConfig(state.map_config);
+    }
   }
   raffleLoadedAt = now;
   if (!force) {
