@@ -1128,11 +1128,21 @@ async function issueTicket(tgId, type = 'standard', submissionId = null) {
 }
 
 
+
+async function hasPendingRequiredResubmission(tgId, excludeSubmissionId = null) {
+  const row = await get(`SELECT id FROM submissions
+    WHERE tg_id = ? AND status = 'rejected' AND COALESCE(resubmission_required, 0) = 1
+      AND (? IS NULL OR id <> ?)
+    LIMIT 1`, [tgId, excludeSubmissionId, excludeSubmissionId]);
+  return Boolean(row);
+}
+
 async function approveSubmissionSideEffects(submission, source = 'admin') {
   const userBeforeApproval = await get('SELECT finished_at FROM users WHERE tg_id = ?', [submission.tg_id]);
   const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
   const finishedNow = Number(userAfterApproval.current_cell) >= 100 && !userBeforeApproval?.finished_at;
-  await run("UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL, finished_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE finished_at END, finish_modal_shown = CASE WHEN ? = 1 THEN 0 ELSE finish_modal_shown END WHERE tg_id = ?", [finishedNow ? 1 : 0, finishedNow ? 1 : 0, submission.tg_id]);
+  const keepFrozen = await hasPendingRequiredResubmission(submission.tg_id, submission.id);
+  await run("UPDATE users SET dice_frozen = ?, pending_lucky_cell = NULL, finished_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE finished_at END, finish_modal_shown = CASE WHEN ? = 1 THEN 0 ELSE finish_modal_shown END WHERE tg_id = ?", [keepFrozen ? 1 : 0, finishedNow ? 1 : 0, finishedNow ? 1 : 0, submission.tg_id]);
   const issuedTickets = [await issueTicket(submission.tg_id, 'standard', submission.id)];
   if (finishedNow) {
     issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
@@ -2265,7 +2275,7 @@ app.get('/api/admin/submissions', async (req, res, next) => {
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
       JOIN tasks t ON t.id = s.task_id
-      WHERE s.status IN ('pending', 'auto_approved') AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
+      WHERE s.status = 'pending' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
       ORDER BY s.updated_at ASC, s.id ASC`);
     res.json({ submissions });
   } catch (error) {
@@ -2273,6 +2283,23 @@ app.get('/api/admin/submissions', async (req, res, next) => {
   }
 });
 
+
+
+app.get('/api/admin/auto-approved-submissions', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
+    const submissions = await all(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.image_name, s.photo_before, s.photo_after, s.status, s.admin_comment,
+        u.username, t.text_task
+      FROM submissions s
+      JOIN users u ON u.tg_id = s.tg_id
+      JOIN tasks t ON t.id = s.task_id
+      WHERE s.status = 'auto_approved' AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL
+      ORDER BY s.updated_at ASC, s.id ASC`);
+    res.json({ submissions });
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get('/api/admin/work-archive', async (req, res, next) => {
   try {
@@ -2435,8 +2462,11 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
     if (!submission) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
 
     const wasAutoApproved = submission.status === 'auto_approved';
+    const existingTicket = await get('SELECT ticket_number FROM tickets WHERE submission_id = ? LIMIT 1', [submissionId]);
     await run("UPDATE submissions SET status = 'approved', admin_comment = '', resubmission_required = 0, resubmission_notice_shown = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [submissionId]);
-    if (wasAutoApproved) {
+    if (wasAutoApproved || existingTicket) {
+      const keepFrozen = await hasPendingRequiredResubmission(submission.tg_id, submission.id);
+      await run('UPDATE users SET dice_frozen = ?, pending_lucky_cell = NULL WHERE tg_id = ?', [keepFrozen ? 1 : 0, submission.tg_id]);
       const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
       return res.json({ ok: true, issuedTickets: [], is_finalist: Number(userAfterApproval.current_cell) >= 100 });
     }
@@ -2455,10 +2485,26 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
     if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
     if (!comment) throw Object.assign(new Error('Добавьте комментарий для отклонения'), { status: 400 });
 
+    const submission = await get(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.status
+      FROM submissions s
+      WHERE s.id = ? AND s.status IN ('pending', 'auto_approved') AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL`, [submissionId]);
+    if (!submission) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
+    const wasAutoApproved = submission.status === 'auto_approved';
     const result = await run(`UPDATE submissions
       SET status = 'rejected', admin_comment = ?, resubmission_required = CASE WHEN status = 'auto_approved' THEN 1 ELSE 0 END, resubmission_notice_shown = 0, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND status IN ('pending', 'auto_approved') AND photo_before IS NOT NULL AND photo_after IS NOT NULL`, [comment, submissionId]);
     if (result.changes === 0) throw Object.assign(new Error('Работа не найдена или уже проверена'), { status: 404 });
+    if (wasAutoApproved) {
+      const message = `⚠️ Внимание: твоя предыдущая работа не прошла проверку!
+
+Приветик! Твоя работа по клетке №${Number(submission.cell || 0)} была одобрена автоматически, чтобы ты не ждала модератора. Однако при ручной проверке админ заметил ошибку:
+💬 «${comment}»
+
+Что делать дальше?
+Сейчас ты можешь спокойно докрасить свое текущее задание. Но помни: как только ты его сдашь, твой кубик временно заблокируется. Тебе нужно будет переделать и загрузить заново именно прошлую отклоненную работу. Давай сделаем её красиво! 🎨✨`;
+      await logPlayerAction(submission.tg_id, 'auto_approved_post_rejected', message, { cell: submission.cell, taskId: submission.task_id, submissionId: submission.id, actorTgId: req.body.admin_tg_id });
+      await addNewsEvent(message, { eventType: 'auto_approved_post_rejected', tgId: submission.tg_id });
+    }
     res.json({ ok: true });
   } catch (error) {
     next(error);
