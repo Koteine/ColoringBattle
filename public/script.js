@@ -1102,7 +1102,8 @@ async function openProfile(profileId) {
   const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div>` : '';
   const worksBlock = `<h3>Сданные работы</h3><div class="work-cube-grid">${works.map((work, index) => `<button class="work-cube" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)}</strong><small>работа #${Number(work.id || 0)}</small></button>`).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div><div id="profileWorkDetails" class="profile-work-details"></div>`;
   const emergencyBlock = isAdminView ? `<div class="profile-emergency"><button class="danger" type="button" data-defibrillate>⚙️</button></div>` : '';
-  els.profileContent.innerHTML = `<h2>${escapeHtml(profile.name)}</h2>${adminToolsBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${emojiSettingsBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
+  const profileTitleBlock = `<div class="profile-title-row"><h2>${escapeHtml(profile.name)}</h2>${ownProfile ? '<button class="bell-btn profile-bell-btn" type="button" data-profile-notifications aria-label="Личные уведомления" title="Личные уведомления">🔔</button>' : ''}</div>`;
+  els.profileContent.innerHTML = `${profileTitleBlock}${adminToolsBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${emojiSettingsBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
 
   els.profileContent.querySelectorAll('[data-map-emoji]').forEach((button) => {
     button.addEventListener('click', () => saveMapEmoji(button.dataset.mapEmoji).catch((error) => showToast(error.message)));
@@ -1119,6 +1120,7 @@ async function openProfile(profileId) {
       if (work?.id) renderProfileWorkInline(work, isAdminView, ownProfile);
     });
   });
+  els.profileContent.querySelector('[data-profile-notifications]')?.addEventListener('click', () => openNotifications().catch((error) => showToast(error.message)));
   els.profileContent.querySelector('[data-player-log]')?.addEventListener('click', () => openPlayerLog(profile.tg_id).catch((error) => showToast(error.message)));
   els.profileContent.querySelector('[data-defibrillate]')?.addEventListener('click', () => defibrillatePlayer(profile.tg_id).catch((error) => showToast(error.message)));
   els.profileContent.querySelectorAll('[data-resubmit-id]').forEach((button) => {
@@ -1317,13 +1319,24 @@ async function openNotifications() {
   els.notificationsModal.classList.remove('hidden');
   const data = await api(`/api/notifications/${encodeURIComponent(state.user.tg_id || tgId)}`);
   const rows = [];
-  for (const event of data.events || []) rows.push(`<li>${escapeHtml(event.message)}<br><small>${escapeHtml(event.created_at || '')}</small></li>`);
+  for (const event of data.events || []) rows.push({
+    time: event.created_at || '',
+    id: Number(event.id || 0),
+    html: `${escapeHtml(event.message)}<br><small>${escapeHtml(event.created_at || '')}</small>`
+  });
   for (const sub of data.submissions || []) {
-    if (Number(sub.resubmission_required || 0) === 1) rows.push(`<li>Ваша прошлая работа (№${Number(sub.task_id || sub.id || 0)}) отклонена. Комментарий: ${escapeHtml(sub.admin_comment || '')}<br><small>${escapeHtml(sub.created_at || '')}</small></li>`);
-    else rows.push(`<li>Квест на клетке ${Number(sub.cell || 0)}: ${escapeHtml(sub.status)}<br><small>${escapeHtml(sub.created_at || '')}</small></li>`);
+    const text = Number(sub.resubmission_required || 0) === 1
+      ? `Ваша прошлая работа (№${Number(sub.task_id || sub.id || 0)}) отклонена. Комментарий: ${escapeHtml(sub.admin_comment || '')}`
+      : `Квест на клетке ${Number(sub.cell || 0)}: ${escapeHtml(sub.status)}`;
+    rows.push({ time: sub.created_at || '', id: Number(sub.id || 0), html: `${text}<br><small>${escapeHtml(sub.created_at || '')}</small>` });
   }
-  for (const duel of data.duels || []) rows.push(`<li>🧩 Дуэль #${Number(duel.id)}: ${escapeHtml(duel.status)}${duel.winner_tg_id ? ` · победитель ID ${escapeHtml(duel.winner_tg_id)}` : ''}<br><small>${escapeHtml(duel.created_at || '')}</small></li>`);
-  els.notificationsContent.innerHTML = rows.length ? `<ul>${rows.join('')}</ul>` : '<p class="muted">Личных звоночков пока нет.</p>';
+  for (const duel of data.duels || []) rows.push({
+    time: duel.created_at || '',
+    id: Number(duel.id || 0),
+    html: `🧩 Дуэль #${Number(duel.id)}: ${escapeHtml(duel.status)}${duel.winner_tg_id ? ` · победитель ID ${escapeHtml(duel.winner_tg_id)}` : ''}<br><small>${escapeHtml(duel.created_at || '')}</small>`
+  });
+  rows.sort((a, b) => (Date.parse(b.time) || 0) - (Date.parse(a.time) || 0) || b.id - a.id);
+  els.notificationsContent.innerHTML = rows.length ? `<ul>${rows.map((row) => `<li>${row.html}</li>`).join('')}</ul>` : '<p class="muted">Личных звоночков пока нет.</p>';
 }
 
 function closeNotifications() {
