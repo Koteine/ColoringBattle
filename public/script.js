@@ -864,6 +864,7 @@ async function rollDice() {
     await animatePlayerPath(path);
     await loadState();
     openTaskOverlayForCurrentCell(result.current_cell);
+    showSpecialCellNotification(result);
     if (result.cell_type === 'trap' && result.trap_immunity_used) {
       showToast('✨ Магический щит сработал! Ловушка разрушена!');
     } else if (result.cell_type === 'trap') {
@@ -919,6 +920,31 @@ function animatePlayerPath(path, delay = 340) {
     };
     next();
   });
+}
+
+
+function showSpecialCellNotification(result) {
+  if (!result || !['trap', 'lucky'].includes(result.cell_type)) return;
+  const isTrap = result.cell_type === 'trap';
+  const message = isTrap
+    ? (result.trap_immunity_used
+      ? `Ловушка на клетке ${Number(result.landed_cell || result.current_cell || 0)}! Защитное яблоко спасло вас от отката.`
+      : `Ловушка на клетке ${Number(result.landed_cell || 0)}! Откат на ${Number(result.trap_dice || 0)}: новая клетка ${Number(result.current_cell || 0)}.`)
+    : `Бонусная клетка ${Number(result.current_cell || result.landed_cell || 0)}! Выберите особое условие задания.`;
+
+  showRollLikeNotification(isTrap ? '🪤 Вы попали в ловушку!' : '🎉 Вы попали на бонусную клетку!', message);
+}
+
+function showRollLikeNotification(title, message) {
+  document.getElementById('specialCellResultModal')?.remove();
+  const modal = document.createElement('div');
+  modal.id = 'specialCellResultModal';
+  modal.className = 'roll-result-modal';
+  modal.innerHTML = `<button type="button" aria-label="Закрыть">×</button><span><strong>${escapeHtml(title)}</strong><br>${escapeHtml(message)}</span>`;
+  const close = () => modal.remove();
+  modal.querySelector('button').addEventListener('click', close);
+  document.body.append(modal);
+  window.setTimeout(close, 15000);
 }
 
 function showRollResultModal(dice) {
