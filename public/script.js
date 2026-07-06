@@ -153,6 +153,7 @@ let lastMapKey = '';
 let displayedPlayerCell = null;
 let adminPendingSubmissionsCache = [];
 let adminArchivePlayersCache = [];
+let adminAutoApprovedSubmissionsCache = [];
 let movementTimer = null;
 let rollResultTimer = null;
 const playerEmojiPool = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀','🍄','✨','🧸','🔮','👽','🙈','💅','👅','🧚‍♀️','👸','🧟‍♀️','🧜‍♀️','🧛','🐭','🐷','🌹','🐌','🍼','🍬','🍭','🎁','🕶️','🗿','💊','🧨'];
@@ -398,19 +399,21 @@ function updateDiceFace(value) {
 async function renderWorkArchive() {
   els.paletteGrid.classList.add('archive-mode');
   els.paletteHint.textContent = 'Админские разделы палитры открываются отдельными полноэкранными окнами.';
-  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
+  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="autoApprovedBtn" type="button" class="admin-palette-button ghost">Автоодобрение</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
   els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем админские разделы...</div>';
 
-  const [pendingData, archiveData, usersData] = await Promise.all([
+  const [pendingData, autoApprovedData, archiveData, usersData] = await Promise.all([
     api(`/api/admin/submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
+    api(`/api/admin/auto-approved-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`),
     hasAdminAccess(state?.user) ? api(`/api/admin/users?admin_tg_id=${encodeURIComponent(tgId)}`) : Promise.resolve(null)
   ]);
 
   adminPendingSubmissionsCache = pendingData.submissions || [];
+  adminAutoApprovedSubmissionsCache = autoApprovedData.submissions || [];
   adminArchivePlayersCache = usersData?.users || archiveData.players || [];
   renderAdminPaletteButtons();
-  els.paletteGrid.innerHTML = '<div class="empty-state">Выберите «Ожидают одобрения» или «Все игроки», чтобы открыть список.</div>';
+  els.paletteGrid.innerHTML = '<div class="empty-state">Выберите «Ожидают одобрения», «Автоодобрение» или «Все игроки», чтобы открыть список.</div>';
 }
 
 function renderPalette(tickets = []) {
@@ -1944,10 +1947,16 @@ function renderPendingUsers(users) {
 function renderAdminPaletteButtons() {
   const pendingButton = document.getElementById('pendingApprovalsBtn');
   const playersButton = document.getElementById('allPlayersPaletteBtn');
+  const autoApprovedButton = document.getElementById('autoApprovedBtn');
   if (pendingButton) {
     pendingButton.classList.toggle('has-pending', adminPendingSubmissionsCache.length > 0);
     pendingButton.setAttribute('aria-label', adminPendingSubmissionsCache.length > 0 ? `Ожидают одобрения: ${adminPendingSubmissionsCache.length}` : 'Ожидают одобрения');
     pendingButton.addEventListener('click', () => openPendingApprovalsModal());
+  }
+  if (autoApprovedButton) {
+    autoApprovedButton.classList.toggle('has-pending', adminAutoApprovedSubmissionsCache.length > 0);
+    autoApprovedButton.setAttribute('aria-label', adminAutoApprovedSubmissionsCache.length > 0 ? `Автоодобрение: ${adminAutoApprovedSubmissionsCache.length}` : 'Автоодобрение');
+    autoApprovedButton.addEventListener('click', () => openAutoApprovedModal());
   }
   if (playersButton) playersButton.addEventListener('click', () => openAllPlayersModal());
 }
@@ -1999,6 +2008,13 @@ function openPendingApprovalsModal() {
   openAdminFullscreenModal('Ожидают одобрения', content);
 }
 
+function openAutoApprovedModal() {
+  const content = document.createElement('div');
+  content.className = 'list';
+  renderPendingSubmissions(adminAutoApprovedSubmissionsCache, content, { autoArchive: true });
+  openAdminFullscreenModal('Автоодобрение', content);
+}
+
 function openAllPlayersModal() {
   const content = document.createElement('div');
   content.className = 'list';
@@ -2019,7 +2035,7 @@ function openAllPlayersModal() {
   openAdminFullscreenModal('Все игроки', content);
 }
 
-function renderPendingSubmissions(submissions, target = els.pendingSubmissions) {
+function renderPendingSubmissions(submissions, target = els.pendingSubmissions, options = {}) {
   target.innerHTML = '';
   const pendingInner = document.createElement('div');
   pendingInner.className = 'pending-submissions-inner';
@@ -2032,7 +2048,7 @@ function renderPendingSubmissions(submissions, target = els.pendingSubmissions) 
     const item = document.createElement('article');
     item.className = 'item';
     item.innerHTML = `
-      <strong>${escapeHtml(playerName)} — клетка ${submission.cell}</strong><p class="muted">Статус: ${submission.status === 'auto_approved' ? 'автоодобрено' : 'ожидает одобрения'}</p>
+      <strong>${escapeHtml(playerName)} — ${submission.status === 'auto_approved' ? 'обычный квест' : 'квест'} · клетка ${submission.cell}</strong><p class="muted">Статус: ${submission.status === 'auto_approved' ? 'автоодобрено' : 'ожидает одобрения'}</p>
       <p>${escapeHtml(submission.text_task)}</p>
       <div class="comparison-grid">
         <a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener">
@@ -2055,7 +2071,7 @@ function renderPendingSubmissions(submissions, target = els.pendingSubmissions) 
     const approve = document.createElement('button');
     approve.type = 'button';
     approve.className = 'success';
-    approve.textContent = 'Одобрить';
+    approve.textContent = submission.status === 'auto_approved' || options.autoArchive ? 'Подтвердить' : 'Одобрить';
     approve.addEventListener('click', async () => {
       const result = await api('/api/admin/approve-submission', {
         method: 'POST',
@@ -2065,7 +2081,7 @@ function renderPendingSubmissions(submissions, target = els.pendingSubmissions) 
       const ticketNumbers = (result.issuedTickets || []).map((ticket) => `№${ticket.ticket_number}`).join(', ');
       showToast(ticketNumbers ? `Работа одобрена. Выданы Красочки: ${ticketNumbers}` : 'Автоодобренная работа подтверждена');
       await renderWorkArchive();
-      openPendingApprovalsModal();
+      if (submission.status === 'auto_approved' || options.autoArchive) openAutoApprovedModal(); else openPendingApprovalsModal();
       await loadNews().catch(() => {});
       if (submission.tg_id === tgId) await loadState();
     });
@@ -2073,7 +2089,7 @@ function renderPendingSubmissions(submissions, target = els.pendingSubmissions) 
     const reject = document.createElement('button');
     reject.type = 'button';
     reject.className = 'danger';
-    reject.textContent = 'Отклонить';
+    reject.textContent = submission.status === 'auto_approved' || options.autoArchive ? 'Отклонить постфактум' : 'Отклонить';
     reject.addEventListener('click', async () => {
       const comment = item.querySelector(`[data-comment="${submission.id}"]`).value.trim();
       if (!comment) return showToast('Добавьте комментарий для игрока');
@@ -2084,7 +2100,7 @@ function renderPendingSubmissions(submissions, target = els.pendingSubmissions) 
       });
       showToast('Работа отклонена');
       await renderWorkArchive();
-      openPendingApprovalsModal();
+      if (submission.status === 'auto_approved' || options.autoArchive) openAutoApprovedModal(); else openPendingApprovalsModal();
     });
 
     actions.append(approve, reject);
