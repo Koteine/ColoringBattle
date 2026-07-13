@@ -89,6 +89,7 @@ const els = {
   taskAdminList: document.getElementById('taskAdminList'),
   grantTicketForm: document.getElementById('grantTicketForm'),
   grantTicketTgId: document.getElementById('grantTicketTgId'),
+  grantTicketSuggestions: document.getElementById('grantTicketSuggestions'),
   ticketsExport: document.getElementById('ticketsExport'),
   raffleConfigForm: document.getElementById('raffleConfigForm'),
   raffleStartInput: document.getElementById('raffleStartInput'),
@@ -135,6 +136,7 @@ let activeTab = 'game';
 let adminTasks = [];
 let pollingTimer = null;
 let lastSubmissionStatus = '';
+let lastPostModerationDebtNoticeId = null;
 let isRolling = false;
 let finishModalOpen = false;
 let raffleLoadedAt = 0;
@@ -154,6 +156,8 @@ let displayedPlayerCell = null;
 let adminPendingSubmissionsCache = [];
 let adminArchivePlayersCache = [];
 let adminAutoApprovedSubmissionsCache = [];
+let adminUsersCache = [];
+let adminRejectedSubmissionsCache = [];
 let movementTimer = null;
 let rollResultTimer = null;
 const playerEmojiPool = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀','🍄','✨','🧸','🔮','👽','🙈','💅','👅','🧚‍♀️','👸','🧟‍♀️','🧜‍♀️','🧛','🐭','🐷','🌹','🐌','🍼','🍬','🍭','🎁','🕶️','🗿','💊','🧨'];
@@ -415,18 +419,20 @@ function updateDiceFace(value) {
 async function renderWorkArchive() {
   els.paletteGrid.classList.add('archive-mode');
   els.paletteHint.textContent = 'Админские разделы палитры открываются отдельными полноэкранными окнами.';
-  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="autoApprovedBtn" type="button" class="admin-palette-button ghost">Автоодобрение</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
+  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="autoApprovedBtn" type="button" class="admin-palette-button ghost">Автоодобрение</button><button id="rejectedWorksBtn" type="button" class="admin-palette-button danger">Отклоненные</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
   els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем админские разделы...</div>';
 
-  const [pendingData, autoApprovedData, archiveData, usersData] = await Promise.all([
+  const [pendingData, autoApprovedData, rejectedData, archiveData, usersData] = await Promise.all([
     api(`/api/admin/submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/auto-approved-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
+    api(`/api/admin/rejected-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`),
     hasAdminAccess(state?.user) ? api(`/api/admin/users?admin_tg_id=${encodeURIComponent(tgId)}`) : Promise.resolve(null)
   ]);
 
   adminPendingSubmissionsCache = pendingData.submissions || [];
   adminAutoApprovedSubmissionsCache = autoApprovedData.submissions || [];
+  adminRejectedSubmissionsCache = rejectedData.submissions || [];
   adminArchivePlayersCache = usersData?.users || archiveData.players || [];
   renderAdminPaletteButtons();
   els.paletteGrid.innerHTML = '<div class="empty-state">Выберите «Ожидают одобрения», «Автоодобрение» или «Все игроки», чтобы открыть список.</div>';
@@ -669,13 +675,25 @@ function renderTask(submission) {
   els.taskText.textContent = submission.text_task;
 
   if (submission.status === 'rejected') {
-    els.taskStatus.textContent = `Работа отклонена: ${submission.admin_comment || 'без комментария'}. Загрузите новую пару фото, начиная с Фото ДО.`;
-    configureSubmitStep({
-      fieldName: 'photo_before',
-      title: 'Шаг 1: Зафиксируй начало работы',
-      hint: 'Повторно загрузите Фото ДО — незакрашенную страницу перед новой попыткой. После этого Фото ПОСЛЕ нужно будет отправить заново.',
-      buttonText: 'Отправить Фото ДО'
-    });
+    const postModerationDebt = Number(submission.resubmission_required || 0) === 1 || Number(submission.frozen_by_post_moderation || 0) === 1;
+    els.taskStatus.textContent = postModerationDebt
+      ? `Кубик заблокирован из-за старой работы с автоодобрением. Комментарий админа: ${submission.admin_comment || 'без комментария'}. Загрузите новую пару фото для клетки ${Number(submission.cell || 0)}, начиная с Фото ДО.`
+      : `Работа отклонена: ${submission.admin_comment || 'без комментария'}. Загрузите новую пару фото, начиная с Фото ДО.`;
+    if (postModerationDebt && submission.photo_before && !submission.photo_after) {
+      configureSubmitStep({
+        fieldName: 'photo_after',
+        title: 'Шаг 2: Повторная работа',
+        hint: 'Фото ДО для переделки сохранено. Раскрасьте страницу и загрузите новое Фото ПОСЛЕ.',
+        buttonText: 'Отправить Фото ПОСЛЕ'
+      });
+    } else {
+      configureSubmitStep({
+        fieldName: 'photo_before',
+        title: 'Шаг 1: Зафиксируй начало работы',
+        hint: 'Повторно загрузите Фото ДО — незакрашенную страницу перед новой попыткой. После этого Фото ПОСЛЕ нужно будет отправить заново.',
+        buttonText: 'Отправить Фото ДО'
+      });
+    }
     return;
   }
 
@@ -1549,7 +1567,10 @@ async function submitWork(event) {
     const optimizedFile = await resizeImageTo720p(els.workImage.files[0]);
     formData.append(fieldName, optimizedFile);
     els.submitBtn.textContent = 'Отправляем...';
-    const result = await api('/api/submit', { method: 'POST', body: formData });
+    const active = state?.activeSubmission;
+    const resubmissionMode = active?.status === 'rejected' && Number(active?.resubmission_required || 0) === 1;
+    if (resubmissionMode) formData.append('submission_id', active.id);
+    const result = await api(resubmissionMode ? '/api/resubmit-submission' : '/api/submit', { method: 'POST', body: formData });
     els.workImage.value = '';
     showToast(result.uploaded_stage === 'before' ? 'Фото ДО сохранено. Переходите к раскрашиванию.' : 'Фото ПОСЛЕ отправлено на проверку.');
     await loadState();
@@ -1582,6 +1603,8 @@ async function checkStatus() {
       return;
     }
 
+    const postModerationDebt = data.post_moderation_debt || (data.progress_status === 'frozen_by_post_moderation' ? data.active_submission : null);
+
     if (knownFrozen !== serverFrozen && serverFrozen === 0) {
       showToast('Кубик снова доступен — можно бросать дальше!', 4200);
       await loadState();
@@ -1589,10 +1612,19 @@ async function checkStatus() {
     }
 
     if (submission.status === 'approved' && lastSubmissionStatus !== 'approved') {
-      showToast(data.finish_summary?.finished ? 'Финальная работа одобрена! Ты дошла до финиша!' : 'Работа одобрена! Красочка добавлена в палитру, кубик снова доступен.', 5200);
+      if (postModerationDebt) {
+        const debtId = Number(postModerationDebt.id || 0);
+        if (lastPostModerationDebtNoticeId !== debtId) {
+          window.alert(`Текущая работа одобрена, но кубик остается заблокированным: нужно переделать старую работу с клетки ${Number(postModerationDebt.cell || 0)}. Комментарий админа: ${postModerationDebt.admin_comment || 'без комментария'}`);
+          lastPostModerationDebtNoticeId = debtId;
+        }
+      } else {
+        showToast(data.finish_summary?.finished ? 'Финальная работа одобрена! Ты дошла до финиша!' : 'Работа одобрена! Красочка добавлена в палитру, кубик снова доступен.', 5200);
+      }
       if (data.finish_summary?.finished && !data.finish_summary.modal_shown) showFinishModal(data.finish_summary);
       lastSubmissionStatus = 'approved';
       await loadState();
+      if (postModerationDebt) openTaskOverlayForCurrentCell(postModerationDebt.cell);
     } else if (submission.status === 'rejected' && lastSubmissionStatus !== 'rejected') {
       window.alert(`Работа отклонена. Комментарий: ${submission.admin_comment || 'без комментария'}`);
       lastSubmissionStatus = 'rejected';
@@ -1902,7 +1934,8 @@ async function loadAdminPanel() {
     api(`/api/admin/tasks?${adminParam}`)
   ]);
   adminTasks = taskData.tasks || [];
-  renderAllUsers(users.users);
+  adminUsersCache = users.users || [];
+  renderAllUsers(adminUsersCache);
   renderTicketRegistry(ticketData.tickets || []);
   renderAdminTasks(taskData.tasks || []);
   els.ticketsExport.value = exportData.text || '';
@@ -1968,6 +2001,7 @@ function renderAdminPaletteButtons() {
   const pendingButton = document.getElementById('pendingApprovalsBtn');
   const playersButton = document.getElementById('allPlayersPaletteBtn');
   const autoApprovedButton = document.getElementById('autoApprovedBtn');
+  const rejectedButton = document.getElementById('rejectedWorksBtn');
   if (pendingButton) {
     pendingButton.classList.toggle('has-pending', adminPendingSubmissionsCache.length > 0);
     pendingButton.setAttribute('aria-label', adminPendingSubmissionsCache.length > 0 ? `Ожидают одобрения: ${adminPendingSubmissionsCache.length}` : 'Ожидают одобрения');
@@ -1977,6 +2011,11 @@ function renderAdminPaletteButtons() {
     autoApprovedButton.classList.toggle('has-pending', adminAutoApprovedSubmissionsCache.length > 0);
     autoApprovedButton.setAttribute('aria-label', adminAutoApprovedSubmissionsCache.length > 0 ? `Автоодобрение: ${adminAutoApprovedSubmissionsCache.length}` : 'Автоодобрение');
     autoApprovedButton.addEventListener('click', () => openAutoApprovedModal());
+  }
+  if (rejectedButton) {
+    rejectedButton.classList.toggle('has-pending', adminRejectedSubmissionsCache.length > 0);
+    rejectedButton.setAttribute('aria-label', adminRejectedSubmissionsCache.length > 0 ? `Отклоненные: ${adminRejectedSubmissionsCache.length}` : 'Отклоненные');
+    rejectedButton.addEventListener('click', () => openRejectedWorksModal());
   }
   if (playersButton) playersButton.addEventListener('click', () => openAllPlayersModal());
 }
@@ -2008,7 +2047,20 @@ function ensureAdminFullscreenModal() {
   return modal;
 }
 
+function restoreAdminFullscreenContent() {
+  const modal = document.getElementById('adminPaletteModal');
+  const placeholderId = modal?.dataset.restorePlaceholder;
+  const movedSelector = modal?.dataset.movedSelector;
+  if (!placeholderId || !movedSelector) return;
+  const placeholder = document.getElementById(placeholderId);
+  const moved = modal.querySelector(movedSelector);
+  if (placeholder && moved) placeholder.replaceWith(moved);
+  delete modal.dataset.restorePlaceholder;
+  delete modal.dataset.movedSelector;
+}
+
 function openAdminFullscreenModal(title, contentNode) {
+  restoreAdminFullscreenContent();
   const modal = ensureAdminFullscreenModal();
   modal.querySelector('#adminPaletteModalTitle').textContent = title;
   const content = modal.querySelector('#adminPaletteModalContent');
@@ -2018,7 +2070,21 @@ function openAdminFullscreenModal(title, contentNode) {
 }
 
 function closeAdminFullscreenModal() {
+  restoreAdminFullscreenContent();
   document.getElementById('adminPaletteModal')?.classList.add('hidden');
+}
+
+function openAdminSectionModal(section) {
+  const button = section?.querySelector('.admin-accordion-toggle');
+  const inner = section?.querySelector('.admin-accordion-inner');
+  if (!button || !inner) return;
+  const placeholder = document.createElement('div');
+  placeholder.id = `admin-section-placeholder-${Date.now()}`;
+  inner.replaceWith(placeholder);
+  openAdminFullscreenModal(button.textContent.trim(), inner);
+  const modal = ensureAdminFullscreenModal();
+  modal.dataset.restorePlaceholder = placeholder.id;
+  modal.dataset.movedSelector = '.admin-accordion-inner';
 }
 
 function openPendingApprovalsModal() {
@@ -2053,6 +2119,54 @@ function openAllPlayersModal() {
     }
   }
   openAdminFullscreenModal('Все игроки', content);
+}
+
+
+function openRejectedWorksModal() {
+  const content = document.createElement('div');
+  content.className = 'list';
+  if (!adminRejectedSubmissionsCache.length) {
+    content.innerHTML = '<div class="empty-state">Отклоненных работ пока нет.</div>';
+  } else {
+    for (const submission of adminRejectedSubmissionsCache) {
+      const beforeUrl = submission.photo_before ? `/uploads/${encodeURIComponent(submission.photo_before)}` : '';
+      const afterUrl = submission.photo_after ? `/uploads/${encodeURIComponent(submission.photo_after)}` : '';
+      const username = submission.username ? `@${String(submission.username).replace(/^@/, '')}` : `ID ${submission.tg_id}`;
+      const item = document.createElement('article');
+      item.className = 'item rejected-work-card';
+      item.innerHTML = `
+        <button type="button" class="profile-link" data-profile-id="${escapeHtml(submission.tg_id)}"><strong>${escapeHtml(username)}</strong></button>
+        <p class="muted">Клетка ${Number(submission.cell || 0)} · задание #${Number(submission.task_id || 0)}</p>
+        <p>${escapeHtml(submission.text_task || submission.assigned_task_text || '')}</p>
+        <div class="rejected-thumb-grid">
+          ${beforeUrl ? `<a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a>` : '<div class="empty-state">Фото ДО нет</div>'}
+          ${afterUrl ? `<a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a>` : '<div class="empty-state">Фото ПОСЛЕ нет</div>'}
+        </div>
+        <p class="notice"><strong>Комментарий админа:</strong> ${escapeHtml(submission.admin_comment || 'Комментарий не указан')}</p>
+      `;
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const amnesty = document.createElement('button');
+      amnesty.type = 'button';
+      amnesty.className = 'success';
+      amnesty.textContent = 'Амнистия';
+      amnesty.addEventListener('click', async () => {
+        if (!window.confirm('Вернуть работу в очередь проверки?')) return;
+        await api('/api/admin/amnesty-submission', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ admin_tg_id: tgId, submission_id: submission.id })
+        });
+        showToast('Работа возвращена в проверку');
+        await renderWorkArchive();
+        openRejectedWorksModal();
+      });
+      actions.append(amnesty);
+      item.append(actions);
+      content.append(item);
+    }
+  }
+  openAdminFullscreenModal('Отклоненные работы', content);
 }
 
 function renderPendingSubmissions(submissions, target = els.pendingSubmissions, options = {}) {
@@ -2110,9 +2224,12 @@ function renderPendingSubmissions(submissions, target = els.pendingSubmissions, 
     reject.type = 'button';
     reject.className = 'danger';
     reject.textContent = submission.status === 'auto_approved' || options.autoArchive ? 'Отклонить постфактум' : 'Отклонить';
+    reject.disabled = true;
+    const commentInput = item.querySelector(`[data-comment="${submission.id}"]`);
+    commentInput?.addEventListener('input', () => { reject.disabled = commentInput.value.trim().length < 5; });
     reject.addEventListener('click', async () => {
-      const comment = item.querySelector(`[data-comment="${submission.id}"]`).value.trim();
-      if (!comment) return showToast('Добавьте комментарий для игрока');
+      const comment = commentInput.value.trim();
+      if (comment.length < 5) return showToast('Комментарий должен быть не короче 5 символов');
       await api('/api/admin/reject-submission', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2327,6 +2444,30 @@ async function toggleModerator(targetTgId, targetRole) {
 }
 
 
+
+function renderGrantTicketSuggestions() {
+  if (!els.grantTicketTgId || !els.grantTicketSuggestions) return;
+  const query = els.grantTicketTgId.value.trim().toLowerCase().replace(/^@/, '');
+  if (query.length < 1) {
+    els.grantTicketSuggestions.classList.add('hidden');
+    els.grantTicketSuggestions.innerHTML = '';
+    return;
+  }
+  const matches = adminUsersCache
+    .filter((user) => Number(user.is_approved) === 1)
+    .filter((user) => String(user.tg_id).includes(query) || String(user.username || '').toLowerCase().replace(/^@/, '').includes(query))
+    .slice(0, 8);
+  els.grantTicketSuggestions.innerHTML = matches.length ? matches.map((user) => {
+    const username = user.username ? `@${String(user.username).replace(/^@/, '')}` : 'Без ника';
+    return `<button class="grant-suggestion" type="button" data-grant-tg-id="${escapeHtml(user.tg_id)}"><span class="grant-suggestion-avatar">${escapeHtml(playerEmoji(user))}</span><span><strong>${escapeHtml(username)}</strong><small class="muted">ID: ${escapeHtml(user.tg_id)}</small></span></button>`;
+  }).join('') : '<div class="empty-state">Совпадений нет</div>';
+  els.grantTicketSuggestions.classList.remove('hidden');
+}
+
+function closeGrantTicketSuggestions() {
+  els.grantTicketSuggestions?.classList.add('hidden');
+}
+
 async function grantTicket(event) {
   event.preventDefault();
   const targetTgId = els.grantTicketTgId.value.trim();
@@ -2338,6 +2479,7 @@ async function grantTicket(event) {
     body: JSON.stringify({ admin_tg_id: tgId, tg_id: targetTgId })
   });
   els.grantTicketTgId.value = '';
+  closeGrantTicketSuggestions();
   showToast(`Начислена Красочка №${result.ticket.ticket_number}`);
   await loadAdminPanel();
   await loadNews().catch(() => {});
@@ -2460,6 +2602,14 @@ function handleReconsiderClick(event) {
 }
 els.taskAdminForm.addEventListener('submit', (event) => addAdminTask(event).catch((error) => showToast(error.message)));
 els.grantTicketForm.addEventListener('submit', (event) => grantTicket(event).catch((error) => showToast(error.message)));
+els.grantTicketTgId?.addEventListener('input', renderGrantTicketSuggestions);
+els.grantTicketSuggestions?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-grant-tg-id]');
+  if (!button) return;
+  els.grantTicketTgId.value = button.dataset.grantTgId;
+  closeGrantTicketSuggestions();
+});
+document.addEventListener('click', (event) => { if (!event.target.closest('.grant-search')) closeGrantTicketSuggestions(); });
 els.raffleConfigForm.addEventListener('submit', (event) => saveRaffleConfig(event).catch((error) => showToast(error.message)));
 els.refreshExportBtn?.addEventListener('click', () => refreshExport().catch((error) => showToast(error.message)));
 els.gameStatsExportBtn?.addEventListener('click', () => downloadGameStatsExport());
@@ -2497,11 +2647,7 @@ els.finishModal?.addEventListener('click', (event) => { if (event.target === els
 els.pendingSubmissions.addEventListener('click', toggleArchiveAccordion);
 
 document.querySelectorAll('.admin-accordion-toggle').forEach((button) => {
-  button.addEventListener('click', () => {
-    const section = button.closest('.admin-accordion');
-    const isOpen = section.classList.toggle('open');
-    button.setAttribute('aria-expanded', String(isOpen));
-  });
+  button.addEventListener('click', () => openAdminSectionModal(button.closest('.admin-accordion')));
 });
 document.querySelectorAll('.nav-btn').forEach((button) => {
   button.addEventListener('click', () => setActiveTab(button.dataset.tab));

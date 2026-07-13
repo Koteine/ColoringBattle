@@ -984,6 +984,14 @@ async function getUnconsumedApprovedSubmission(tgId) {
 }
 
 async function releaseDiceAfterUnconsumedApproval(tgId, currentUser) {
+  const oldDebt = await getPendingRequiredResubmission(tgId);
+  if (oldDebt) {
+    if (Number(currentUser.dice_frozen || 0) !== 1 || currentUser.pending_lucky_cell !== null) {
+      await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+    }
+    return { ...currentUser, dice_frozen: 1, pending_lucky_cell: null };
+  }
+
   const approvedSubmission = await getUnconsumedApprovedSubmission(tgId);
   if (!approvedSubmission) return null;
 
@@ -1040,6 +1048,11 @@ async function reconcileDiceLock(tgId, user = null) {
   if (activeSubmission) {
     if (Number(currentUser.dice_frozen || 0) !== 1) await run('UPDATE users SET dice_frozen = 1 WHERE tg_id = ?', [tgId]);
     return { user: { ...currentUser, dice_frozen: 1 }, activeSubmission };
+  }
+  const postModerationDebt = await getPendingRequiredResubmission(tgId);
+  if (postModerationDebt) {
+    if (Number(currentUser.dice_frozen || 0) !== 1 || currentUser.pending_lucky_cell !== null) await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+    return { user: { ...currentUser, dice_frozen: 1, pending_lucky_cell: null }, activeSubmission: postModerationDebt };
   }
   const releasedUser = await releaseDiceAfterUnconsumedApproval(tgId, currentUser);
   if (releasedUser) return { user: releasedUser, activeSubmission: null };
@@ -1129,12 +1142,19 @@ async function issueTicket(tgId, type = 'standard', submissionId = null) {
 
 
 
-async function hasPendingRequiredResubmission(tgId, excludeSubmissionId = null) {
-  const row = await get(`SELECT id FROM submissions
-    WHERE tg_id = ? AND status = 'rejected' AND COALESCE(resubmission_required, 0) = 1
-      AND (? IS NULL OR id <> ?)
+async function getPendingRequiredResubmission(tgId, excludeSubmissionId = null) {
+  return get(`SELECT s.*, COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id || ' временно восстанавливается администратором') AS text_task,
+      1 AS frozen_by_post_moderation
+    FROM submissions s
+    LEFT JOIN tasks t ON t.id = s.task_id
+    WHERE s.tg_id = ? AND s.status = 'rejected' AND COALESCE(s.resubmission_required, 0) = 1
+      AND (? IS NULL OR s.id <> ?)
+    ORDER BY s.id ASC
     LIMIT 1`, [tgId, excludeSubmissionId, excludeSubmissionId]);
-  return Boolean(row);
+}
+
+async function hasPendingRequiredResubmission(tgId, excludeSubmissionId = null) {
+  return Boolean(await getPendingRequiredResubmission(tgId, excludeSubmissionId));
 }
 
 async function approveSubmissionSideEffects(submission, source = 'admin') {
@@ -2113,19 +2133,23 @@ app.post('/api/resubmit-submission', upload.fields([
     if (!submission) throw Object.assign(new Error('Работа не ожидает повторной загрузки'), { status: 404 });
     const photoBefore = req.files?.photo_before?.[0];
     const photoAfter = req.files?.photo_after?.[0] || req.files?.work_image?.[0];
+    const uploadedStage = photoBefore ? 'before' : 'after';
     if (!photoBefore && !photoAfter) throw Object.assign(new Error('Загрузите фото ДО или ПОСЛЕ'), { status: 400 });
     await run(`UPDATE submissions
-      SET photo_before = COALESCE(?, photo_before), photo_after = COALESCE(?, photo_after), image_name = COALESCE(?, image_name),
-        status = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, photo_after) IS NOT NULL THEN 'pending' ELSE status END,
-        admin_comment = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, photo_after) IS NOT NULL THEN '' ELSE admin_comment END,
-        resubmission_required = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, photo_after) IS NOT NULL THEN 0 ELSE resubmission_required END,
+      SET photo_before = COALESCE(?, photo_before),
+        photo_after = CASE WHEN ? IS NOT NULL THEN NULL ELSE COALESCE(?, photo_after) END,
+        image_name = CASE WHEN ? IS NOT NULL THEN NULL ELSE COALESCE(?, image_name) END,
+        status = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, CASE WHEN ? IS NOT NULL THEN NULL ELSE photo_after END) IS NOT NULL THEN 'pending' ELSE 'rejected' END,
+        admin_comment = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, CASE WHEN ? IS NOT NULL THEN NULL ELSE photo_after END) IS NOT NULL THEN '' ELSE admin_comment END,
+        resubmission_required = CASE WHEN COALESCE(?, photo_before) IS NOT NULL AND COALESCE(?, CASE WHEN ? IS NOT NULL THEN NULL ELSE photo_after END) IS NOT NULL THEN 0 ELSE resubmission_required END,
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`, [photoBefore?.filename || null, photoAfter?.filename || null, photoAfter?.filename || null,
-        photoBefore?.filename || null, photoAfter?.filename || null, photoBefore?.filename || null, photoAfter?.filename || null,
-        photoBefore?.filename || null, photoAfter?.filename || null, submissionId]);
+      WHERE id = ?`, [photoBefore?.filename || null, photoBefore?.filename || null, photoAfter?.filename || null,
+        photoBefore?.filename || null, photoAfter?.filename || null, photoBefore?.filename || null, photoAfter?.filename || null, photoBefore?.filename || null,
+        photoBefore?.filename || null, photoAfter?.filename || null, photoBefore?.filename || null,
+        photoBefore?.filename || null, photoAfter?.filename || null, photoBefore?.filename || null, submissionId]);
     const updated = await get('SELECT * FROM submissions WHERE id = ?', [submissionId]);
     if (updated.status === 'pending') await run('UPDATE users SET dice_frozen = 1 WHERE tg_id = ?', [tgId]);
-    res.json({ ok: true, submission: updated });
+    res.json({ ok: true, uploaded_stage: uploadedStage, submission: updated });
   } catch (error) {
     for (const file of uploadedFiles) await fs.promises.rm(path.join(UPLOADS_DIR, file.filename), { force: true }).catch(() => {});
     next(error);
@@ -2147,7 +2171,7 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
     const tickets = await getPlayerTickets(tgId);
     const { user: reconciledUser, activeSubmission } = await reconcileDiceLock(tgId, user);
     const pendingLucky = reconciledUser?.pending_lucky_cell !== null && reconciledUser?.pending_lucky_cell !== undefined;
-    res.json({ submission, dice_frozen: activeSubmission || pendingLucky ? 1 : reconciledUser.dice_frozen, progress_status: getSubmissionProgressStatus(activeSubmission), tickets, is_finalist: Number(reconciledUser.current_cell) >= 100, finish_summary: finishSummary });
+    res.json({ submission, active_submission: activeSubmission || null, post_moderation_debt: activeSubmission?.frozen_by_post_moderation ? activeSubmission : null, dice_frozen: activeSubmission || pendingLucky ? 1 : reconciledUser.dice_frozen, progress_status: activeSubmission?.frozen_by_post_moderation ? 'frozen_by_post_moderation' : getSubmissionProgressStatus(activeSubmission), tickets, is_finalist: Number(reconciledUser.current_cell) >= 100, finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -2483,7 +2507,7 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
     const submissionId = Number(req.body.submission_id);
     const comment = String(req.body.admin_comment || '').trim();
     if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
-    if (!comment) throw Object.assign(new Error('Добавьте комментарий для отклонения'), { status: 400 });
+    if (comment.length < 5) throw Object.assign(new Error('Комментарий должен быть не короче 5 символов'), { status: 400 });
 
     const submission = await get(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.status
       FROM submissions s
@@ -2505,6 +2529,40 @@ app.post('/api/admin/reject-submission', async (req, res, next) => {
       await logPlayerAction(submission.tg_id, 'auto_approved_post_rejected', message, { cell: submission.cell, taskId: submission.task_id, submissionId: submission.id, actorTgId: req.body.admin_tg_id });
       await addNewsEvent(message, { eventType: 'auto_approved_post_rejected', tgId: submission.tg_id });
     }
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+
+app.get('/api/admin/rejected-submissions', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
+    const submissions = await all(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.assigned_task_text, s.photo_before, s.photo_after,
+        s.status, s.admin_comment, s.resubmission_required, s.updated_at,
+        COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id) AS text_task,
+        u.username
+      FROM submissions s
+      JOIN users u ON u.tg_id = s.tg_id
+      LEFT JOIN tasks t ON t.id = s.task_id
+      WHERE s.status = 'rejected'
+      ORDER BY datetime(s.updated_at) DESC, s.id DESC`);
+    res.json({ submissions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/amnesty-submission', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.body.admin_tg_id);
+    const submissionId = Number(req.body.submission_id);
+    if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
+    const submission = await get("SELECT id, tg_id FROM submissions WHERE id = ? AND status = 'rejected' AND photo_before IS NOT NULL AND photo_after IS NOT NULL", [submissionId]);
+    if (!submission) throw Object.assign(new Error('Отклоненная работа не найдена или не содержит обе фотографии'), { status: 404 });
+    await run("UPDATE submissions SET status = 'pending', admin_comment = '', resubmission_required = 0, resubmission_notice_shown = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [submissionId]);
+    await run('UPDATE users SET dice_frozen = 1, pending_lucky_cell = NULL WHERE tg_id = ?', [submission.tg_id]);
     res.json({ ok: true });
   } catch (error) {
     next(error);
