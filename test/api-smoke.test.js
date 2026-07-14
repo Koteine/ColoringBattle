@@ -7,12 +7,18 @@ import sqlite3 from 'sqlite3';
 
 const DATA_DB = '/data/game.db';
 const DATA_UPLOADS = '/data/uploads';
+let serverLock = Promise.resolve();
 
 async function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function startServer({ clean = true } = {}) {
+  let releaseLock;
+  const previousLock = serverLock;
+  serverLock = new Promise((resolve) => { releaseLock = resolve; });
+  await previousLock;
+
   if (clean) {
     await rm(DATA_DB, { force: true });
     await rm(DATA_UPLOADS, { recursive: true, force: true });
@@ -43,8 +49,15 @@ async function startServer({ clean = true } = {}) {
   return {
     baseUrl: `http://localhost:${port}`,
     async close() {
-      child.kill('SIGINT');
-      await wait(100);
+      try {
+        if (child.exitCode === null) {
+          const exited = new Promise((resolve) => child.once('exit', resolve));
+          child.kill('SIGINT');
+          await Promise.race([exited, wait(2000)]);
+        }
+      } finally {
+        releaseLock();
+      }
     }
   };
 }
@@ -459,6 +472,35 @@ test('lucky choices stay available per player even for reused bonus tasks', asyn
       assert.equal(second.task.id, first.task.id);
       assert.equal(second.task.text_task, choice);
     }
+  } finally {
+    await server.close();
+  }
+});
+
+test('landing on cell 100 immediately grants three finish bonus tickets and notification', async () => {
+  const server = await startServer();
+  try {
+    let round;
+    do {
+      round = await jsonRequest(server.baseUrl, '/api/admin/reset-round', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937' }) });
+    } while ([...round.trap_cells, ...round.lucky_cells].includes(100));
+
+    await jsonRequest(server.baseUrl, '/api/apply', { method: 'POST', body: JSON.stringify({ tg_id: '920', username: 'finisher' }) });
+    await jsonRequest(server.baseUrl, '/api/admin/approve-user', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '920' }) });
+    await jsonRequest(server.baseUrl, '/api/admin/change-cell', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937', tg_id: '920', current_cell: 99 }) });
+
+    const roll = await jsonRequest(server.baseUrl, '/api/roll', { method: 'POST', body: JSON.stringify({ tg_id: '920' }) });
+    assert.equal(roll.current_cell, 100);
+    assert.equal(roll.finish_bonus_tickets.length, 3);
+    assert.equal(roll.finish_summary.finished, true);
+
+    const state = await jsonRequest(server.baseUrl, '/api/me/920?username=finisher');
+    assert.equal(state.finish_summary.finished, true);
+    assert.equal(state.tickets.filter((ticket) => ticket.type === 'bonus').length, 3);
+
+    const notifications = await jsonRequest(server.baseUrl, '/api/notifications/920');
+    assert.match(notifications.events[0].message, /за финиш/);
+    assert.match(notifications.events[0].message, /3 бонусные Красочки/);
   } finally {
     await server.close();
   }

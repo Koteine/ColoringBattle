@@ -1140,6 +1140,24 @@ async function issueTicket(tgId, type = 'standard', submissionId = null) {
   return get('SELECT ticket_number, type, status, submission_id FROM tickets WHERE ticket_number = ?', [result.id]);
 }
 
+async function issueFinishBonusIfNeeded(tgId) {
+  const user = await get('SELECT tg_id, username, current_cell, finished_at FROM users WHERE tg_id = ?', [tgId]);
+  if (!user || user.finished_at || Number(user.current_cell || 0) < 100) return { finishedNow: false, finishTickets: [] };
+
+  await run('UPDATE users SET finished_at = CURRENT_TIMESTAMP, finish_modal_shown = 0 WHERE tg_id = ? AND finished_at IS NULL', [tgId]);
+  const updatedUser = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [tgId]);
+  const finishTickets = [
+    await issueTicket(tgId, 'bonus'),
+    await issueTicket(tgId, 'bonus'),
+    await issueTicket(tgId, 'bonus')
+  ];
+  const ticketNumbers = finishTickets.map((ticket) => `№${ticket.ticket_number}`).join(', ');
+  const handle = formatUserHandle(updatedUser.username, updatedUser.tg_id);
+  const message = `🏆 Поздравляем! ${handle} дошел до финала — клетки 100 — и получает 3 бонусные Красочки ${ticketNumbers} за финиш!`;
+  await addNewsEvent(message, { eventType: 'finish_bonus', tgId, ticketNumber: finishTickets[0].ticket_number });
+  await logPlayerAction(tgId, 'finish_bonus', message, { cell: 100, meta: { ticket_numbers: finishTickets.map((ticket) => ticket.ticket_number), reason: 'за финиш' } });
+  return { finishedNow: true, finishTickets, finishSummary: await getFinishSummary(tgId) };
+}
 
 
 async function getPendingRequiredResubmission(tgId, excludeSubmissionId = null) {
@@ -1158,17 +1176,13 @@ async function hasPendingRequiredResubmission(tgId, excludeSubmissionId = null) 
 }
 
 async function approveSubmissionSideEffects(submission, source = 'admin') {
-  const userBeforeApproval = await get('SELECT finished_at FROM users WHERE tg_id = ?', [submission.tg_id]);
-  const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
-  const finishedNow = Number(userAfterApproval.current_cell) >= 100 && !userBeforeApproval?.finished_at;
   const keepFrozen = await hasPendingRequiredResubmission(submission.tg_id, submission.id);
-  await run("UPDATE users SET dice_frozen = ?, pending_lucky_cell = NULL, finished_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE finished_at END, finish_modal_shown = CASE WHEN ? = 1 THEN 0 ELSE finish_modal_shown END WHERE tg_id = ?", [keepFrozen ? 1 : 0, finishedNow ? 1 : 0, finishedNow ? 1 : 0, submission.tg_id]);
+  await run("UPDATE users SET dice_frozen = ?, pending_lucky_cell = NULL WHERE tg_id = ?", [keepFrozen ? 1 : 0, submission.tg_id]);
+  const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
   const issuedTickets = [await issueTicket(submission.tg_id, 'standard', submission.id)];
-  if (finishedNow) {
-    issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
-    issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
-    issuedTickets.push(await issueTicket(submission.tg_id, 'bonus'));
-  }
+  const finishResult = await issueFinishBonusIfNeeded(submission.tg_id);
+  if (finishResult.finishedNow) issuedTickets.push(...finishResult.finishTickets);
+  const finishedNow = finishResult.finishedNow;
   const prefix = source === 'auto' ? '🤖 Работа автоодобрена' : '⚡️ Модератор одобрил работу';
   await addNewsEvent(`${prefix} ${formatUserHandle(userAfterApproval.username, userAfterApproval.tg_id)} на ${Number(submission.cell || 0)} клетке! Выдана Красочка №${issuedTickets[0].ticket_number}`, {
     eventType: source === 'auto' ? 'auto_approve_submission' : 'admin_approve_submission',
@@ -1831,7 +1845,8 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
 
   if (cellType === 'lucky') {
     await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = ?, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [landedCell, landedCell, tgId]);
-    const result = { ok: true, dice, current_cell: landedCell, landed_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, ...extra };
+    const finishResult = await issueFinishBonusIfNeeded(tgId);
+    const result = { ok: true, dice, current_cell: landedCell, landed_cell: landedCell, cell_type: cellType, lucky_options: LUCKY_TASK_OPTIONS, finish_summary: finishResult.finishSummary || null, finish_bonus_tickets: finishResult.finishTickets || [], ...extra };
     const message = buildMoveNotification(result);
     await addNewsEvent(message, { eventType: 'lucky_cell', tgId });
     await logPlayerAction(tgId, 'lucky_cell', message, { cell: landedCell, meta: { dice, ...extra, lucky_options: LUCKY_TASK_OPTIONS } });
@@ -1854,7 +1869,8 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
 
   const pending = await createPendingSubmissionForCell(tgId, currentCell);
   await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
-  const result = { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, ...extra, ...pending };
+  const finishResult = await issueFinishBonusIfNeeded(tgId);
+  const result = { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, finish_summary: finishResult.finishSummary || null, finish_bonus_tickets: finishResult.finishTickets || [], ...extra, ...pending };
   if (cellType === 'trap') {
     const message = buildMoveNotification(result);
     await addNewsEvent(message, { eventType: trapImmunityUsed ? 'trap_immunity_used' : 'trap_cell', tgId });
@@ -2045,7 +2061,7 @@ app.post('/api/lucky-choice', async (req, res, next) => {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
-    assertGameNotFinished(user);
+    if (user.finished_at && (user.pending_lucky_cell === null || user.pending_lucky_cell === undefined)) assertGameNotFinished(user);
     const choice = String(req.body.choice || '').trim();
     if (!LUCKY_TASK_OPTIONS.includes(choice)) throw Object.assign(new Error('Выберите один из бонусных вариантов'), { status: 400 });
     const luckyCell = Number(user.pending_lucky_cell);
@@ -2056,7 +2072,6 @@ app.post('/api/lucky-choice', async (req, res, next) => {
 
     const task = await getOrCreateTaskByText(choice);
     const submission = await run('INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)', [tgId, luckyCell, task.id, task.text_task, 'pending']);
-    await rememberAssignedTask(tgId, task.id);
     await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0 WHERE tg_id = ?', [luckyCell, tgId]);
     const message = `🎁 Бонусная клетка ${luckyCell}: выбрано особое задание «${choice}». Выполните его и загрузите фото как обычно.`;
     await addNewsEvent(message, { eventType: 'lucky_choice', tgId });
