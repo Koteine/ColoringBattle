@@ -123,11 +123,13 @@ async function initDb() {
   )`);
 
   await ensureSubmissionSchema();
+  await ensureSubmissionRewardColumn();
   await ensureAssignedTasksTable();
   await ensureUserLuckyColumn();
   await ensureUserTarotColumns();
   await ensureUserDuelColumns();
   await ensureUserGameCounterColumns();
+  await ensureUserEndgameColumns();
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
   await ensureUserActivityColumns();
@@ -136,11 +138,14 @@ async function initDb() {
   await ensurePlayerActionLogsTable();
   await ensureMapConfigTable();
   await ensureAccumulatingTicketsTable();
+  await ensureTicketSourceColumn();
   await ensureRaffleConfigTable();
   await ensureRaffleResultsTable();
   await ensureRaffleWinningTicketsTable();
   await ensureNewsEventsTable();
   await ensurePuzzleDuelsTable();
+  await ensureCloudQuestTables();
+  await ensurePigmentGiftsTable();
 
   await ensureSingleActiveSubmissionIndex();
 
@@ -156,6 +161,9 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_puzzle_duels_players_status ON puzzle_duels(challenger_tg_id, opponent_tg_id, status)');
   await run('CREATE INDEX IF NOT EXISTS idx_reaction_logs_limit ON reaction_logs(from_tg_id, to_tg_id, reacted_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_player_action_logs_tg_id ON player_action_logs(tg_id, created_at, id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_cloud_quests_status ON cloud_quests(status, starts_at, ends_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_cloud_quest_uploads_quest ON cloud_quest_uploads(quest_id, tg_id)');
+  await run('CREATE INDEX IF NOT EXISTS idx_pigment_gifts_recipient ON pigment_gifts(recipient_tg_id, created_at)');
 
   await restoreFrozenDiceFromActiveSubmissions();
 
@@ -308,6 +316,20 @@ async function ensureUserGameCounterColumns() {
   if (!names.has('finish_modal_shown')) await run('ALTER TABLE users ADD COLUMN finish_modal_shown INTEGER DEFAULT 0');
 }
 
+
+
+async function ensureUserEndgameColumns() {
+  const columns = await all('PRAGMA table_info(users)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('magical_pigment')) await run('ALTER TABLE users ADD COLUMN magical_pigment INTEGER DEFAULT 0');
+}
+
+async function ensureSubmissionRewardColumn() {
+  const columns = await all('PRAGMA table_info(submissions)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('reward_type')) await run("ALTER TABLE submissions ADD COLUMN reward_type TEXT DEFAULT 'ticket'");
+  await run("UPDATE submissions SET reward_type = COALESCE(NULLIF(reward_type, ''), 'ticket')");
+}
 
 async function ensureUserRoleColumn() {
   const columns = await all('PRAGMA table_info(users)');
@@ -531,6 +553,13 @@ async function ensureAccumulatingTicketsTable() {
 }
 
 
+
+async function ensureTicketSourceColumn() {
+  const columns = await all('PRAGMA table_info(tickets)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('source')) await run("ALTER TABLE tickets ADD COLUMN source TEXT DEFAULT ''");
+}
+
 async function ensureRaffleConfigTable() {
   await run(`CREATE TABLE IF NOT EXISTS raffle_config (
     id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -619,6 +648,49 @@ async function ensurePuzzleDuelsTable() {
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (challenger_tg_id) REFERENCES users(tg_id),
     FOREIGN KEY (opponent_tg_id) REFERENCES users(tg_id)
+  )`);
+}
+
+
+async function ensureCloudQuestTables() {
+  await run(`CREATE TABLE IF NOT EXISTS cloud_quests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_name TEXT DEFAULT 'Облачный квест',
+    player1_tg_id TEXT NOT NULL,
+    player2_tg_id TEXT NOT NULL,
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'pending_review', 'approved', 'rejected', 'expired')),
+    moderator_comment TEXT DEFAULT '',
+    starts_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    ends_at TEXT NOT NULL,
+    reviewed_at TEXT DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (player1_tg_id) REFERENCES users(tg_id),
+    FOREIGN KEY (player2_tg_id) REFERENCES users(tg_id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS cloud_quest_uploads (
+    quest_id INTEGER NOT NULL,
+    tg_id TEXT NOT NULL,
+    photo_before TEXT DEFAULT '',
+    photo_after TEXT DEFAULT '',
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (quest_id, tg_id),
+    FOREIGN KEY (quest_id) REFERENCES cloud_quests(id),
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+}
+
+
+async function ensurePigmentGiftsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS pigment_gifts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    buyer_tg_id TEXT NOT NULL,
+    recipient_tg_id TEXT NOT NULL,
+    buyer_ticket_number INTEGER,
+    recipient_ticket_number INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (buyer_tg_id) REFERENCES users(tg_id),
+    FOREIGN KEY (recipient_tg_id) REFERENCES users(tg_id)
   )`);
 }
 
@@ -1075,7 +1147,7 @@ async function getDiceFrozenState(tgId, user = null) {
 
 async function getPlayerTickets(tgId) {
   return all(`WITH numbered_tickets AS (
-      SELECT t.ticket_number, t.type, t.status, t.submission_id AS ticket_submission_id, t.revoke_comment, t.created_at, r.place_number,
+      SELECT t.ticket_number, t.type, t.status, t.source AS ticket_source, t.submission_id AS ticket_submission_id, t.revoke_comment, t.created_at, r.place_number,
         ROW_NUMBER() OVER (PARTITION BY t.tg_id, t.type ORDER BY t.ticket_number ASC) AS ticket_order
       FROM tickets t
       LEFT JOIN raffle_results r ON r.ticket_number = t.ticket_number
@@ -1090,7 +1162,7 @@ async function getPlayerTickets(tgId) {
       JOIN tasks task ON task.id = s.task_id
       WHERE s.tg_id = ? AND s.status IN ('approved', 'auto_approved')
     )
-    SELECT nt.ticket_number, nt.type, nt.status, nt.revoke_comment, nt.created_at, nt.place_number,
+    SELECT nt.ticket_number, nt.type, nt.status, nt.ticket_source, nt.revoke_comment, nt.created_at, nt.place_number,
       COALESCE(direct_work.submission_id, ordered_work.submission_id) AS submission_id,
       COALESCE(direct_work.cell, ordered_work.cell) AS cell,
       COALESCE(direct_work.text_task, ordered_work.text_task) AS text_task,
@@ -1112,6 +1184,21 @@ const LUCKY_TASK_OPTIONS = [
   'Раскрасить что угодно вне заданий',
   'Взять картинку формата менее А4'
 ];
+const CLOUD_QUEST_NAME = 'Облачный квест';
+const CLOUD_QUEST_TASKS = [
+  { title: 'Мы рисуем разворот! 📖', text: 'Найдите одинаковый разворот: один красит левую половину, второй — правую.' },
+  { title: 'Мы поддерживаем автора! ❤️', text: 'Раскрасьте две одинаковые картинки из авторской раскраски «Бери и Крась».' },
+  { title: 'Мы за переделки! 🔄', text: 'Возьмите одинаковую картинку Hachette и сделайте концептуально схожие переделки в разных цветах.' },
+  { title: 'Мы – за свободу творчества 🕊️', text: 'Выберите неномерные раскраски крупнее Coco Wyo в одной теме.' },
+  { title: 'Мы любим разнообразие ✏️', text: 'Раскрасьте одинаковую картинку Hachette выбранными материалами: карандаши, фломастеры, краски или аквамаркеры.' }
+];
+const ENDGAME_HARD_TASKS = [
+  'Сложный режим: раскрась работу с осознанной ограниченной палитрой из 5 цветов и добавь краткое описание цветового решения.',
+  'Сложный режим: сделай фоновую переделку с новым источником света и видимым направлением теней.',
+  'Сложный режим: выполни одну работу смешанной техникой минимум из двух материалов и покажи чистые переходы.',
+  'Сложный режим: выбери сюжетную страницу и добавь детализированный узор/текстуру на одежду или фон.',
+  'Сложный режим: раскрась работу в необычной атмосфере — дождь, сумерки, неон или закат — с единым настроением.'
+];
 
 function getCellType(cell) {
   const normalized = Number(cell || 0);
@@ -1131,13 +1218,13 @@ async function pickUnusedTask(tgId) {
   throw Object.assign(new Error('Все задания уже были выданы этому игроку до глобального сброса'), { status: 409 });
 }
 
-async function issueTicket(tgId, type = 'standard', submissionId = null) {
+async function issueTicket(tgId, type = 'standard', submissionId = null, source = '') {
   const normalizedSubmissionId = submissionId == null ? null : Number(submissionId);
   const result = await run(
-    "INSERT INTO tickets (tg_id, type, status, submission_id) VALUES (?, ?, 'active', ?)",
-    [tgId, type, Number.isInteger(normalizedSubmissionId) ? normalizedSubmissionId : null]
+    "INSERT INTO tickets (tg_id, type, status, submission_id, source) VALUES (?, ?, 'active', ?, ?)",
+    [tgId, type, Number.isInteger(normalizedSubmissionId) ? normalizedSubmissionId : null, String(source || '')]
   );
-  return get('SELECT ticket_number, type, status, submission_id FROM tickets WHERE ticket_number = ?', [result.id]);
+  return get('SELECT ticket_number, type, status, submission_id, source FROM tickets WHERE ticket_number = ?', [result.id]);
 }
 
 async function issueFinishBonusIfNeeded(tgId) {
@@ -1179,6 +1266,12 @@ async function approveSubmissionSideEffects(submission, source = 'admin') {
   const keepFrozen = await hasPendingRequiredResubmission(submission.tg_id, submission.id);
   await run("UPDATE users SET dice_frozen = ?, pending_lucky_cell = NULL WHERE tg_id = ?", [keepFrozen ? 1 : 0, submission.tg_id]);
   const userAfterApproval = await get('SELECT tg_id, username, current_cell FROM users WHERE tg_id = ?', [submission.tg_id]);
+  if (submission.reward_type === 'pigment') {
+    await run('UPDATE users SET magical_pigment = COALESCE(magical_pigment, 0) + 1 WHERE tg_id = ?', [submission.tg_id]);
+    await addNewsEvent(`✨ Сложное финишное задание принято! ${formatUserHandle(userAfterApproval.username, userAfterApproval.tg_id)} получает +1 Магический Пигмент.`, { eventType: 'endgame_pigment_earned', tgId: submission.tg_id });
+    await logPlayerAction(submission.tg_id, 'endgame_pigment_earned', 'Сложное финишное задание одобрено: начислен +1 Магический Пигмент.', { cell: submission.cell, taskId: submission.task_id, submissionId: submission.id });
+    return { issuedTickets: [], userAfterApproval, finishedNow: true, finishSummary: await getFinishSummary(submission.tg_id) };
+  }
   const issuedTickets = [await issueTicket(submission.tg_id, 'standard', submission.id)];
   const finishResult = await issueFinishBonusIfNeeded(submission.tg_id);
   if (finishResult.finishedNow) issuedTickets.push(...finishResult.finishTickets);
@@ -1467,6 +1560,57 @@ async function scratchTicket({ tgId, ticketNumber }) {
 }
 
 
+async function expireCloudQuests() {
+  await run("UPDATE cloud_quests SET status = 'expired', updated_at = CURRENT_TIMESTAMP WHERE status IN ('active', 'pending_review') AND datetime(ends_at) <= datetime('now')");
+}
+
+function nextCloudQuestSlot(now = new Date()) {
+  const epoch = Date.UTC(2026, 0, 1, 0, 0, 0);
+  const periodMs = 3 * 24 * 60 * 60 * 1000;
+  const elapsed = Math.max(0, now.getTime() - epoch);
+  const slotStart = new Date(epoch + Math.floor(elapsed / periodMs) * periodMs);
+  const slotEnd = new Date(slotStart.getTime() + periodMs);
+  return { slotStart: slotStart.toISOString(), slotEnd: slotEnd.toISOString() };
+}
+
+async function maybeCreateCloudQuest() {
+  await expireCloudQuests();
+  const { slotStart, slotEnd } = nextCloudQuestSlot();
+  const existing = await get('SELECT id FROM cloud_quests WHERE starts_at = ? LIMIT 1', [slotStart]);
+  if (existing) return;
+  const players = await all(`SELECT tg_id, username FROM users u
+    WHERE u.is_approved = 1 AND COALESCE(u.role, 'user') = 'user'
+      AND u.current_cell BETWEEN 1 AND 50
+      AND datetime(COALESCE(u.cell_arrived_at, u.last_login_at, u.registered_at, 'now')) >= datetime('now', '-3 days')
+      AND NOT EXISTS (SELECT 1 FROM cloud_quests q WHERE (q.player1_tg_id = u.tg_id OR q.player2_tg_id = u.tg_id) AND datetime(q.starts_at) >= datetime('now', '-9 days'))
+    ORDER BY RANDOM()
+    LIMIT 2`);
+  if (players.length < 2) return;
+  const created = await run(`INSERT INTO cloud_quests (player1_tg_id, player2_tg_id, starts_at, ends_at) VALUES (?, ?, ?, ?)`, [players[0].tg_id, players[1].tg_id, slotStart, slotEnd]);
+  for (const player of players) await run('INSERT OR IGNORE INTO cloud_quest_uploads (quest_id, tg_id) VALUES (?, ?)', [created.id, player.tg_id]);
+  const [a, b] = players;
+  await addNewsEvent(`Динь-Динь посыпала вас пыльцой! 🧚✨ Время объединиться с игроком ${formatUserHandle(b.username, b.tg_id)}! Пусть приключение будет увлекательным и успешным, ведь за успех полагается награда!`, { eventType: 'cloud_quest_start', tgId: a.tg_id });
+  await addNewsEvent(`Динь-Динь посыпала вас пыльцой! 🧚✨ Время объединиться с игроком ${formatUserHandle(a.username, a.tg_id)}! Пусть приключение будет увлекательным и успешным, ведь за успех полагается награда!`, { eventType: 'cloud_quest_start', tgId: b.tg_id });
+}
+
+async function getActiveCloudQuestForPlayer(tgId) {
+  await maybeCreateCloudQuest();
+  const quest = await get(`SELECT q.*, u1.username AS player1_username, u2.username AS player2_username,
+      up.photo_before, up.photo_after
+    FROM cloud_quests q
+    JOIN users u1 ON u1.tg_id = q.player1_tg_id
+    JOIN users u2 ON u2.tg_id = q.player2_tg_id
+    LEFT JOIN cloud_quest_uploads up ON up.quest_id = q.id AND up.tg_id = ?
+    WHERE (q.player1_tg_id = ? OR q.player2_tg_id = ?) AND q.status IN ('active', 'pending_review', 'rejected')
+      AND datetime(q.ends_at) > datetime('now')
+    ORDER BY q.id DESC LIMIT 1`, [tgId, tgId, tgId]);
+  if (!quest) return null;
+  const partner = quest.player1_tg_id === tgId
+    ? { tg_id: quest.player2_tg_id, username: quest.player2_username }
+    : { tg_id: quest.player1_tg_id, username: quest.player1_username };
+  return { ...quest, partner, tasks: CLOUD_QUEST_TASKS };
+}
+
 app.get('/api/me/:tgId', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.params.tgId);
@@ -1487,7 +1631,9 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const effectiveDiceFrozen = activeSubmission || pendingLucky ? 1 : Number(responseUser.dice_frozen || 0);
     const tickets = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser) ? await getPlayerTickets(tgId) : [];
     const finishSummary = await getFinishSummary(tgId);
-    res.json({ user: { ...responseUser, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] } });
+    const cloudQuest = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser) ? await getActiveCloudQuestForPlayer(tgId) : null;
+    const canBuyMuseCharge = Number(responseUser.current_cell || 0) >= 100 && Number(responseUser.magical_pigment || 0) >= 2 && await hasMuseChargeRecipient();
+    res.json({ cloudQuest, can_buy_muse_charge: canBuyMuseCharge, user: { ...responseUser, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0), magical_pigment: Number(responseUser.magical_pigment || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] } });
   } catch (error) {
     next(error);
   }
@@ -1595,7 +1741,7 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
     const viewer = viewerTgId ? await get('SELECT role FROM users WHERE tg_id = ?', [viewerTgId]) : null;
     const isStaffViewer = viewer?.role === 'admin' || viewer?.role === 'moderator' || ADMIN_TG_IDS.has(String(viewerTgId));
     const isOwnProfile = viewerTgId && viewerTgId === tgId;
-    const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen, finished_at, map_emoji, map_emoji_changed
+    const user = await get(`SELECT tg_id, username, current_cell, is_approved, dice_frozen, finished_at, map_emoji, map_emoji_changed, magical_pigment
       FROM users WHERE tg_id = ? AND is_approved = 1`, [tgId]);
     if (!user) throw Object.assign(new Error('Профиль не найден'), { status: 404 });
     const works = await all(`SELECT s.id, s.task_id, s.cell, s.status, s.photo_before, s.photo_after, s.admin_comment, s.resubmission_required, s.updated_at, t.text_task
@@ -1630,9 +1776,9 @@ app.get('/api/profile/:tgId', async (req, res, next) => {
       admin_comment: isOwnProfile && Number(work.resubmission_required || 0) === 1 ? work.admin_comment : '',
       resubmission_required: isOwnProfile ? Number(work.resubmission_required || 0) : 0
     }));
-    const counts = await get(`SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ?`, [tgId]);
+    const counts = await get("SELECT COUNT(*) AS paints FROM tickets WHERE tg_id = ? AND status <> 'revoked'", [tgId]);
     const activeTask = isStaffViewer ? await getActiveSubmission(tgId) : null;
-    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), map_emoji: user.map_emoji || defaultEmojiForTgId(user.tg_id), map_emoji_changed: Number(user.map_emoji_changed || 0), can_change_map_emoji: Number(user.map_emoji_changed || 0) === 0, emoji_pool: PLAYER_EMOJI_POOL, local_status: user.finished_at ? 'Игра завершена, ожидай розыгрыша' : (Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску'), active_task: activeTask, tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
+    res.json({ profile: { name: user.username || `ID ${user.tg_id}`, tg_id: user.tg_id, current_cell: user.current_cell, paints: Number(counts?.paints || 0), magical_pigment: Number(user.magical_pigment || 0), map_emoji: user.map_emoji || defaultEmojiForTgId(user.tg_id), map_emoji_changed: Number(user.map_emoji_changed || 0), can_change_map_emoji: Number(user.map_emoji_changed || 0) === 0, emoji_pool: PLAYER_EMOJI_POOL, local_status: user.finished_at ? 'Игра завершена, ожидай розыгрыша' : (Number(user.dice_frozen) === 1 ? 'Ждет проверку' : 'Готов к броску'), active_task: activeTask, tickets, works: visibleWorks, is_admin_view: isStaffViewer } });
   } catch (error) {
     next(error);
   }
@@ -1817,6 +1963,29 @@ async function createPendingSubmissionForCell(tgId, cell) {
   return { task, submission_id: submission.id };
 }
 
+
+async function pickEndgameTask() {
+  return getOrCreateTaskByText(ENDGAME_HARD_TASKS[crypto.randomInt(0, ENDGAME_HARD_TASKS.length)]);
+}
+
+async function createEndgameSubmission(tgId) {
+  const active = await getActiveSubmission(tgId);
+  if (active) throw Object.assign(new Error('Сначала завершите текущее задание'), { status: 400 });
+  const task = await pickEndgameTask();
+  const submission = await run("INSERT INTO submissions (tg_id, cell, task_id, assigned_task_text, photo_before, photo_after, image_name, status, reward_type) VALUES (?, 100, ?, ?, NULL, NULL, NULL, 'pending', 'pigment')", [tgId, task.id, task.text_task]);
+  await run('UPDATE users SET current_cell = 100, cell_arrived_at = COALESCE(finished_at, CURRENT_TIMESTAMP), dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [tgId]);
+  await logPlayerAction(tgId, 'endgame_task_assigned', `Финишный сложный режим: ${task.text_task}`, { cell: 100, taskId: task.id, submissionId: submission.id });
+  return { ok: true, dice: 0, current_cell: 100, landed_cell: 100, cell_type: 'endgame', task, submission_id: submission.id };
+}
+
+async function hasMuseChargeRecipient() {
+  const row = await get(`SELECT COUNT(*) AS count FROM users u
+    WHERE u.is_approved = 1 AND COALESCE(u.role, 'user') = 'user'
+      AND u.current_cell BETWEEN 1 AND 99
+      AND NOT EXISTS (SELECT 1 FROM pigment_gifts g WHERE g.recipient_tg_id = u.tg_id AND datetime(g.created_at) >= datetime('now', '-9 days'))`);
+  return Number(row?.count || 0) > 0;
+}
+
 function buildMoveNotification(result) {
   const dicePart = result.roll_doubled
     ? `выпало ${result.raw_dice}, бафф Рапунцель удвоил бросок до ${result.dice}`
@@ -1884,10 +2053,12 @@ app.post('/api/roll', async (req, res, next) => {
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
-    assertGameNotFinished(user);
     const { user: playableUser, activeSubmission } = await reconcileDiceLock(tgId, user);
     if (Number(playableUser.dice_frozen) === 1 || activeSubmission || playableUser.pending_lucky_cell !== null) throw Object.assign(new Error('Кубик заморожен до выполнения и проверки текущего задания'), { status: 400 });
-    if (Number(playableUser.current_cell) >= 100) throw Object.assign(new Error('Вы уже дошли до финиша'), { status: 400 });
+    if (playableUser.finished_at || Number(playableUser.current_cell) >= 100) {
+      const result = await createEndgameSubmission(tgId);
+      return res.json({ ...result, finish_summary: await getFinishSummary(tgId) });
+    }
 
     const rawDice = rollD6();
     const rollDoubled = Number(playableUser.next_roll_doubled) === 1;
@@ -2093,7 +2264,6 @@ app.post('/api/submit', upload.fields([
     const tgId = normalizeTgId(req.body.tg_id);
     const user = await requireApproved(tgId);
     assertPlayableUser(user);
-    assertGameNotFinished(user);
 
     const photoBefore = req.files?.photo_before?.[0];
     const photoAfter = req.files?.photo_after?.[0] || req.files?.work_image?.[0];
@@ -2306,6 +2476,107 @@ app.post('/api/admin/reset-dice', async (req, res, next) => {
   }
 });
 
+
+app.post('/api/endgame/muse-charge', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    if (!user.finished_at && Number(user.current_cell || 0) < 100) throw Object.assign(new Error('Магазин открыт только финалистам'), { status: 403 });
+    if (Number(user.magical_pigment || 0) < 2) throw Object.assign(new Error('Нужно 2 единицы Магического Пигмента'), { status: 400 });
+    await run('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      const freshUser = await get('SELECT tg_id, username, magical_pigment FROM users WHERE tg_id = ?', [tgId]);
+      if (Number(freshUser?.magical_pigment || 0) < 2) throw Object.assign(new Error('Недостаточно Магического Пигмента'), { status: 400 });
+      const recipient = await get(`SELECT tg_id, username FROM users u
+        WHERE u.is_approved = 1 AND COALESCE(u.role, 'user') = 'user'
+          AND u.current_cell BETWEEN 1 AND 99
+          AND NOT EXISTS (SELECT 1 FROM pigment_gifts g WHERE g.recipient_tg_id = u.tg_id AND datetime(g.created_at) >= datetime('now', '-9 days'))
+        ORDER BY RANDOM()
+        LIMIT 1`);
+      if (!recipient) throw Object.assign(new Error('Сейчас нет игроков на клетках 1–99, которым можно подарить Заряд музы'), { status: 400 });
+      await run('UPDATE users SET magical_pigment = magical_pigment - 2 WHERE tg_id = ?', [tgId]);
+      const buyerTicket = await issueTicket(tgId, 'bonus', null, 'muse_charge');
+      const recipientTicket = await issueTicket(recipient.tg_id, 'bonus', null, 'muse_charge');
+      await run('INSERT INTO pigment_gifts (buyer_tg_id, recipient_tg_id, buyer_ticket_number, recipient_ticket_number) VALUES (?, ?, ?, ?)', [tgId, recipient.tg_id, buyerTicket.ticket_number, recipientTicket.ticket_number]);
+      await run('COMMIT');
+      const buyerMessage = '🌟 Магия цвета в действии!\nТы только что активировала «Заряд музы»! Твой сухой Магический Пигмент превратился в чистое вдохновение.\nНа твой счет зачислена +1 обычная красочка в копилку главного розыгрыша! Но это еще не всё — брызги твоей краски улетели на карту и случайно зарядили одну из девчонок, которая сейчас вовсю раскрашивает свой путь к финишу.';
+      const recipientMessage = '✨ Лови Заряд Музы!\nОдна из наших мастериц, которая уже дошла до финиша, только что активировала в магазине волшебный буст и поделилась своим вдохновением!\nПтичка с финиша принесла подарок лично тебе: на твой счет падает +1 красочка совершенно бесплатно! 🎉\nПусть этот внезапный бонус принесет тебе удачу в финальном розыгрыше. Твоя фишка улыбается и передает финалистке огромное спасибо.';
+      await addNewsEvent(buyerMessage, { eventType: 'muse_charge_buyer', tgId, ticketNumber: buyerTicket.ticket_number });
+      await addNewsEvent(recipientMessage, { eventType: 'muse_charge_recipient', tgId: recipient.tg_id, ticketNumber: recipientTicket.ticket_number });
+      res.json({ ok: true, buyer_ticket: buyerTicket, recipient: { tg_id: recipient.tg_id, username: recipient.username }, remaining_pigment: Number(freshUser.magical_pigment || 0) - 2 });
+    } catch (error) {
+      await run('ROLLBACK').catch(() => {});
+      throw error;
+    }
+  } catch (error) { next(error); }
+});
+
+app.post('/api/cloud-quest/upload', upload.fields([{ name: 'photo_before', maxCount: 1 }, { name: 'photo_after', maxCount: 1 }]), async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    await requireApproved(tgId);
+    const questId = Number(req.body.quest_id);
+    const quest = await get(`SELECT * FROM cloud_quests WHERE id = ? AND (player1_tg_id = ? OR player2_tg_id = ?) AND status IN ('active', 'rejected') AND datetime(ends_at) > datetime('now')`, [questId, tgId, tgId]);
+    if (!quest) throw Object.assign(new Error('Активный Облачный квест не найден'), { status: 404 });
+    const before = req.files?.photo_before?.[0]?.filename;
+    const after = req.files?.photo_after?.[0]?.filename;
+    if (!before && !after) throw Object.assign(new Error('Загрузите Фото ДО или Фото ПОСЛЕ'), { status: 400 });
+    await run(`INSERT INTO cloud_quest_uploads (quest_id, tg_id, photo_before, photo_after)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(quest_id, tg_id) DO UPDATE SET
+        photo_before = COALESCE(NULLIF(excluded.photo_before, ''), cloud_quest_uploads.photo_before),
+        photo_after = COALESCE(NULLIF(excluded.photo_after, ''), cloud_quest_uploads.photo_after),
+        updated_at = CURRENT_TIMESTAMP`, [questId, tgId, before || '', after || '']);
+    const ready = await get(`SELECT COUNT(*) AS count FROM cloud_quest_uploads WHERE quest_id = ? AND COALESCE(photo_before, '') <> '' AND COALESCE(photo_after, '') <> ''`, [questId]);
+    if (Number(ready?.count || 0) >= 2) await run("UPDATE cloud_quests SET status = 'pending_review', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [questId]);
+    res.json({ ok: true, quest: await getActiveCloudQuestForPlayer(tgId) });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/admin/cloud-quests', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
+    await expireCloudQuests();
+    const quests = await all(`SELECT q.*, u1.username AS player1_username, u2.username AS player2_username,
+        a.photo_before AS player1_before, a.photo_after AS player1_after,
+        b.photo_before AS player2_before, b.photo_after AS player2_after
+      FROM cloud_quests q
+      JOIN users u1 ON u1.tg_id = q.player1_tg_id
+      JOIN users u2 ON u2.tg_id = q.player2_tg_id
+      LEFT JOIN cloud_quest_uploads a ON a.quest_id = q.id AND a.tg_id = q.player1_tg_id
+      LEFT JOIN cloud_quest_uploads b ON b.quest_id = q.id AND b.tg_id = q.player2_tg_id
+      WHERE q.status = 'pending_review'
+      ORDER BY q.updated_at ASC, q.id ASC`);
+    res.json({ quests });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/admin/cloud-quests/review', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.body.admin_tg_id);
+    const questId = Number(req.body.quest_id);
+    const action = String(req.body.action || '');
+    const comment = String(req.body.comment || '').trim();
+    const quest = await get(`SELECT * FROM cloud_quests WHERE id = ? AND status = 'pending_review'`, [questId]);
+    if (!quest) throw Object.assign(new Error('Заявка события не найдена'), { status: 404 });
+    if (action === 'reject') {
+      if (comment.length < 5) throw Object.assign(new Error('Укажите комментарий для исправления'), { status: 400 });
+      await run("UPDATE cloud_quests SET status = 'rejected', moderator_comment = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [comment, questId]);
+      for (const playerId of [quest.player1_tg_id, quest.player2_tg_id]) await addNewsEvent(`Облачный квест отклонён: ${comment}`, { eventType: 'cloud_quest_rejected', tgId: playerId });
+      return res.json({ ok: true });
+    }
+    if (action !== 'approve') throw Object.assign(new Error('Некорректное действие'), { status: 400 });
+    await run("UPDATE cloud_quests SET status = 'approved', moderator_comment = '', reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [questId]);
+    for (const playerId of [quest.player1_tg_id, quest.player2_tg_id]) {
+      const ticket = await issueTicket(playerId, 'bonus');
+      await run('UPDATE users SET next_roll_doubled = 1, total_buffs = COALESCE(total_buffs, 0) + 1 WHERE tg_id = ?', [playerId]);
+      await addNewsEvent(`🎁 Красочка за событие ${CLOUD_QUEST_NAME}: выдана Красочка №${ticket.ticket_number} и бафф «Золотая кисть Рапунцель» на следующий бросок кубика.`, { eventType: 'cloud_quest_approved', tgId: playerId, ticketNumber: ticket.ticket_number });
+    }
+    res.json({ ok: true });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/admin/submissions', async (req, res, next) => {
   try {
     await requireModeratorOrAdmin(req.query.admin_tg_id);
@@ -2494,7 +2765,7 @@ app.post('/api/admin/approve-submission', async (req, res, next) => {
     const submissionId = Number(req.body.submission_id);
     if (!Number.isInteger(submissionId)) throw Object.assign(new Error('Некорректный ID работы'), { status: 400 });
 
-    const submission = await get(`SELECT s.id, s.tg_id, s.cell, s.status, u.current_cell, u.username
+    const submission = await get(`SELECT s.id, s.tg_id, s.cell, s.status, s.reward_type, u.current_cell, u.username
       FROM submissions s
       JOIN users u ON u.tg_id = s.tg_id
       WHERE s.id = ? AND s.status IN ('pending', 'auto_approved') AND s.photo_before IS NOT NULL AND s.photo_after IS NOT NULL`, [submissionId]);
@@ -2741,15 +3012,18 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await run('DELETE FROM raffle_winning_tickets');
     await run('DELETE FROM reaction_logs');
     await run('DELETE FROM puzzle_duels');
+    await run('DELETE FROM cloud_quest_uploads');
+    await run('DELETE FROM cloud_quests');
+    await run('DELETE FROM pigment_gifts');
     await run('DELETE FROM news_events');
     await regenerateMapConfig();
     await loadMapConfig();
     await run(`UPDATE users
       SET current_cell = 0, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 0, pending_lucky_cell = NULL,
         has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, next_roll_doubled = 0,
-        penalty_rerolls = 0, total_dice_rolls = 0,
+        penalty_rerolls = 0, total_dice_rolls = 0, magical_pigment = 0,
         reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1, duel_challenges_used = 0, duel_accepts_used = 0`);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)', ['submissions', 'raffle_results', 'news_events', 'puzzle_duels']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?, ?)', ['submissions', 'raffle_results', 'news_events', 'puzzle_duels', 'cloud_quests', 'pigment_gifts']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
   } catch (error) {
     next(error);
@@ -2767,8 +3041,11 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM news_events');
     await run('DELETE FROM reaction_logs');
     await run('DELETE FROM puzzle_duels');
+    await run('DELETE FROM cloud_quest_uploads');
+    await run('DELETE FROM cloud_quests');
+    await run('DELETE FROM pigment_gifts');
     await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels', 'cloud_quests', 'pigment_gifts']);
     await run(`UPDATE raffle_config
       SET raffle_start = '', raffle_end = '', total_prizes = 0, remaining_prizes = 0, updated_at = CURRENT_TIMESTAMP
       WHERE id = 1`);
@@ -2785,6 +3062,7 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
         next_roll_doubled = 0,
         penalty_rerolls = 0,
         total_dice_rolls = 0,
+        magical_pigment = 0,
         can_challenge = 1,
         can_accept = 1,
         duel_challenges_used = 0,

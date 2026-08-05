@@ -505,3 +505,40 @@ test('landing on cell 100 immediately grants three finish bonus tickets and noti
     await server.close();
   }
 });
+
+
+test('finished players earn pigment from hard tasks and can buy muse charge', async () => {
+  const server = await startServer();
+  try {
+    for (const [tgId, username] of [['930', 'finalist'], ['931', 'traveler']]) {
+      await jsonRequest(server.baseUrl, '/api/apply', { method: 'POST', body: JSON.stringify({ tg_id: tgId, username }) });
+      await jsonRequest(server.baseUrl, '/api/admin/approve-user', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937', tg_id: tgId }) });
+    }
+    await dbRun("UPDATE users SET current_cell = 100, finished_at = CURRENT_TIMESTAMP, dice_frozen = 0 WHERE tg_id = '930'");
+    await dbRun("UPDATE users SET current_cell = 25, cell_arrived_at = CURRENT_TIMESTAMP WHERE tg_id = '931'");
+
+    for (let i = 0; i < 2; i += 1) {
+      const roll = await jsonRequest(server.baseUrl, '/api/roll', { method: 'POST', body: JSON.stringify({ tg_id: '930' }) });
+      assert.equal(roll.current_cell, 100);
+      assert.equal(roll.cell_type, 'endgame');
+      await dbRun("UPDATE submissions SET photo_before = 'before.png', photo_after = 'after.png', image_name = 'after.png' WHERE id = ?", [roll.submission_id]);
+      await jsonRequest(server.baseUrl, '/api/admin/approve-submission', { method: 'POST', body: JSON.stringify({ admin_tg_id: '341995937', submission_id: roll.submission_id }) });
+    }
+
+    const finalistState = await jsonRequest(server.baseUrl, '/api/me/930?username=finalist');
+    assert.equal(finalistState.user.magical_pigment, 2);
+    assert.equal(finalistState.can_buy_muse_charge, true);
+
+    const purchase = await jsonRequest(server.baseUrl, '/api/endgame/muse-charge', { method: 'POST', body: JSON.stringify({ tg_id: '930' }) });
+    assert.equal(purchase.remaining_pigment, 0);
+    assert.equal(purchase.recipient.tg_id, '931');
+
+    const finalistAfter = await jsonRequest(server.baseUrl, '/api/me/930?username=finalist');
+    const travelerAfter = await jsonRequest(server.baseUrl, '/api/me/931?username=traveler');
+    assert.equal(finalistAfter.user.magical_pigment, 0);
+    assert.equal(finalistAfter.tickets.some((ticket) => ticket.ticket_source === 'muse_charge'), true);
+    assert.equal(travelerAfter.tickets.some((ticket) => ticket.ticket_source === 'muse_charge'), true);
+  } finally {
+    await server.close();
+  }
+});

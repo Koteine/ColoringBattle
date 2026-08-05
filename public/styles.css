@@ -123,3 +123,11 @@ textarea { width: 100%; resize: vertical; border: 1px solid rgba(255,255,255,.12
 .player-log-dialog { width: min(760px, 100%); }
 .player-log-list { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 .player-log-list li { padding: 12px; border: 1px solid var(--line, rgba(132,90,150,.16)); border-radius: 16px; background: rgba(255,255,255,.72); }
+.top-hud-right { display: grid; gap: 10px; justify-items: end; pointer-events: auto; }
+.cloud-quest-btn { animation: cloudQuestGlow 1.4s ease-in-out infinite alternate; }
+@keyframes cloudQuestGlow { from { box-shadow: 0 0 10px rgba(255, 189, 89, .45); transform: scale(1); } to { box-shadow: 0 0 26px rgba(128, 216, 255, .9); transform: scale(1.06); } }
+.cloud-quest-modal { display: grid; gap: 14px; }
+.cloud-quest-modal ol { display: grid; gap: 10px; padding-left: 22px; }
+.profile-balances { display: grid; gap: 6px; font-size: 18px; }
+.profile-balances p { margin: 0; }
+.profile-token-line { margin: 12px 0; font-size: 20px; font-weight: 800; }

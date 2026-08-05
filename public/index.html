@@ -548,6 +548,16 @@
     .players-popover { display: grid; gap: 8px; }
     .map-role-notice { display: none !important; }
 
+
+    .top-hud-right { display: grid; gap: 10px; justify-items: end; pointer-events: auto; }
+    .cloud-quest-btn { animation: cloudQuestGlow 1.4s ease-in-out infinite alternate; }
+    @keyframes cloudQuestGlow { from { box-shadow: 0 0 10px rgba(255, 189, 89, .45); transform: scale(1); } to { box-shadow: 0 0 26px rgba(128, 216, 255, .9); transform: scale(1.06); } }
+    .cloud-quest-modal { display: grid; gap: 14px; }
+    .cloud-quest-modal ol { display: grid; gap: 10px; padding-left: 22px; }
+
+    .profile-balances { display: grid; gap: 6px; font-size: 18px; }
+    .profile-balances p { margin: 0; }
+    .profile-token-line { margin: 12px 0; font-size: 20px; font-weight: 800; }
   </style>
 </head>
 <body data-owner-tg-id="341995937">
@@ -596,7 +606,7 @@
           <button id="paletteHudBtn" class="hud-icon" type="button" aria-label="Моя палитра">🎨</button>
           <button id="miniGamesHudBtn" class="hud-icon" type="button" aria-label="Мини-игры">🎲</button>
         </div>
-        <button id="playersHudBtn" class="hud-icon hud-wide" type="button" aria-label="Список игроков">👥</button>
+        <div class="top-hud-right"><button id="playersHudBtn" class="hud-icon hud-wide" type="button" aria-label="Список игроков">👥</button><button id="cloudQuestBtn" class="hud-icon cloud-quest-btn hidden" type="button" aria-label="Облачный квест">🌈</button></div>
       </div>
 
       <section id="roleNotice" class="card role-notice hidden map-role-notice">Режим администратора/модератора активен. Игровой процесс для данного аккаунта недоступен</section>
