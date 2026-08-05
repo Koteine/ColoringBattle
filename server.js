@@ -146,6 +146,7 @@ async function initDb() {
   await ensurePuzzleDuelsTable();
   await ensureCloudQuestTables();
   await ensurePigmentGiftsTable();
+  await ensureGalleryTables();
 
   await ensureSingleActiveSubmissionIndex();
 
@@ -164,6 +165,9 @@ async function initDb() {
   await run('CREATE INDEX IF NOT EXISTS idx_cloud_quests_status ON cloud_quests(status, starts_at, ends_at)');
   await run('CREATE INDEX IF NOT EXISTS idx_cloud_quest_uploads_quest ON cloud_quest_uploads(quest_id, tg_id)');
   await run('CREATE INDEX IF NOT EXISTS idx_pigment_gifts_recipient ON pigment_gifts(recipient_tg_id, created_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_gallery_exhibitions_window ON gallery_exhibitions(starts_at, ends_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_gallery_votes_voter_time ON gallery_votes(voter_tg_id, created_at)');
+  await run('CREATE INDEX IF NOT EXISTS idx_gallery_votes_submission ON gallery_votes(submission_id, id)');
 
   await restoreFrozenDiceFromActiveSubmissions();
 
@@ -235,14 +239,31 @@ async function rememberAssignedTask(tgId, taskId) {
 
 
 async function ensureMapConfigTable() {
+  const existing = await get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'map_config'");
+  if (existing && !String(existing.sql || '').includes("'pigment'")) {
+    await run('ALTER TABLE map_config RENAME TO map_config_old');
+  }
+
   await run(`CREATE TABLE IF NOT EXISTS map_config (
     cell INTEGER PRIMARY KEY,
-    cell_type TEXT NOT NULL CHECK(cell_type IN ('trap', 'lucky')),
+    cell_type TEXT NOT NULL CHECK(cell_type IN ('trap', 'lucky', 'pigment')),
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
   )`);
 
+  const oldTable = await get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'map_config_old'");
+  if (oldTable) {
+    await run(`INSERT OR IGNORE INTO map_config (cell, cell_type, updated_at)
+      SELECT cell, cell_type, COALESCE(updated_at, CURRENT_TIMESTAMP)
+      FROM map_config_old
+      WHERE cell_type IN ('trap', 'lucky')`);
+    await run('DROP TABLE map_config_old');
+  }
+
+  await run("UPDATE map_config SET cell_type = 'lucky' WHERE cell_type NOT IN ('trap', 'lucky', 'pigment')");
+
   const count = await get('SELECT COUNT(*) AS count FROM map_config');
-  if (Number(count?.count || 0) !== 14) {
+  const pigmentCount = await get("SELECT COUNT(*) AS count FROM map_config WHERE cell_type = 'pigment'");
+  if (Number(count?.count || 0) !== 19 || Number(pigmentCount?.count || 0) !== 5) {
     await regenerateMapConfig();
   }
 }
@@ -262,6 +283,8 @@ async function regenerateMapConfig() {
   const trapCells = pickRandomCells(7, used);
   trapCells.forEach((cell) => used.add(cell));
   const luckyCells = pickRandomCells(7, used);
+  luckyCells.forEach((cell) => used.add(cell));
+  const pigmentCells = pickRandomCells(5, used);
 
   await run('DELETE FROM map_config');
   for (const cell of trapCells) {
@@ -270,13 +293,17 @@ async function regenerateMapConfig() {
   for (const cell of luckyCells) {
     await run("INSERT INTO map_config (cell, cell_type) VALUES (?, 'lucky')", [cell]);
   }
-  return { trapCells, luckyCells };
+  for (const cell of pigmentCells) {
+    await run("INSERT INTO map_config (cell, cell_type) VALUES (?, 'pigment')", [cell]);
+  }
+  return { trapCells, luckyCells, pigmentCells };
 }
 
 async function loadMapConfig() {
   const rows = await all('SELECT cell, cell_type FROM map_config');
   TRAP_CELLS = new Set(rows.filter((row) => row.cell_type === 'trap').map((row) => Number(row.cell)));
   LUCKY_CELLS = new Set(rows.filter((row) => row.cell_type === 'lucky').map((row) => Number(row.cell)));
+  PIGMENT_CELLS = new Set(rows.filter((row) => row.cell_type === 'pigment').map((row) => Number(row.cell)));
 }
 
 async function ensureUserTarotColumns() {
@@ -322,6 +349,60 @@ async function ensureUserEndgameColumns() {
   const columns = await all('PRAGMA table_info(users)');
   const names = new Set(columns.map((column) => column.name));
   if (!names.has('magical_pigment')) await run('ALTER TABLE users ADD COLUMN magical_pigment INTEGER DEFAULT 0');
+  if (!names.has('last_raw_dice')) await run('ALTER TABLE users ADD COLUMN last_raw_dice INTEGER DEFAULT 0');
+  if (!names.has('last_duel_challenge_at')) await run('ALTER TABLE users ADD COLUMN last_duel_challenge_at TEXT DEFAULT NULL');
+  if (!names.has('cloud_umbrella_charges')) await run('ALTER TABLE users ADD COLUMN cloud_umbrella_charges INTEGER DEFAULT 0');
+}
+
+
+async function getSpendableTicket(tgId) {
+  return get("SELECT ticket_number FROM tickets WHERE tg_id = ? AND status = 'active' ORDER BY ticket_number ASC LIMIT 1", [tgId]);
+}
+
+async function payShopCost(tgId, payment, reason) {
+  const normalized = String(payment || '').trim();
+  if (normalized === 'pigment') {
+    const user = await get('SELECT magical_pigment FROM users WHERE tg_id = ?', [tgId]);
+    if (Number(user?.magical_pigment || 0) < 3) throw Object.assign(new Error('Не хватает Пигмента: нужно 3 единицы валюты'), { status: 400 });
+    await run('UPDATE users SET magical_pigment = COALESCE(magical_pigment, 0) - 3 WHERE tg_id = ?', [tgId]);
+    return { payment: normalized, spent_pigment: 3 };
+  }
+  if (normalized === 'ticket') {
+    const ticket = await getSpendableTicket(tgId);
+    if (!ticket) throw Object.assign(new Error('Нет активной Красочки для оплаты'), { status: 400 });
+    await run("UPDATE tickets SET status = 'revoked', revoke_comment = ? WHERE ticket_number = ?", [reason, ticket.ticket_number]);
+    return { payment: normalized, spent_ticket_number: ticket.ticket_number };
+  }
+  throw Object.assign(new Error('Выберите оплату: 3 Пигмента или 1 Красочка'), { status: 400 });
+}
+
+async function consumeCloudUmbrella(tgId, eventType, message, meta = {}) {
+  const result = await run('UPDATE users SET cloud_umbrella_charges = COALESCE(cloud_umbrella_charges, 0) - 1 WHERE tg_id = ? AND COALESCE(cloud_umbrella_charges, 0) > 0', [tgId]);
+  if (Number(result.changes || 0) === 0) return false;
+  await addNewsEvent(message, { eventType, tgId });
+  await logPlayerAction(tgId, eventType, message, { meta });
+  return true;
+}
+
+async function addPigmentReward(tgId, message, eventType, meta = {}) {
+  await run('UPDATE users SET magical_pigment = COALESCE(magical_pigment, 0) + 1 WHERE tg_id = ?', [tgId]);
+  await addNewsEvent(message, { eventType, tgId });
+  await logPlayerAction(tgId, eventType, message, { meta });
+}
+
+async function getCompletedPuzzleDuelCount(tgId) {
+  const row = await get(`SELECT COUNT(*) AS count FROM puzzle_duels
+    WHERE (challenger_tg_id = ? OR opponent_tg_id = ?)
+      AND status IN ('challenger_won', 'opponent_won', 'declined', 'expired')`, [tgId, tgId]);
+  return Number(row?.count || 0);
+}
+
+async function hasApprovedSubmissionInLastDays(tgId, days = 3) {
+  const row = await get(`SELECT 1 AS ok FROM submissions
+    WHERE tg_id = ? AND status IN ('approved', 'auto_approved')
+      AND datetime(updated_at) >= datetime('now', '-' || ? || ' days')
+    LIMIT 1`, [tgId, days]);
+  return Boolean(row);
 }
 
 async function ensureSubmissionRewardColumn() {
@@ -681,6 +762,162 @@ async function ensureCloudQuestTables() {
 }
 
 
+
+async function ensureGalleryTables() {
+  await run(`CREATE TABLE IF NOT EXISTS gallery_exhibitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL,
+    starts_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    ends_at TEXT NOT NULL,
+    star_author_rewarded INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (submission_id) REFERENCES submissions(id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS gallery_votes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exhibition_id INTEGER NOT NULL,
+    submission_id INTEGER NOT NULL,
+    voter_tg_id TEXT NOT NULL,
+    reaction TEXT NOT NULL CHECK(reaction IN ('masterpiece', 'cozy')),
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(exhibition_id, voter_tg_id),
+    FOREIGN KEY (exhibition_id) REFERENCES gallery_exhibitions(id),
+    FOREIGN KEY (submission_id) REFERENCES submissions(id),
+    FOREIGN KEY (voter_tg_id) REFERENCES users(tg_id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS gallery_ticket_rewards (
+    submission_id INTEGER PRIMARY KEY,
+    ticket_number INTEGER NOT NULL,
+    awarded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (submission_id) REFERENCES submissions(id),
+    FOREIGN KEY (ticket_number) REFERENCES tickets(ticket_number)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS gallery_activity_rewards (
+    tg_id TEXT NOT NULL,
+    vote_threshold INTEGER NOT NULL,
+    awarded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tg_id, vote_threshold),
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+
+  const columns = await all('PRAGMA table_info(users)');
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has('gallery_activity_votes')) await run('ALTER TABLE users ADD COLUMN gallery_activity_votes INTEGER DEFAULT 0');
+}
+
+async function getApprovedGallerySubmissionPool(excludeSubmissionId = null) {
+  return all(`SELECT s.id, s.tg_id, s.cell, s.task_id, s.assigned_task_text, s.photo_after, s.updated_at,
+      COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id) AS task_title
+    FROM submissions s
+    LEFT JOIN tasks t ON t.id = s.task_id
+    WHERE s.status IN ('approved', 'auto_approved')
+      AND s.photo_after IS NOT NULL AND s.photo_after <> ''
+      AND (? IS NULL OR s.id <> ?)
+    ORDER BY RANDOM()`, [excludeSubmissionId, excludeSubmissionId]);
+}
+
+async function rewardGalleryStarAuthors() {
+  const due = await all(`SELECT ge.id, ge.submission_id, s.tg_id, s.assigned_task_text, t.text_task,
+      SUM(CASE WHEN gv.reaction = 'masterpiece' THEN 1 ELSE 0 END) AS masterpiece_votes
+    FROM gallery_exhibitions ge
+    JOIN submissions s ON s.id = ge.submission_id
+    LEFT JOIN tasks t ON t.id = s.task_id
+    LEFT JOIN gallery_votes gv ON gv.exhibition_id = ge.id
+    WHERE ge.star_author_rewarded = 0 AND datetime(ge.ends_at, '+1 day') <= datetime('now')
+    GROUP BY ge.id
+    HAVING masterpiece_votes > 15
+    LIMIT 50`);
+  for (const item of due) {
+    await addPigmentReward(item.tg_id, `🌟 Звёздный час! Работа «${item.assigned_task_text || item.text_task || 'творческое задание'}» набрала больше 15 отметок «Шедевр!» в Галерее. Автор получает +1 Магический Пигмент ✨.`, 'gallery_star_author_pigment', { submission_id: item.submission_id, exhibition_id: item.id });
+    await run('UPDATE gallery_exhibitions SET star_author_rewarded = 1 WHERE id = ?', [item.id]);
+  }
+  await run(`UPDATE gallery_exhibitions SET star_author_rewarded = 1
+    WHERE star_author_rewarded = 0 AND datetime(ends_at, '+1 day') <= datetime('now')
+      AND id NOT IN (
+        SELECT ge.id FROM gallery_exhibitions ge
+        LEFT JOIN gallery_votes gv ON gv.exhibition_id = ge.id AND gv.reaction = 'masterpiece'
+        GROUP BY ge.id HAVING COUNT(gv.id) > 15
+      )`);
+}
+
+async function ensureCurrentGalleryExhibition() {
+  await rewardGalleryStarAuthors();
+  const current = await get(`SELECT ge.*, s.tg_id AS author_tg_id, s.photo_after, s.cell, s.task_id,
+      COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id) AS task_title
+    FROM gallery_exhibitions ge
+    JOIN submissions s ON s.id = ge.submission_id
+    LEFT JOIN tasks t ON t.id = s.task_id
+    WHERE datetime(ge.starts_at) <= datetime('now') AND datetime(ge.ends_at) > datetime('now')
+    ORDER BY ge.id DESC LIMIT 1`);
+  if (current) return current;
+
+  const previous = await get('SELECT submission_id FROM gallery_exhibitions ORDER BY id DESC LIMIT 1');
+  const pool = await getApprovedGallerySubmissionPool(previous?.submission_id || null);
+  const picked = pool[0] || (await getApprovedGallerySubmissionPool(null))[0];
+  if (!picked) return null;
+  const created = await run(`INSERT INTO gallery_exhibitions (submission_id, starts_at, ends_at)
+    VALUES (?, CURRENT_TIMESTAMP, datetime('now', '+2 hours'))`, [picked.id]);
+  return get(`SELECT ge.*, s.tg_id AS author_tg_id, s.photo_after, s.cell, s.task_id,
+      COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id) AS task_title
+    FROM gallery_exhibitions ge
+    JOIN submissions s ON s.id = ge.submission_id
+    LEFT JOIN tasks t ON t.id = s.task_id
+    WHERE ge.id = ?`, [created.id]);
+}
+
+async function getGalleryPayload(tgId) {
+  const current = await ensureCurrentGalleryExhibition();
+  if (!current) return { current: null, archive: [], vote_limit: { used: 0, max: 3 }, activity_votes: 0 };
+  const [votes, ownVote, voteLimit, user, archive] = await Promise.all([
+    all(`SELECT reaction, COUNT(*) AS count FROM gallery_votes WHERE exhibition_id = ? GROUP BY reaction`, [current.id]),
+    get('SELECT reaction FROM gallery_votes WHERE exhibition_id = ? AND voter_tg_id = ?', [current.id, tgId]),
+    get("SELECT COUNT(*) AS count FROM gallery_votes WHERE voter_tg_id = ? AND datetime(created_at) >= datetime('now', '-24 hours')", [tgId]),
+    get('SELECT gallery_activity_votes FROM users WHERE tg_id = ?', [tgId]),
+    all(`SELECT ge.id, ge.submission_id, ge.starts_at, ge.ends_at, s.photo_after,
+        COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'Задание #' || s.task_id) AS task_title,
+        COALESCE(COUNT(gv.id), 0) AS total_votes
+      FROM gallery_exhibitions ge
+      JOIN submissions s ON s.id = ge.submission_id
+      LEFT JOIN tasks t ON t.id = s.task_id
+      LEFT JOIN gallery_votes gv ON gv.exhibition_id = ge.id
+      WHERE datetime(ge.ends_at) <= datetime('now')
+      GROUP BY ge.id
+      ORDER BY ge.ends_at DESC LIMIT 12`)
+  ]);
+  const byReaction = Object.fromEntries(votes.map((vote) => [vote.reaction, Number(vote.count || 0)]));
+  return {
+    current: {
+      id: current.id,
+      submission_id: current.submission_id,
+      image_url: `/uploads/${current.photo_after}`,
+      task_title: current.task_title,
+      starts_at: current.starts_at,
+      ends_at: current.ends_at,
+      own_vote: ownVote?.reaction || '',
+      votes: { masterpiece: byReaction.masterpiece || 0, cozy: byReaction.cozy || 0 }
+    },
+    archive: archive.map((item) => ({ ...item, image_url: `/uploads/${item.photo_after}`, total_votes: Number(item.total_votes || 0) })),
+    vote_limit: { used: Number(voteLimit?.count || 0), max: 3 },
+    activity_votes: Number(user?.gallery_activity_votes || 0)
+  };
+}
+
+async function maybeAwardGalleryTicket(submissionId) {
+  const existing = await get('SELECT ticket_number FROM gallery_ticket_rewards WHERE submission_id = ?', [submissionId]);
+  if (existing) return null;
+  const total = await get('SELECT COUNT(*) AS count FROM gallery_votes WHERE submission_id = ?', [submissionId]);
+  if (Number(total?.count || 0) < 50) return null;
+  const submission = await get(`SELECT s.*, COALESCE(NULLIF(s.assigned_task_text, ''), t.text_task, 'творческое задание') AS task_title
+    FROM submissions s LEFT JOIN tasks t ON t.id = s.task_id WHERE s.id = ?`, [submissionId]);
+  if (!submission) return null;
+  const ticket = await issueTicket(submission.tg_id, 'standard', submission.id, 'gallery');
+  await run('INSERT OR IGNORE INTO gallery_ticket_rewards (submission_id, ticket_number) VALUES (?, ?)', [submissionId, ticket.ticket_number]);
+  const message = `🎉 Твой рисунок стал Народным Шедевром!\nПотрясающие новости! Одна из твоих работ (та самая, с ${submission.task_title}) суммарно набрала 50 голосов в Арт-Галерее! Девчонки в полном восторге от твоего вкуса и подбора цветов.\nЗа это грандиозное достижение тебе начисляется +1 красочка в копилку главного розыгрыша! Твой талант официально признан, а билет уже ждет финального часа. Продолжай в том же духе, муза явно на твоей стороне! 🎟️✨`;
+  await addNewsEvent(message, { eventType: 'gallery_masterpiece_50', tgId: submission.tg_id, ticketNumber: ticket.ticket_number });
+  await logPlayerAction(submission.tg_id, 'gallery_masterpiece_50', message, { submissionId, meta: { ticket_number: ticket.ticket_number } });
+  return ticket;
+}
+
 async function ensurePigmentGiftsTable() {
   await run(`CREATE TABLE IF NOT EXISTS pigment_gifts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -695,11 +932,17 @@ async function ensurePigmentGiftsTable() {
 }
 
 async function finishPuzzleDuel(duel, winnerTgId, loserTgId, status) {
+  const winnerCompletedBefore = await getCompletedPuzzleDuelCount(winnerTgId);
   await run(`UPDATE puzzle_duels
     SET status = ?, winner_tg_id = ?, loser_tg_id = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?`, [status, winnerTgId, loserTgId, duel.id]);
-  const ticket = await issueTicket(winnerTgId, 'bonus');
-  await addNewsEvent('🧩 Да ты не только мастер рисовать, но еще и мегамозг! Дуэль выиграна, лови приз!', { eventType: 'puzzle_duel_win', tgId: winnerTgId, ticketNumber: ticket.ticket_number });
+  let ticket = null;
+  if (winnerCompletedBefore < 3) {
+    ticket = await issueTicket(winnerTgId, 'bonus');
+    await addNewsEvent('🧩 Да ты не только мастер рисовать, но еще и мегамозг! Дуэль выиграна, лови приз!', { eventType: 'puzzle_duel_win', tgId: winnerTgId, ticketNumber: ticket.ticket_number });
+  } else {
+    await addPigmentReward(winnerTgId, '🧩 Да ты не только мастер рисовать, но еще и мегамозг! Дуэль выиграна, лови +1 Магический Пигмент ✨!', 'puzzle_duel_pigment_win', { duel_id: duel.id });
+  }
   await addNewsEvent('🧩 Не выиграла дуэль, зато ты красишь круто!', { eventType: 'puzzle_duel_loss', tgId: loserTgId });
   return ticket;
 }
@@ -1180,6 +1423,7 @@ async function getPlayerTickets(tgId) {
 
 let TRAP_CELLS = new Set([13, 26, 39, 52, 65, 78, 91]);
 let LUCKY_CELLS = new Set([7, 21, 35, 49, 63, 77, 88]);
+let PIGMENT_CELLS = new Set([5, 18, 42, 66, 84]);
 const LUCKY_TASK_OPTIONS = [
   'Раскрасить что угодно вне заданий',
   'Взять картинку формата менее А4'
@@ -1204,6 +1448,7 @@ function getCellType(cell) {
   const normalized = Number(cell || 0);
   if (TRAP_CELLS.has(normalized)) return 'trap';
   if (LUCKY_CELLS.has(normalized)) return 'lucky';
+  if (PIGMENT_CELLS.has(normalized)) return 'pigment';
   return 'ordinary';
 }
 
@@ -1633,7 +1878,8 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const finishSummary = await getFinishSummary(tgId);
     const cloudQuest = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser) ? await getActiveCloudQuestForPlayer(tgId) : null;
     const canBuyMuseCharge = Number(responseUser.current_cell || 0) >= 100 && Number(responseUser.magical_pigment || 0) >= 2 && await hasMuseChargeRecipient();
-    res.json({ cloudQuest, can_buy_muse_charge: canBuyMuseCharge, user: { ...responseUser, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0), magical_pigment: Number(responseUser.magical_pigment || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] } });
+    const duelCompletedCount = await getCompletedPuzzleDuelCount(tgId);
+    res.json({ cloudQuest, can_buy_muse_charge: canBuyMuseCharge, user: { ...responseUser, duel_completed_count: duelCompletedCount, duel_advanced: duelCompletedCount >= 3, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, cloud_umbrella_charges: Number(responseUser.cloud_umbrella_charges || 0), next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0), magical_pigment: Number(responseUser.magical_pigment || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS], pigment_cells: [...PIGMENT_CELLS] } });
   } catch (error) {
     next(error);
   }
@@ -2005,6 +2251,10 @@ function buildMoveNotification(result) {
     return `🪤 Бросок кубика: ${dicePart}. Вы попали на ловушку ${result.landed_cell}: ловушка бросила ${result.trap_dice} и откатила вас назад на клетку ${result.current_cell}.`;
   }
 
+  if (result.cell_type === 'pigment') {
+    return `☁️ Бросок кубика: ${dicePart}. Вы наступили на особое облако ${result.current_cell} и получаете +1 Магический Пигмент ✨.`;
+  }
+
   return `🎲 Бросок кубика: ${dicePart}. Вы перешли на клетку ${result.current_cell}.`;
 }
 
@@ -2026,7 +2276,11 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
   let trapDice = null;
   let trapImmunityUsed = false;
   if (cellType === 'trap') {
-    if (Number(user.trap_immunity) === 1) {
+    if (Number(user.cloud_umbrella_charges || 0) > 0) {
+      trapImmunityUsed = true;
+      await consumeCloudUmbrella(tgId, 'cloud_umbrella_trap_used', `☂️ Облачный зонтик защитил от отката на ловушке ${landedCell} и сгорел.`, { cell: landedCell });
+      await run('UPDATE users SET total_traps = COALESCE(total_traps, 0) + 1 WHERE tg_id = ?', [tgId]);
+    } else if (Number(user.trap_immunity) === 1) {
       trapImmunityUsed = true;
       await run('UPDATE users SET trap_immunity = 0, total_traps = COALESCE(total_traps, 0) + 1 WHERE tg_id = ?', [tgId]);
     } else {
@@ -2036,14 +2290,20 @@ async function applyMoveAndCreateTask(tgId, user, dice, extra = {}) {
     }
   }
 
+  let pigmentCellReward = false;
+  if (cellType === 'pigment') {
+    pigmentCellReward = true;
+    await addPigmentReward(tgId, `☁️ Повезло! Особое облако на клетке ${currentCell} дарит +1 Магический Пигмент ✨.`, 'pigment_cell', { cell: currentCell });
+  }
+
   const pending = await createPendingSubmissionForCell(tgId, currentCell);
   await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, next_roll_doubled = 0, total_dice_rolls = COALESCE(total_dice_rolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
   const finishResult = await issueFinishBonusIfNeeded(tgId);
-  const result = { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, finish_summary: finishResult.finishSummary || null, finish_bonus_tickets: finishResult.finishTickets || [], ...extra, ...pending };
-  if (cellType === 'trap') {
+  const result = { ok: true, dice, trap_dice: trapDice, trap_immunity_used: trapImmunityUsed, landed_cell: landedCell, current_cell: currentCell, cell_type: cellType, pigment_cell_reward: pigmentCellReward, finish_summary: finishResult.finishSummary || null, finish_bonus_tickets: finishResult.finishTickets || [], ...extra, ...pending };
+  if (cellType === 'trap' || cellType === 'pigment') {
     const message = buildMoveNotification(result);
-    await addNewsEvent(message, { eventType: trapImmunityUsed ? 'trap_immunity_used' : 'trap_cell', tgId });
-    await logPlayerAction(tgId, trapImmunityUsed ? 'trap_immunity_used' : 'trap_cell', message, { cell: currentCell, taskId: result.task?.id, submissionId: result.submission_id, meta: { dice, trap_dice: trapDice, landed_cell: landedCell, trap_immunity_used: trapImmunityUsed, ...extra } });
+    await addNewsEvent(message, { eventType: cellType === 'pigment' ? 'pigment_cell_landed' : (trapImmunityUsed ? 'trap_immunity_used' : 'trap_cell'), tgId });
+    await logPlayerAction(tgId, cellType === 'pigment' ? 'pigment_cell_landed' : (trapImmunityUsed ? 'trap_immunity_used' : 'trap_cell'), message, { cell: currentCell, taskId: result.task?.id, submissionId: result.submission_id, meta: { dice, trap_dice: trapDice, landed_cell: landedCell, trap_immunity_used: trapImmunityUsed, ...extra } });
   }
   return result;
 }
@@ -2064,7 +2324,10 @@ app.post('/api/roll', async (req, res, next) => {
     const rollDoubled = Number(playableUser.next_roll_doubled) === 1;
     const rollHalved = !rollDoubled && Number(playableUser.next_roll_halved) === 1;
     const dice = rollDoubled ? rawDice * 2 : (rollHalved ? Math.max(1, Math.ceil(rawDice / 2)) : rawDice);
-    const result = await applyMoveAndCreateTask(tgId, playableUser, dice, { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled });
+    const consolationPigment = Number(playableUser.last_raw_dice || 0) === 1 && rawDice === 1;
+    if (consolationPigment) await addPigmentReward(tgId, '✨ Две единицы на кубике подряд! Утешительный приз: +1 Магический Пигмент.', 'double_one_pigment', { raw_dice: rawDice });
+    const result = await applyMoveAndCreateTask(tgId, playableUser, dice, { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled, consolation_pigment: consolationPigment });
+    await run('UPDATE users SET last_raw_dice = ? WHERE tg_id = ?', [rawDice, tgId]);
     await logPlayerAction(tgId, 'dice_roll', buildMoveNotification(result), { cell: result.current_cell, taskId: result.task?.id, submissionId: result.submission_id, meta: { raw_dice: rawDice, roll_halved: rollHalved, roll_doubled: rollDoubled, cell_type: result.cell_type, landed_cell: result.landed_cell, trap_dice: result.trap_dice, trap_immunity_used: result.trap_immunity_used } });
     res.json(result);
   } catch (error) {
@@ -2072,6 +2335,46 @@ app.post('/api/roll', async (req, res, next) => {
   }
 });
 
+
+
+app.get('/api/gallery/current', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.query.tg_id);
+    await requireApproved(tgId);
+    res.json(await getGalleryPayload(tgId));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/gallery/vote', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const reaction = String(req.body.reaction || '').trim();
+    if (!['masterpiece', 'cozy'].includes(reaction)) throw Object.assign(new Error('Выберите оценку для Галереи'), { status: 400 });
+    await requireApproved(tgId);
+    const current = await ensureCurrentGalleryExhibition();
+    if (!current) throw Object.assign(new Error('В Галерее пока нет одобренных работ'), { status: 404 });
+    const recentVotes = await get("SELECT COUNT(*) AS count FROM gallery_votes WHERE voter_tg_id = ? AND datetime(created_at) >= datetime('now', '-24 hours')", [tgId]);
+    if (Number(recentVotes?.count || 0) >= 3) throw Object.assign(new Error('Лимит Галереи: можно проголосовать 3 раза за 24 часа'), { status: 400 });
+    const inserted = await run(`INSERT OR IGNORE INTO gallery_votes (exhibition_id, submission_id, voter_tg_id, reaction)
+      VALUES (?, ?, ?, ?)`, [current.id, current.submission_id, tgId, reaction]);
+    if (Number(inserted.changes || 0) === 0) throw Object.assign(new Error('Вы уже оценили текущую картину Галереи'), { status: 400 });
+
+    const before = await get('SELECT gallery_activity_votes FROM users WHERE tg_id = ?', [tgId]);
+    const nextVotes = Number(before?.gallery_activity_votes || 0) + 1;
+    await run('UPDATE users SET gallery_activity_votes = ? WHERE tg_id = ?', [nextVotes, tgId]);
+    const threshold = Math.floor(nextVotes / 10) * 10;
+    let pigmentAwarded = false;
+    if (threshold > 0 && nextVotes % 10 === 0) {
+      const reward = await run('INSERT OR IGNORE INTO gallery_activity_rewards (tg_id, vote_threshold) VALUES (?, ?)', [tgId, threshold]);
+      if (Number(reward.changes || 0) === 1) {
+        pigmentAwarded = true;
+        await addPigmentReward(tgId, `✨ Спасибо за поддержку Галереи! ${threshold} голосов за чужую красоту — получай +1 Магический Пигмент.`, 'gallery_activity_pigment', { vote_threshold: threshold });
+      }
+    }
+    const ticket = await maybeAwardGalleryTicket(current.submission_id);
+    res.json({ ok: true, pigment_awarded: pigmentAwarded, ticket_awarded: ticket, gallery: await getGalleryPayload(tgId) });
+  } catch (error) { next(error); }
+});
 
 app.get('/api/notifications/:userId', async (req, res, next) => {
   try {
@@ -2090,7 +2393,12 @@ app.get('/api/duels/players', async (req, res, next) => {
     await expirePuzzleDuels();
     const tgId = normalizeTgId(req.query.tg_id);
     await requireApproved(tgId);
-    const players = await all(`SELECT tg_id, username FROM users WHERE tg_id <> ? AND is_approved = 1 AND role = 'user' AND can_challenge = 1 AND can_accept = 1 ORDER BY username COLLATE NOCASE ASC, tg_id ASC LIMIT 80`, [tgId]);
+    const completed = await getCompletedPuzzleDuelCount(tgId);
+    const advanced = completed >= 3;
+    const approvedRecently = await hasApprovedSubmissionInLastDays(tgId, 3);
+    const challenger = await get('SELECT last_duel_challenge_at FROM users WHERE tg_id = ?', [tgId]);
+    const cooldownReady = !challenger?.last_duel_challenge_at || await get("SELECT datetime(?) <= datetime('now', '-3 days') AS ok", [challenger.last_duel_challenge_at]).then((row) => Number(row?.ok) === 1);
+    const players = advanced && (!approvedRecently || !cooldownReady) ? [] : await all(`SELECT tg_id, username FROM users WHERE tg_id <> ? AND is_approved = 1 AND role = 'user' AND can_accept = 1 ORDER BY username COLLATE NOCASE ASC, tg_id ASC LIMIT 80`, [tgId]);
     const active = await get(`SELECT * FROM puzzle_duels WHERE (challenger_tg_id = ? OR opponent_tg_id = ?) AND status IN ('pending', 'active') ORDER BY id DESC LIMIT 1`, [tgId, tgId]);
     res.json({ players, active_duel: active || null });
   } catch (error) { next(error); }
@@ -2105,12 +2413,18 @@ app.post('/api/duels/challenge', async (req, res, next) => {
     const user = await requireApproved(tgId);
     const opponent = await requireApproved(opponentId);
     assertPlayableUser(user); assertPlayableUser(opponent);
-    if (Number(user.duel_challenges_used || 0) >= 1 || Number(user.can_challenge) !== 1) throw Object.assign(new Error('Лимит вызовов исчерпан: за игру можно бросить вызов только 1 раз'), { status: 400 });
+    const completedDuels = await getCompletedPuzzleDuelCount(tgId);
+    if (completedDuels < 3) {
+      if (Number(user.duel_challenges_used || 0) >= 1 || Number(user.can_challenge) !== 1) throw Object.assign(new Error('Лимит вызовов исчерпан: за игру можно бросить вызов только 1 раз'), { status: 400 });
+    } else {
+      if (!await hasApprovedSubmissionInLastDays(tgId, 3)) throw Object.assign(new Error('Новый режим пятнашек доступен только после одобренной работы за последние 3 дня'), { status: 400 });
+      if (user.last_duel_challenge_at && Number((await get("SELECT datetime(?) > datetime('now', '-3 days') AS blocked", [user.last_duel_challenge_at]))?.blocked) === 1) throw Object.assign(new Error('Новый вызов в пятнашки можно бросить раз в 3 дня'), { status: 400 });
+    }
     if (Number(opponent.duel_accepts_used || 0) >= 2) throw Object.assign(new Error('Этот игрок уже принял максимум 2 дуэли'), { status: 400 });
     const existing = await get(`SELECT id FROM puzzle_duels WHERE (challenger_tg_id = ? OR opponent_tg_id = ? OR challenger_tg_id = ? OR opponent_tg_id = ?) AND status IN ('pending', 'active') LIMIT 1`, [tgId, tgId, opponentId, opponentId]);
     if (existing) throw Object.assign(new Error('У одного из игроков уже есть активная дуэль'), { status: 400 });
     const result = await run(`INSERT INTO puzzle_duels (challenger_tg_id, opponent_tg_id, status) VALUES (?, ?, 'pending')`, [tgId, opponentId]);
-    await run('UPDATE users SET can_challenge = 0, duel_challenges_used = COALESCE(duel_challenges_used, 0) + 1 WHERE tg_id = ?', [tgId]);
+    await run('UPDATE users SET can_challenge = CASE WHEN ? < 3 THEN 0 ELSE can_challenge END, duel_challenges_used = COALESCE(duel_challenges_used, 0) + 1, last_duel_challenge_at = CURRENT_TIMESTAMP WHERE tg_id = ?', [completedDuels, tgId]);
     await logPlayerAction(tgId, 'puzzle_duel_challenge_sent', `Отправлен вызов в пятнашки игроку ${formatUserHandle(opponent.username, opponent.tg_id)}.`, { meta: { duel_id: result.id, opponent_tg_id: opponentId } });
     await logPlayerAction(opponentId, 'puzzle_duel_challenge_received', `Получен вызов в пятнашки от ${formatUserHandle(user.username, user.tg_id)}.`, { meta: { duel_id: result.id, challenger_tg_id: tgId } });
     await run('UPDATE users SET can_accept = CASE WHEN COALESCE(duel_accepts_used, 0) + 1 >= 2 THEN 0 ELSE 1 END, duel_accepts_used = COALESCE(duel_accepts_used, 0) + 1 WHERE tg_id = ?', [opponentId]);
@@ -2215,13 +2529,16 @@ app.post('/api/reroll-task', async (req, res, next) => {
     if (Number(user.penalty_rerolls || 0) >= 3) {
       throw Object.assign(new Error('Твой лимит штрафных перебросов исчерпан (3 из 3). Пришло время брать материалы и рисовать выпавшее задание! 🎨✨'), { status: 400 });
     }
-    const penalty = Math.floor(Math.random() * 3) + 1;
+    const rolledPenalty = Math.floor(Math.random() * 3) + 1;
+    const umbrellaUsed = Number(user.cloud_umbrella_charges || 0) > 0;
+    if (umbrellaUsed) await consumeCloudUmbrella(tgId, 'cloud_umbrella_reroll_used', `☂️ Облачный зонтик защитил от штрафного отката при смене задания и сгорел.`, { rolled_penalty: rolledPenalty });
+    const penalty = umbrellaUsed ? 0 : rolledPenalty;
     const currentCell = Math.max(0, Number(user.current_cell || 0) - penalty);
     await run('DELETE FROM submissions WHERE id = ?', [active.id]);
     const pending = await createPendingSubmissionForCell(tgId, currentCell);
     await run('UPDATE users SET current_cell = ?, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 1, pending_lucky_cell = NULL, next_roll_halved = 0, penalty_rerolls = COALESCE(penalty_rerolls, 0) + 1 WHERE tg_id = ?', [currentCell, tgId]);
 
-    res.json({ ok: true, penalty, current_cell: currentCell, penalty_rerolls: Number(user.penalty_rerolls || 0) + 1, penalty_rerolls_limit: 3, ...pending });
+    res.json({ ok: true, penalty, umbrella_used: umbrellaUsed, current_cell: currentCell, penalty_rerolls: Number(user.penalty_rerolls || 0) + 1, penalty_rerolls_limit: 3, ...pending });
   } catch (error) {
     next(error);
   }
@@ -2476,6 +2793,39 @@ app.post('/api/admin/reset-dice', async (req, res, next) => {
   }
 });
 
+
+
+app.post('/api/shop/creative-skip', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const payment = String(req.body.payment || '').trim();
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    const active = await getActiveSubmission(tgId);
+    if (!active) throw Object.assign(new Error('Нет текущего задания для Творческого Скипа'), { status: 400 });
+    const paid = await payShopCost(tgId, payment, 'Оплата предмета «Творческий Скип»');
+    await run('DELETE FROM submissions WHERE id = ?', [active.id]);
+    await run('UPDATE users SET dice_frozen = 0, pending_lucky_cell = NULL WHERE tg_id = ?', [tgId]);
+    const message = `🌀 Творческий Скип сжёг текущее задание на клетке ${Number(active.cell || user.current_cell || 0)}. Фишка остаётся на месте, кубик снова доступен.`;
+    await addNewsEvent(message, { eventType: 'creative_skip_used', tgId });
+    await logPlayerAction(tgId, 'creative_skip_used', message, { cell: active.cell, submissionId: active.id, meta: paid });
+    res.json({ ok: true, ...paid, current_cell: Number(user.current_cell || active.cell || 0) });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/shop/cloud-umbrella', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const payment = String(req.body.payment || '').trim();
+    await requireApproved(tgId);
+    const paid = await payShopCost(tgId, payment, 'Оплата предмета «Облачный зонтик»');
+    await run('UPDATE users SET cloud_umbrella_charges = COALESCE(cloud_umbrella_charges, 0) + 1 WHERE tg_id = ?', [tgId]);
+    const message = '☂️ Облачный зонтик куплен! Он защитит от одного следующего отката или негативной карты.';
+    await addNewsEvent(message, { eventType: 'cloud_umbrella_bought', tgId });
+    await logPlayerAction(tgId, 'cloud_umbrella_bought', message, { meta: paid });
+    res.json({ ok: true, ...paid });
+  } catch (error) { next(error); }
+});
 
 app.post('/api/endgame/muse-charge', async (req, res, next) => {
   try {
@@ -3015,15 +3365,19 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await run('DELETE FROM cloud_quest_uploads');
     await run('DELETE FROM cloud_quests');
     await run('DELETE FROM pigment_gifts');
+    await run('DELETE FROM gallery_votes');
+    await run('DELETE FROM gallery_exhibitions');
+    await run('DELETE FROM gallery_ticket_rewards');
+    await run('DELETE FROM gallery_activity_rewards');
     await run('DELETE FROM news_events');
     await regenerateMapConfig();
     await loadMapConfig();
     await run(`UPDATE users
       SET current_cell = 0, cell_arrived_at = CURRENT_TIMESTAMP, dice_frozen = 0, pending_lucky_cell = NULL,
         has_used_tarot = 0, trap_immunity = 0, next_roll_halved = 0, next_roll_doubled = 0,
-        penalty_rerolls = 0, total_dice_rolls = 0, magical_pigment = 0,
+        penalty_rerolls = 0, total_dice_rolls = 0, magical_pigment = 0, gallery_activity_votes = 0, cloud_umbrella_charges = 0,
         reactions_hearts = 0, reactions_coffee = 0, can_challenge = 1, can_accept = 1, duel_challenges_used = 0, duel_accepts_used = 0`);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?, ?)', ['submissions', 'raffle_results', 'news_events', 'puzzle_duels', 'cloud_quests', 'pigment_gifts']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?, ?, ?, ?)', ['submissions', 'raffle_results', 'news_events', 'puzzle_duels', 'cloud_quests', 'pigment_gifts', 'gallery_exhibitions', 'gallery_votes']);
     res.json({ ok: true, trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS] });
   } catch (error) {
     next(error);
@@ -3044,8 +3398,12 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM cloud_quest_uploads');
     await run('DELETE FROM cloud_quests');
     await run('DELETE FROM pigment_gifts');
+    await run('DELETE FROM gallery_votes');
+    await run('DELETE FROM gallery_exhibitions');
+    await run('DELETE FROM gallery_ticket_rewards');
+    await run('DELETE FROM gallery_activity_rewards');
     await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);
-    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels', 'cloud_quests', 'pigment_gifts']);
+    await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels', 'cloud_quests', 'pigment_gifts', 'gallery_exhibitions', 'gallery_votes']);
     await run(`UPDATE raffle_config
       SET raffle_start = '', raffle_end = '', total_prizes = 0, remaining_prizes = 0, updated_at = CURRENT_TIMESTAMP
       WHERE id = 1`);

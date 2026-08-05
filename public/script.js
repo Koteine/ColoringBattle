@@ -26,6 +26,7 @@ const els = {
   paletteHudBtn: document.getElementById('paletteHudBtn'),
   miniGamesHudBtn: document.getElementById('miniGamesHudBtn'),
   playersHudBtn: document.getElementById('playersHudBtn'),
+  galleryHudBtn: document.getElementById('galleryHudBtn'),
   cloudQuestBtn: document.getElementById('cloudQuestBtn'),
   taskHudBtn: document.getElementById('taskHudBtn'),
   adminGearBtn: document.getElementById('adminGearBtn'),
@@ -109,6 +110,9 @@ const els = {
   notificationsModal: document.getElementById('notificationsModal'),
   notificationsCloseBtn: document.getElementById('notificationsCloseBtn'),
   notificationsContent: document.getElementById('notificationsContent'),
+  galleryModal: document.getElementById('galleryModal'),
+  galleryCloseBtn: document.getElementById('galleryCloseBtn'),
+  galleryContent: document.getElementById('galleryContent'),
   duelModal: document.getElementById('duelModal'),
   duelCloseBtn: document.getElementById('duelCloseBtn'),
   duelContent: document.getElementById('duelContent'),
@@ -167,6 +171,7 @@ const playerEmojiPool = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀'
 const scratchers = new Map();
 let trapCells = new Set([13, 26, 39, 52, 65, 78, 91]);
 let luckyCells = new Set([7, 21, 35, 49, 63, 77, 88]);
+let pigmentCells = new Set([5, 18, 42, 66, 84]);
 
 function normalizeMapCells(cells) {
   return Array.isArray(cells)
@@ -177,9 +182,11 @@ function normalizeMapCells(cells) {
 function applyMapConfig(config = {}) {
   const serverTrapCells = normalizeMapCells(config.trap_cells);
   const serverLuckyCells = normalizeMapCells(config.lucky_cells);
-  if (!serverTrapCells.length && !serverLuckyCells.length) return;
+  const serverPigmentCells = normalizeMapCells(config.pigment_cells);
+  if (!serverTrapCells.length && !serverLuckyCells.length && !serverPigmentCells.length) return;
   trapCells = new Set(serverTrapCells);
   luckyCells = new Set(serverLuckyCells.filter((cell) => !trapCells.has(cell)));
+  pigmentCells = new Set(serverPigmentCells.filter((cell) => !trapCells.has(cell) && !luckyCells.has(cell)));
   lastMapKey = '';
 }
 
@@ -187,6 +194,7 @@ function getClientCellType(cell) {
   const normalized = Number(cell || 0);
   if (trapCells.has(normalized)) return 'trap';
   if (luckyCells.has(normalized)) return 'lucky';
+  if (pigmentCells.has(normalized)) return 'pigment';
   return 'ordinary';
 }
 
@@ -312,7 +320,7 @@ function renderCloudMap() {
   if (!els.cloudMap || !els.mapRoads) return;
 
   const grouped = playersByCell();
-  const mapConfigKey = `${[...trapCells].join(',')}:${[...luckyCells].join(',')}`;
+  const mapConfigKey = `${[...trapCells].join(',')}:${[...luckyCells].join(',')}:${[...pigmentCells].join(',')}`;
   const key = `${mapConfigKey}:${currentMapCell()}:${leaderboardPlayers.map((p) => `${p.tg_id}-${p.current_cell}-${p.cell_arrived_at || ''}-${p.map_emoji || ''}`).join('|')}`;
   if (key === lastMapKey && els.cloudMap.children.length) return;
   lastMapKey = key;
@@ -835,6 +843,7 @@ async function loadState() {
   render();
   loadLeaderboard().catch(() => {});
   checkLatestDuelOutcomeNotice().catch(() => {});
+  checkLatestGalleryMilestoneNotice().catch(() => {});
   startPolling();
 }
 
@@ -1054,6 +1063,7 @@ function closeTarotModal() {
 
 function tarotResultText(result) {
   if (result.tarot_effect === 'double_roll') return `🃏 ${result.tarot_card}: бафф — следующий бросок кубика обязательно умножится на 2.`;
+  if (result.umbrella_used) return `☂️ ${result.tarot_card}: Облачный зонтик защитил от негативного эффекта.`;
   if (result.tarot_effect === 'trap_immunity') return `🃏 ${result.tarot_card}: бафф — иммунитет от следующей ловушки активен.`;
   return `🃏 ${result.tarot_card}: ловушка — следующий бросок будет делиться на 2.`;
 }
@@ -1306,8 +1316,7 @@ function closeConfirmModal(result = false) {
   pendingConfirmResolve = null;
 }
 
-function showDismissibleGameNotice(gameId, message) {
-  const key = `puzzle_notice_closed_${gameId || 'latest'}_${message.includes('выиг') ? 'win' : 'loss'}`;
+function showDismissibleNotice(key, message) {
   if (window.localStorage.getItem(key) === '1') return;
   document.querySelector('.game-result-notice')?.remove();
   const notice = document.createElement('div');
@@ -1328,7 +1337,7 @@ async function checkLatestDuelOutcomeNotice() {
   const won = String(duel.winner_tg_id || '') === String(tgId);
   const lost = String(duel.loser_tg_id || '') === String(tgId);
   if (!won && !lost) return;
-  showDismissibleGameNotice(duel.id, won ? '🧩 Вы выиграли пятнашки и получаете красочку! 🎉' : '🧩 Пятнашки закончились поражением. Вы всё равно умничка, повезёт в другой раз! ❤️');
+  showDismissibleGameNotice(duel.id, won ? '🧩 Вы выиграли пятнашки и получаете приз! 🎉' : '🧩 Пятнашки закончились поражением. Вы всё равно умничка, повезёт в другой раз! ❤️');
 }
 
 
@@ -1340,14 +1349,14 @@ function renderMiniGamesList() {
   const isFinalist = Boolean(state?.finish_summary?.finished) || Number(user.current_cell || 0) >= 100;
   const games = [
     { id: 'tarot', icon: '🃏', title: 'Карты удачи', status: tarotUsed ? 'Уже использованы в этой игре' : (frozen ? 'Доступны только до броска кубика' : 'Испытать удачу один раз за игру'), disabled: tarotUsed || isFinalist, action: openTarotModal },
-    { id: 'duel', icon: '🧩', title: 'Дуэль в пятнашки', status: 'Вызови игрока или ответь на приглашение: победитель получает +1 Красочку', disabled: false, action: openDuelModal }
+    { id: 'duel', icon: '🧩', title: 'Дуэль в пятнашки', status: user.duel_advanced ? 'Новый режим: вызов раз в 3 дня после одобренной работы, приз +1 Пигмент' : 'Первые 3 игры: победитель получает +1 Красочку', disabled: false, action: openDuelModal, highlighted: user.duel_advanced }
   ];
-  if (isFinalist) games.push({ id: 'shop', icon: '🏪', title: 'Финишный магазин', status: `Магический Пигмент: ${Number(user.magical_pigment || 0)} · Заряд музы стоит 2`, disabled: false, action: openEndgameShopModal });
+  games.push({ id: 'shop', icon: '🏪', title: isFinalist ? 'Финишный магазин' : 'Магазин', status: `Пигмент: ${Number(user.magical_pigment || 0)} · Зонтиков: ${Number(user.cloud_umbrella_charges || 0)}`, disabled: false, action: openEndgameShopModal });
   els.miniGamesList.innerHTML = '';
   for (const game of games) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'mini-game-card';
+    button.className = `mini-game-card${game.highlighted ? ' highlighted' : ''}`;
     button.disabled = Boolean(game.disabled);
     button.innerHTML = `<span class="mini-game-icon" aria-hidden="true">${game.icon}</span><span><strong>${escapeHtml(game.title)}</strong><span class="mini-game-status">${escapeHtml(game.status)}</span></span>`;
     button.addEventListener('click', () => game.action?.());
@@ -1356,15 +1365,42 @@ function renderMiniGamesList() {
 }
 
 
+function shopPaymentButtons(itemId, disabled = false) {
+  return `<div class="actions">
+    <button class="success" type="button" data-shop-item="${itemId}" data-shop-payment="pigment" ${disabled ? 'disabled' : ''}>Купить за 3 Пигмента</button>
+    <button class="ghost" type="button" data-shop-item="${itemId}" data-shop-payment="ticket" ${disabled ? 'disabled' : ''}>Купить за 1 Красочку</button>
+  </div>`;
+}
+
 function openEndgameShopModal() {
   const content = document.createElement('div');
-  const pigment = Number(state?.user?.magical_pigment || 0);
+  const user = state?.user || {};
+  const pigment = Number(user.magical_pigment || 0);
+  const activeTickets = (state?.tickets || []).filter((ticket) => ticket.status === 'active').length;
   const canBuy = Boolean(state?.can_buy_muse_charge);
+  const isFinalist = Boolean(state?.finish_summary?.finished) || Number(user.current_cell || 0) >= 100;
+  const hasTask = Boolean(state?.activeSubmission || state?.pendingLucky || Number(user.dice_frozen || 0) === 1);
   content.className = 'cloud-quest-modal';
-  content.innerHTML = `<h3>🏪 Финишный магазин</h3>
-    <p class="muted">Фишка остаётся на 100-й клетке, а сложные задания приносят Магический Пигмент вместо обычных красочек.</p>
-    <article class="item"><strong>Заряд музы</strong><p>Стоимость: 2 Магических Пигмента. Покупка подарит случайной игрокине на клетках 1–99 +1 красочку и начислит +1 красочку тебе.</p><p class="muted">На счету: ${pigment} Пигмента.</p><div class="actions"><button id="buyMuseChargeBtn" class="success" type="button" ${canBuy ? '' : 'disabled'}>Купить Заряд музы</button></div>${canBuy ? '' : '<p class="notice">Покупка недоступна: нужно 2 Пигмента и хотя бы один подходящий игрок на клетках 1–99 без такого подарка за последние 9 дней.</p>'}</article>`;
-  openAdminFullscreenModal('🏪 Финишный магазин', content);
+  content.innerHTML = `<h3>🏪 ${isFinalist ? 'Финишный магазин' : 'Магазин'}</h3>
+    <p class="muted">На счету: ${pigment} Пигмента · активных Красочек: ${activeTickets} · Облачных зонтиков: ${Number(user.cloud_umbrella_charges || 0)}.</p>
+    <article class="item"><strong>Творческий Скип</strong><p>Сжигает текущее задание: фишка остаётся на текущей клетке, кубик снова доступен, а игрок теряет только выбранную оплату.</p>${shopPaymentButtons('creative-skip', !hasTask)}${hasTask ? '' : '<p class="notice">Недоступно: сейчас нет текущего задания.</p>'}</article>
+    <article class="item"><strong>Облачный зонтик</strong><p>Защищает от одного следующего отката: ловушки, негативной карты таро или штрафного отката назад.</p>${shopPaymentButtons('cloud-umbrella')}</article>
+    ${isFinalist ? `<article class="item"><strong>Заряд музы</strong><p>Стоимость: 2 Магических Пигмента. Покупка подарит случайной игрокине на клетках 1–99 +1 красочку и начислит +1 красочку тебе.</p><div class="actions"><button id="buyMuseChargeBtn" class="success" type="button" ${canBuy ? '' : 'disabled'}>Купить Заряд музы</button></div>${canBuy ? '' : '<p class="notice">Покупка недоступна: нужно 2 Пигмента и хотя бы один подходящий игрок на клетках 1–99 без такого подарка за последние 9 дней.</p>'}</article>` : ''}`;
+  openAdminFullscreenModal(`🏪 ${isFinalist ? 'Финишный магазин' : 'Магазин'}`, content);
+  content.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-shop-item][data-shop-payment]');
+    if (!button) return;
+    const item = button.dataset.shopItem;
+    const payment = button.dataset.shopPayment;
+    const itemName = item === 'creative-skip' ? 'Творческий Скип' : 'Облачный зонтик';
+    const price = payment === 'pigment' ? '3 Пигмента' : '1 Красочку';
+    if (!window.confirm(`Купить «${itemName}» за ${price}?`)) return;
+    const endpoint = item === 'creative-skip' ? '/api/shop/creative-skip' : '/api/shop/cloud-umbrella';
+    await api(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, payment }) });
+    showToast(item === 'creative-skip' ? 'Творческий Скип применён!' : 'Облачный зонтик куплен!');
+    await loadState();
+    openEndgameShopModal();
+  });
   content.querySelector('#buyMuseChargeBtn')?.addEventListener('click', async () => {
     if (!window.confirm('Точно купить «Заряд музы» за 2 Магических Пигмента?')) return;
     const result = await api('/api/endgame/muse-charge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId }) });
@@ -1372,6 +1408,66 @@ function openEndgameShopModal() {
     showToast(`Заряд музы активирован! Подарок получила ${recipient}.`, 5200);
     await loadState();
   });
+}
+
+
+function renderGallery(data) {
+  if (!els.galleryContent) return;
+  const current = data.current;
+  if (!current) {
+    els.galleryContent.innerHTML = '<div class="empty-state">В Галерее пока нет одобренных работ с фото ПОСЛЕ.</div>';
+    return;
+  }
+  const limit = data.vote_limit || { used: 0, max: 3 };
+  const voted = Boolean(current.own_vote);
+  const limitReached = Number(limit.used || 0) >= Number(limit.max || 3);
+  const voteDisabled = voted || limitReached;
+  const archive = data.archive || [];
+  els.galleryContent.innerHTML = `
+    <section class="gallery-current">
+      <p class="muted">Каждые 2 часа здесь появляется случайная одобренная работа. Автор скрыт до завершения голосования.</p>
+      <img src="${escapeHtml(current.image_url)}" alt="Текущая работа Галереи">
+      <p><strong>Тема:</strong> ${escapeHtml(current.task_title || 'Творческая работа')}</p>
+      <p class="muted">Оценки окна: 😍 ${Number(current.votes?.masterpiece || 0)} · ❤️ ${Number(current.votes?.cozy || 0)} · голосов за 24 часа: ${Number(limit.used || 0)}/${Number(limit.max || 3)} · активность Галереи: ${Number(data.activity_votes || 0)}/10</p>
+      <div class="gallery-votes">
+        <button type="button" data-gallery-vote="masterpiece" ${voteDisabled ? 'disabled' : ''}>😍 Шедевр!</button>
+        <button type="button" data-gallery-vote="cozy" ${voteDisabled ? 'disabled' : ''}>❤️ Уютно</button>
+      </div>
+      ${voted ? `<p class="notice">Спасибо! Ваш голос «${current.own_vote === 'masterpiece' ? 'Шедевр!' : 'Уютно'}» уже учтён.</p>` : ''}
+      ${limitReached && !voted ? '<p class="notice">Лимит голосования на 24 часа исчерпан.</p>' : ''}
+    </section>
+    <h3>Архив выставки</h3>
+    <div class="gallery-archive">${archive.map((item) => `<article><img src="${escapeHtml(item.image_url)}" alt="Работа из архива"><small>${Number(item.total_votes || 0)} голосов</small></article>`).join('') || '<p class="muted">Архив пока пуст.</p>'}</div>`;
+}
+
+async function openGallery() {
+  if (!state?.user || !els.galleryModal) return;
+  els.galleryContent.innerHTML = '<div class="empty-state">Загружаем Галерею...</div>';
+  els.galleryModal.classList.remove('hidden');
+  renderGallery(await api(`/api/gallery/current?tg_id=${encodeURIComponent(state.user.tg_id || tgId)}`));
+}
+
+function closeGallery() {
+  els.galleryModal?.classList.add('hidden');
+}
+
+async function voteGallery(reaction) {
+  const result = await api('/api/gallery/vote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tg_id: tgId, reaction })
+  });
+  renderGallery(result.gallery);
+  showToast(result.pigment_awarded ? 'Голос учтён! За активность начислен +1 Пигмент ✨' : 'Голос учтён, спасибо за поддержку!');
+  await loadState().catch(() => {});
+}
+
+async function checkLatestGalleryMilestoneNotice() {
+  if (!state?.user || !tgId) return;
+  const data = await api(`/api/notifications/${encodeURIComponent(state.user.tg_id || tgId)}?limit=10`);
+  const event = (data.events || []).find((item) => item.event_type === 'gallery_masterpiece_50');
+  if (!event) return;
+  showDismissibleNotice(`gallery_notice_closed_${event.id}`, event.message || '🎉 Твой рисунок стал Народным Шедевром!');
 }
 
 function openMiniGamesOverlay() {
@@ -1494,9 +1590,10 @@ async function submitPuzzleResult() {
   const result = await api('/api/duels/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, duel_id: activeDuel.id, seconds }) });
   if (puzzleTimer) window.clearInterval(puzzleTimer);
   puzzleTimer = null;
-  if (result.ticket) {
+  const finished = ['challenger_won', 'opponent_won', 'declined', 'expired'].includes(result.duel?.status);
+  if (finished) {
     const won = result.duel?.winner_tg_id === String(tgId);
-    showDismissibleGameNotice(result.duel?.id, won ? '🧩 Вы выиграли пятнашки и получаете красочку! 🎉' : '🧩 Пятнашки закончились поражением. Вы всё равно умничка, повезёт в другой раз! ❤️');
+    showDismissibleGameNotice(result.duel?.id, won ? '🧩 Вы выиграли пятнашки и получаете приз! 🎉' : '🧩 Пятнашки закончились поражением. Вы всё равно умничка, повезёт в другой раз! ❤️');
   } else {
     showToast('Результат отправлен, ждём соперника.');
   }
@@ -1527,7 +1624,7 @@ async function rerollTask() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tg_id: tgId })
     });
-    showToast(`Штрафной откат на ${result.penalty}. Новая клетка: ${result.current_cell}. Использовано ${result.penalty_rerolls || 0} из ${result.penalty_rerolls_limit || 3}.`);
+    showToast(result.umbrella_used ? `Облачный зонтик сгорел и защитил от отката. Клетка: ${result.current_cell}.` : `Штрафной откат на ${result.penalty}. Новая клетка: ${result.current_cell}. Использовано ${result.penalty_rerolls || 0} из ${result.penalty_rerolls_limit || 3}.`);
     await loadState();
   } catch (error) {
     showToast(error.message);
@@ -2662,6 +2759,10 @@ els.profileHudBtn?.addEventListener('click', () => openProfile(tgId).catch((erro
 els.taskHudBtn?.addEventListener('click', () => openTaskOverlayForCurrentCell(state?.activeSubmission?.cell || state?.pendingLucky?.cell || currentMapCell()));
 els.paletteHudBtn?.addEventListener('click', () => openSectionOverlay('🎨 Моя палитра', els.paletteScreen));
 els.miniGamesHudBtn?.addEventListener('click', () => openMiniGamesOverlay());
+els.galleryHudBtn?.addEventListener('click', () => openGallery().catch((error) => showToast(error.message)));
+els.galleryCloseBtn?.addEventListener('click', closeGallery);
+els.galleryModal?.addEventListener('click', (event) => { if (event.target === els.galleryModal) closeGallery(); });
+els.galleryContent?.addEventListener('click', (event) => { const btn = event.target.closest('[data-gallery-vote]'); if (btn) voteGallery(btn.dataset.galleryVote).catch((error) => showToast(error.message)); });
 els.raffleHudBtn?.addEventListener('click', () => openSectionOverlay('🎟️ Розыгрыш', els.raffleScreen, () => startRafflePolling(true)));
 els.playersHudBtn?.addEventListener('click', () => openSectionOverlay('👥 Список игроков', els.whereScreen, () => loadLeaderboard().catch((error) => showToast(error.message))));
 els.cloudQuestBtn?.addEventListener('click', () => openCloudQuestModal());
