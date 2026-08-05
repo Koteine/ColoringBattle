@@ -26,6 +26,7 @@ const els = {
   paletteHudBtn: document.getElementById('paletteHudBtn'),
   miniGamesHudBtn: document.getElementById('miniGamesHudBtn'),
   playersHudBtn: document.getElementById('playersHudBtn'),
+  cloudQuestBtn: document.getElementById('cloudQuestBtn'),
   taskHudBtn: document.getElementById('taskHudBtn'),
   adminGearBtn: document.getElementById('adminGearBtn'),
   paletteScreen: document.getElementById('paletteScreen'),
@@ -155,6 +156,8 @@ let lastMapKey = '';
 let displayedPlayerCell = null;
 let adminPendingSubmissionsCache = [];
 let adminArchivePlayersCache = [];
+let adminCloudQuestCache = [];
+let cloudQuestTimer = null;
 let adminAutoApprovedSubmissionsCache = [];
 let adminUsersCache = [];
 let adminRejectedSubmissionsCache = [];
@@ -419,13 +422,14 @@ function updateDiceFace(value) {
 async function renderWorkArchive() {
   els.paletteGrid.classList.add('archive-mode');
   els.paletteHint.textContent = 'Админские разделы палитры открываются отдельными полноэкранными окнами.';
-  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="autoApprovedBtn" type="button" class="admin-palette-button ghost">Автоодобрение</button><button id="rejectedWorksBtn" type="button" class="admin-palette-button danger">Отклоненные</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
+  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="eventWorksBtn" type="button" class="admin-palette-button ghost">Работы события</button><button id="autoApprovedBtn" type="button" class="admin-palette-button ghost">Автоодобрение</button><button id="rejectedWorksBtn" type="button" class="admin-palette-button danger">Отклоненные</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
   els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем админские разделы...</div>';
 
-  const [pendingData, autoApprovedData, rejectedData, archiveData, usersData] = await Promise.all([
+  const [pendingData, autoApprovedData, rejectedData, cloudQuestData, archiveData, usersData] = await Promise.all([
     api(`/api/admin/submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/auto-approved-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/rejected-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
+    api(`/api/admin/cloud-quests?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/work-archive?admin_tg_id=${encodeURIComponent(tgId)}`),
     hasAdminAccess(state?.user) ? api(`/api/admin/users?admin_tg_id=${encodeURIComponent(tgId)}`) : Promise.resolve(null)
   ]);
@@ -433,6 +437,7 @@ async function renderWorkArchive() {
   adminPendingSubmissionsCache = pendingData.submissions || [];
   adminAutoApprovedSubmissionsCache = autoApprovedData.submissions || [];
   adminRejectedSubmissionsCache = rejectedData.submissions || [];
+  adminCloudQuestCache = cloudQuestData.quests || [];
   adminArchivePlayersCache = usersData?.users || archiveData.players || [];
   renderAdminPaletteButtons();
   els.paletteGrid.innerHTML = '<div class="empty-state">Выберите «Ожидают одобрения», «Автоодобрение» или «Все игроки», чтобы открыть список.</div>';
@@ -761,6 +766,7 @@ function render() {
   els.topHud?.classList.remove('hidden');
   els.gamePlayCard?.classList.remove('hidden');
   els.adminGearBtn?.classList.toggle('hidden', !adminAccess);
+  renderCloudQuestHud();
   els.adminTabBtn.classList.toggle('hidden', !adminAccess);
   document.querySelectorAll('.owner-only').forEach((el) => el.classList.toggle('hidden', !hasAdminAccess(user)));
   const roleBlocked = isPrivilegedUser(user);
@@ -795,8 +801,8 @@ function render() {
     : `Использовано штрафных перебросов: ${usedPenaltyRerolls} из 3`;
   const frozen = Number(user.dice_frozen) === 1 || hasActiveSubmission;
   const finished = Boolean(state.finish_summary?.finished) || Number(user.current_cell) >= 100;
-  els.rollBtn.disabled = roleBlocked || frozen || finished || isRolling;
-  els.rollBtn.classList.toggle('frozen', roleBlocked || frozen || finished);
+  els.rollBtn.disabled = roleBlocked || frozen || isRolling;
+  els.rollBtn.classList.toggle('frozen', roleBlocked || frozen);
   setTarotDisabled(roleBlocked || finished || user.has_used_tarot === true || Number(user.has_used_tarot) === 1);
   if (els.tarotBtn) {
     els.tarotBtn.dataset.tarotUnavailable = frozen ? '1' : '0';
@@ -805,7 +811,7 @@ function render() {
       : (user.has_used_tarot === true || Number(user.has_used_tarot) === 1) ? 'Карта удачи уже использована' : 'Карта удачи';
   }
   els.diceHint.textContent = finished
-    ? 'Игра завершена, ожидай розыгрыша.'
+    ? (frozen ? (els.taskStatus.textContent || 'Сложное финишное задание ожидает выполнения.') : 'Финиш: бросьте кубик, чтобы получить сложное задание за Магический Пигмент.')
     : frozen
       ? (els.taskStatus.textContent || 'Кубик заморожен до проверки задания.')
       : 'Нажмите на кубик: он прокрутится и покажет выпавшее число.';
@@ -1133,15 +1139,16 @@ async function openProfile(profileId) {
   const tickets = profile.tickets || [];
   const isAdminView = Boolean(profile.is_admin_view);
   const ownProfile = String(profile.tg_id) === String(tgId);
-  const emojiPool = Array.isArray(profile.emoji_pool) ? profile.emoji_pool : playerEmojiPool;
-  const emojiSettingsBlock = ownProfile ? `<h3>Фишка для карты</h3><div class="item"><p>Текущая фишка: <strong style="font-size:32px">${escapeHtml(profile.map_emoji || playerEmoji(profile))}</strong></p>${profile.can_change_map_emoji ? `<p class="muted">Можно выбрать один раз за игру.</p><div class="actions emoji-picker">${emojiPool.map((emoji) => `<button type="button" class="ghost" data-map-emoji="${escapeHtml(emoji)}">${escapeHtml(emoji)}</button>`).join('')}</div>` : '<p class="muted">* — ваша фишка</p>'}</div>` : '';
+  const mapEmoji = profile.map_emoji || playerEmoji(profile);
+  const balancesBlock = ownProfile ? `<div class="profile-balances item"><p>🎟️ Красочки: <strong>${Number(profile.paints || 0)}</strong> шт.</p><p>✨ Пигмент: <strong>${Number(profile.magical_pigment || 0)}</strong> шт.</p></div>` : '';
+  const emojiSettingsBlock = ownProfile ? `<p class="profile-token-line">${escapeHtml(mapEmoji)} – твоя фишка</p>` : '';
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
   const adminToolsBlock = isAdminView ? `<div class="profile-admin-tools"><button class="ghost icon-button" type="button" data-player-log title="Лог действий">📜</button></div>` : '';
   const activeTaskBlock = isAdminView ? `<h3>Текущее задание</h3><div class="item"><p>${profile.active_task ? escapeHtml(profile.active_task.text_task || '') : 'Активного задания нет.'}</p>${profile.active_task ? `<p class="muted">Клетка: ${Number(profile.active_task.cell || 0)} · статус: ${escapeHtml(profile.active_task.status || '')}</p>` : ''}</div>` : '';
   const worksBlock = `<h3>Сданные работы</h3><div class="work-cube-grid">${works.map((work, index) => `<button class="work-cube" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)}</strong><small>работа #${Number(work.id || 0)}</small></button>`).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div><div id="profileWorkDetails" class="profile-work-details"></div>`;
   const emergencyBlock = isAdminView ? `<div class="profile-emergency"><button class="danger" type="button" data-defibrillate>⚙️</button></div>` : '';
   const profileTitleBlock = `<div class="profile-title-row"><h2>${escapeHtml(profile.name)}</h2>${ownProfile ? '<button class="bell-btn profile-bell-btn" type="button" data-profile-notifications aria-label="Личные уведомления" title="Личные уведомления">🔔</button>' : ''}</div>`;
-  els.profileContent.innerHTML = `${profileTitleBlock}${adminToolsBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Количество заработанных красочек: <strong>${Number(profile.paints || 0)}</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${activeTaskBlock}${emojiSettingsBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
+  els.profileContent.innerHTML = `${profileTitleBlock}${adminToolsBlock}${balancesBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${emojiSettingsBlock}${activeTaskBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
 
   els.profileContent.querySelectorAll('[data-map-emoji]').forEach((button) => {
     button.addEventListener('click', () => saveMapEmoji(button.dataset.mapEmoji).catch((error) => showToast(error.message)));
@@ -1330,10 +1337,12 @@ function renderMiniGamesList() {
   const user = state?.user || {};
   const tarotUsed = user.has_used_tarot === true || Number(user.has_used_tarot) === 1;
   const frozen = Number(user.dice_frozen || 0) === 1 || Boolean(state?.activeSubmission) || Boolean(state?.pendingLucky);
+  const isFinalist = Boolean(state?.finish_summary?.finished) || Number(user.current_cell || 0) >= 100;
   const games = [
-    { id: 'tarot', icon: '🃏', title: 'Карты удачи', status: tarotUsed ? 'Уже использованы в этой игре' : (frozen ? 'Доступны только до броска кубика' : 'Испытать удачу один раз за игру'), disabled: tarotUsed, action: openTarotModal },
+    { id: 'tarot', icon: '🃏', title: 'Карты удачи', status: tarotUsed ? 'Уже использованы в этой игре' : (frozen ? 'Доступны только до броска кубика' : 'Испытать удачу один раз за игру'), disabled: tarotUsed || isFinalist, action: openTarotModal },
     { id: 'duel', icon: '🧩', title: 'Дуэль в пятнашки', status: 'Вызови игрока или ответь на приглашение: победитель получает +1 Красочку', disabled: false, action: openDuelModal }
   ];
+  if (isFinalist) games.push({ id: 'shop', icon: '🏪', title: 'Финишный магазин', status: `Магический Пигмент: ${Number(user.magical_pigment || 0)} · Заряд музы стоит 2`, disabled: false, action: openEndgameShopModal });
   els.miniGamesList.innerHTML = '';
   for (const game of games) {
     const button = document.createElement('button');
@@ -1344,6 +1353,25 @@ function renderMiniGamesList() {
     button.addEventListener('click', () => game.action?.());
     els.miniGamesList.append(button);
   }
+}
+
+
+function openEndgameShopModal() {
+  const content = document.createElement('div');
+  const pigment = Number(state?.user?.magical_pigment || 0);
+  const canBuy = Boolean(state?.can_buy_muse_charge);
+  content.className = 'cloud-quest-modal';
+  content.innerHTML = `<h3>🏪 Финишный магазин</h3>
+    <p class="muted">Фишка остаётся на 100-й клетке, а сложные задания приносят Магический Пигмент вместо обычных красочек.</p>
+    <article class="item"><strong>Заряд музы</strong><p>Стоимость: 2 Магических Пигмента. Покупка подарит случайной игрокине на клетках 1–99 +1 красочку и начислит +1 красочку тебе.</p><p class="muted">На счету: ${pigment} Пигмента.</p><div class="actions"><button id="buyMuseChargeBtn" class="success" type="button" ${canBuy ? '' : 'disabled'}>Купить Заряд музы</button></div>${canBuy ? '' : '<p class="notice">Покупка недоступна: нужно 2 Пигмента и хотя бы один подходящий игрок на клетках 1–99 без такого подарка за последние 9 дней.</p>'}</article>`;
+  openAdminFullscreenModal('🏪 Финишный магазин', content);
+  content.querySelector('#buyMuseChargeBtn')?.addEventListener('click', async () => {
+    if (!window.confirm('Точно купить «Заряд музы» за 2 Магических Пигмента?')) return;
+    const result = await api('/api/endgame/muse-charge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId }) });
+    const recipient = result.recipient?.username ? `@${result.recipient.username}` : `ID ${result.recipient?.tg_id || ''}`;
+    showToast(`Заряд музы активирован! Подарок получила ${recipient}.`, 5200);
+    await loadState();
+  });
 }
 
 function openMiniGamesOverlay() {
@@ -2001,11 +2029,17 @@ function renderAdminPaletteButtons() {
   const pendingButton = document.getElementById('pendingApprovalsBtn');
   const playersButton = document.getElementById('allPlayersPaletteBtn');
   const autoApprovedButton = document.getElementById('autoApprovedBtn');
+  const eventWorksButton = document.getElementById('eventWorksBtn');
   const rejectedButton = document.getElementById('rejectedWorksBtn');
   if (pendingButton) {
     pendingButton.classList.toggle('has-pending', adminPendingSubmissionsCache.length > 0);
     pendingButton.setAttribute('aria-label', adminPendingSubmissionsCache.length > 0 ? `Ожидают одобрения: ${adminPendingSubmissionsCache.length}` : 'Ожидают одобрения');
     pendingButton.addEventListener('click', () => openPendingApprovalsModal());
+  }
+  if (eventWorksButton) {
+    eventWorksButton.textContent = adminCloudQuestCache.length ? 'Работы события !' : 'Работы события';
+    eventWorksButton.classList.toggle('has-pending', adminCloudQuestCache.length > 0);
+    eventWorksButton.addEventListener('click', () => openCloudQuestReviewModal());
   }
   if (autoApprovedButton) {
     autoApprovedButton.classList.toggle('has-pending', adminAutoApprovedSubmissionsCache.length > 0);
@@ -2085,6 +2119,73 @@ function openAdminSectionModal(section) {
   const modal = ensureAdminFullscreenModal();
   modal.dataset.restorePlaceholder = placeholder.id;
   modal.dataset.movedSelector = '.admin-accordion-inner';
+}
+
+
+function formatCloudQuestTime(seconds) {
+  const safe = Math.max(0, Number(seconds || 0));
+  const h = String(Math.floor(safe / 3600)).padStart(2, '0');
+  const m = String(Math.floor((safe % 3600) / 60)).padStart(2, '0');
+  const sec = String(safe % 60).padStart(2, '0');
+  return `${h}:${m}:${sec}`;
+}
+
+function renderCloudQuestHud() {
+  if (!els.cloudQuestBtn) return;
+  els.cloudQuestBtn.classList.toggle('hidden', !state?.cloudQuest || isPrivilegedUser(state?.user));
+}
+
+function openCloudQuestModal() {
+  const quest = state?.cloudQuest;
+  if (!quest) return showToast('Сейчас активного Облачного квеста нет');
+  const content = document.createElement('div');
+  const partner = quest.partner || {};
+  const partnerHandle = partner.username ? `@${String(partner.username).replace(/^@/, '')}` : `ID ${partner.tg_id}`;
+  content.className = 'cloud-quest-modal';
+  content.innerHTML = `<h3>Парное игровое событие «Облачный квест»</h3>
+    <p>Динь-Динь зовёт вас объединиться: договоритесь в Telegram и выберите одно из заданий. Квест дополнительный и не заменяет основную клетку.</p>
+    <p><strong>Напарник:</strong> <a href="https://t.me/${escapeHtml(String(partnerHandle).replace(/^@/, ''))}" target="_blank" rel="noopener">${escapeHtml(partnerHandle)}</a></p>
+    <p><strong>Осталось:</strong> <span id="cloudQuestCountdown">—</span></p>
+    <ol>${(quest.tasks || []).map((task) => `<li><strong>${escapeHtml(task.title)}</strong><br><span class="muted">${escapeHtml(task.text)}</span></li>`).join('')}</ol>
+    <form id="cloudQuestUploadForm" class="submit-step"><label>Фото ДО<input name="photo_before" type="file" accept="image/*"></label><label>Фото ПОСЛЕ<input name="photo_after" type="file" accept="image/*"></label><div class="actions"><button type="submit">Загрузить фото события</button></div></form>
+    <p class="muted">Статус: ${escapeHtml(quest.status)}${quest.moderator_comment ? ` · ${escapeHtml(quest.moderator_comment)}` : ''}</p>`;
+  openAdminFullscreenModal('🌈 Облачный квест', content);
+  const tick = () => {
+    const left = Math.floor((new Date(quest.ends_at).getTime() - Date.now()) / 1000);
+    const node = document.getElementById('cloudQuestCountdown');
+    if (node) node.textContent = formatCloudQuestTime(left);
+  };
+  tick(); clearInterval(cloudQuestTimer); cloudQuestTimer = setInterval(tick, 1000);
+  content.querySelector('#cloudQuestUploadForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    formData.append('tg_id', tgId); formData.append('quest_id', quest.id);
+    await api('/api/cloud-quest/upload', { method: 'POST', body: formData });
+    showToast('Фото события загружены');
+    await loadState();
+  });
+}
+
+function openCloudQuestReviewModal() {
+  const content = document.createElement('div');
+  content.className = 'list';
+  if (!adminCloudQuestCache.length) content.innerHTML = '<div class="empty-state">Новых работ события нет.</div>';
+  for (const quest of adminCloudQuestCache) {
+    const item = document.createElement('article');
+    item.className = 'item';
+    const p1 = quest.player1_username ? `@${quest.player1_username}` : quest.player1_tg_id;
+    const p2 = quest.player2_username ? `@${quest.player2_username}` : quest.player2_tg_id;
+    const imgs = [[p1, 'ДО', quest.player1_before], [p1, 'ПОСЛЕ', quest.player1_after], [p2, 'ДО', quest.player2_before], [p2, 'ПОСЛЕ', quest.player2_after]];
+    item.innerHTML = `<strong>${escapeHtml(quest.event_name || 'Облачный квест')}</strong><p class="muted">${escapeHtml(p1)} и ${escapeHtml(p2)}</p><div class="comparison-grid">${imgs.map(([name, label, file]) => file ? `<a class="comparison-photo" href="/uploads/${encodeURIComponent(file)}" target="_blank" rel="noopener"><strong>${escapeHtml(name)} · ${label}</strong><img src="/uploads/${encodeURIComponent(file)}" alt="${label}"></a>` : `<div class="empty-state">${escapeHtml(name)} · ${label} нет</div>`).join('')}</div><label class="muted">Комментарий для отклонения<input type="text" data-cloud-comment="${quest.id}" placeholder="Что исправить?"></label>`;
+    const actions = document.createElement('div'); actions.className = 'actions';
+    for (const [label, action, cls] of [['Одобрить','approve','success'], ['Отклонить','reject','danger']]) {
+      const btn = document.createElement('button'); btn.type = 'button'; btn.className = cls; btn.textContent = label;
+      btn.addEventListener('click', async () => { const comment = item.querySelector(`[data-cloud-comment="${quest.id}"]`)?.value || ''; await api('/api/admin/cloud-quests/review', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ admin_tg_id: tgId, quest_id: quest.id, action, comment }) }); showToast(action === 'approve' ? 'Квест одобрен' : 'Квест отклонён'); await renderWorkArchive(); openCloudQuestReviewModal(); });
+      actions.append(btn);
+    }
+    item.append(actions); content.append(item);
+  }
+  openAdminFullscreenModal('Работы события', content);
 }
 
 function openPendingApprovalsModal() {
@@ -2563,6 +2664,7 @@ els.paletteHudBtn?.addEventListener('click', () => openSectionOverlay('🎨 Мо
 els.miniGamesHudBtn?.addEventListener('click', () => openMiniGamesOverlay());
 els.raffleHudBtn?.addEventListener('click', () => openSectionOverlay('🎟️ Розыгрыш', els.raffleScreen, () => startRafflePolling(true)));
 els.playersHudBtn?.addEventListener('click', () => openSectionOverlay('👥 Список игроков', els.whereScreen, () => loadLeaderboard().catch((error) => showToast(error.message))));
+els.cloudQuestBtn?.addEventListener('click', () => openCloudQuestModal());
 els.adminGearBtn?.addEventListener('click', () => openSectionOverlay('⚙️ Админка', els.adminPanel, () => loadAdminPanel().catch((error) => showToast(error.message))));
 els.notificationsCloseBtn?.addEventListener('click', closeNotifications);
 els.notificationsModal?.addEventListener('click', (event) => { if (event.target === els.notificationsModal) closeNotifications(); });
