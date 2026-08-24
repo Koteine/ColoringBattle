@@ -1349,7 +1349,8 @@ function renderMiniGamesList() {
   const isFinalist = Boolean(state?.finish_summary?.finished) || Number(user.current_cell || 0) >= 100;
   const games = [
     { id: 'tarot', icon: '🃏', title: 'Карты удачи', status: tarotUsed ? 'Уже использованы в этой игре' : (frozen ? 'Доступны только до броска кубика' : 'Испытать удачу один раз за игру'), disabled: tarotUsed || isFinalist, action: openTarotModal },
-    { id: 'duel', icon: '🧩', title: 'Дуэль в пятнашки', status: user.duel_advanced ? 'Новый режим: вызов раз в 3 дня после одобренной работы, приз +1 Пигмент' : 'Первые 3 игры: победитель получает +1 Красочку', disabled: false, action: openDuelModal, highlighted: user.duel_advanced }
+    { id: 'duel', icon: '🧩', title: 'Дуэль в пятнашки', status: user.duel_advanced ? 'Новый режим: вызов раз в 3 дня после одобренной работы, приз +1 Пигмент' : 'Первые 3 игры: победитель получает +1 Красочку', disabled: false, action: openDuelModal, highlighted: user.duel_advanced },
+    { id: 'alchemy', icon: '🧪', title: 'Алхимия Красок', status: state?.alchemy?.available === false ? `⏳ Доступно через: ${formatAlchemyCountdown(state.alchemy.seconds_remaining)}` : 'Подбери эталонный оттенок с точностью 95% и получи +1 Пигмент', disabled: false, action: openAlchemyLab }
   ];
   games.push({ id: 'shop', icon: '🏪', title: isFinalist ? 'Финишный магазин' : 'Магазин', status: `Пигмент: ${Number(user.magical_pigment || 0)} · Зонтиков: ${Number(user.cloud_umbrella_charges || 0)}`, disabled: false, action: openEndgameShopModal });
   els.miniGamesList.innerHTML = '';
@@ -1362,6 +1363,62 @@ function renderMiniGamesList() {
     button.addEventListener('click', () => game.action?.());
     els.miniGamesList.append(button);
   }
+}
+
+function formatAlchemyCountdown(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  return [Math.floor(value / 3600), Math.floor((value % 3600) / 60), value % 60].map((part) => String(part).padStart(2, '0')).join(':');
+}
+
+async function askAlchemySurrender() {
+  const yes = els.confirmYesBtn?.textContent;
+  const no = els.confirmNoBtn?.textContent;
+  if (els.confirmYesBtn) els.confirmYesBtn.textContent = 'Да, сдаюсь';
+  if (els.confirmNoBtn) els.confirmNoBtn.textContent = 'Продолжить подбор';
+  const confirmed = await askConfirm('Ты уверена, что хочешь сдаться? Твоя попытка сгорит, а следующая откроется только через 2 дня!');
+  if (els.confirmYesBtn) els.confirmYesBtn.textContent = yes;
+  if (els.confirmNoBtn) els.confirmNoBtn.textContent = no;
+  return confirmed;
+}
+
+async function openAlchemyLab() {
+  const lab = document.createElement('div');
+  lab.className = 'cloud-quest-modal alchemy-lab';
+  lab.innerHTML = '<div class="empty-state">Готовим колбы и пипетки...</div>';
+  openAdminFullscreenModal('🧪 Алхимия Красок', lab);
+  const data = await api('/api/alchemy/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId }) });
+  if (!data.available) {
+    lab.innerHTML = `<h3>🧪 Лаборатория на перерыве</h3><p class="muted">⏳ Доступно через: <strong>${formatAlchemyCountdown(data.seconds_remaining)}</strong></p>`;
+    const timer = window.setInterval(() => {
+      const node = lab.querySelector('strong');
+      if (!node) return window.clearInterval(timer);
+      data.seconds_remaining = Math.max(0, Number(data.seconds_remaining) - 1);
+      node.textContent = formatAlchemyCountdown(data.seconds_remaining);
+    }, 1000);
+    return;
+  }
+  const drops = { red: 0, blue: 0, yellow: 0, white: 0, black: 0 };
+  const labels = { red: 'Красный', blue: 'Синий', yellow: 'Желтый', white: 'Белый', black: 'Черный' };
+  const colors = { red: '#e64652', blue: '#3b82f6', yellow: '#facc15', white: '#fff', black: '#201f26' };
+  function renderLab() {
+    lab.innerHTML = `<h3>${escapeHtml(data.session.shade_name)}</h3><p class="muted">Повтори сложный оттенок. Добавляй капли, затем нажимай «Смешать».</p><div class="alchemy-flask" style="background:${data.session.target_hex}" aria-label="Эталонный цвет"></div><p><strong>Эталонный цвет</strong></p><div class="alchemy-swatches">${Object.keys(drops).map((key) => `<button type="button" class="alchemy-drop" data-alchemy-drop="${key}" style="background:${colors[key]};color:${key === 'black' ? '#fff' : '#3b2342'}"><b>＋</b>${labels[key]}</button>`).join('')}</div><p class="alchemy-counts">${Object.entries(drops).filter(([, amount]) => amount).map(([key, amount]) => `${labels[key]}: ${amount}`).join(' · ') || 'Капли ещё не добавлены'}</p><div class="alchemy-result">Тестовая пробирка ждёт смешивания</div><div class="actions"><button type="button" class="success" data-alchemy-mix>Смешать</button><button type="button" class="danger" data-alchemy-surrender>🏳️ Сдаюсь</button></div>`;
+  }
+  renderLab();
+  lab.addEventListener('click', async (event) => {
+    const drop = event.target.closest('[data-alchemy-drop]');
+    if (drop) { drops[drop.dataset.alchemyDrop] += 1; renderLab(); return; }
+    if (event.target.closest('[data-alchemy-mix]')) {
+      const result = await api('/api/alchemy/mix', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, recipe: drops }) });
+      if (!result.won) { const node = lab.querySelector('.alchemy-result'); node.style.background = result.color_hex; node.textContent = `Точность: ${result.accuracy}%`; return; }
+      lab.innerHTML = `<h2>✨ Идеальный оттенок найден!</h2><p>Твоему колористическому зрению позавидует любой художник! Ты безупречно воссоздала цвет с точностью <strong>${result.accuracy}%</strong>.</p><p>🧪 <strong>Награда: +1 Пигмент (✨)</strong> зачислен в твой профиль!</p><p class="muted">Твоя лаборатория уходит на перерыв. Следующий эксперимент с красками будет доступен через 48 часов! ⏳</p>`;
+      await loadState(); return;
+    }
+    if (event.target.closest('[data-alchemy-surrender]')) {
+      if (!await askAlchemySurrender()) return;
+      const result = await api('/api/alchemy/surrender', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId }) });
+      lab.innerHTML = `<h2>🎨 Муза взяла тайм-аут!</h2><p>Ничего страшного, этот цвет действительно оказался с характером!</p><p>Правильный рецепт оттенка был: <em>${escapeHtml(result.recipe)}</em>.</p><p class="muted">Отдохни, наберись вдохновения — лаборатория снова откроет свои двери ровно через 2 дня! ⏳</p>`;
+    }
+  });
 }
 
 
