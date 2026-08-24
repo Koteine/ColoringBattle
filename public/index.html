@@ -507,6 +507,14 @@
     .work-card img { display: block; width: 100%; height: auto; }
     .photo-frame { position: absolute; inset: 12px; border: 8px double #D4AF37; border-radius: 24px; box-shadow: inset 0 0 0 3px rgba(255,255,255,.82), 0 0 22px rgba(212,175,55,.35); pointer-events: none; }
     .paint-stamp { position: absolute; right: 16px; bottom: 16px; width: 118px; height: 118px; border-radius: 50%; display: grid; place-items: center; text-align: center; font-family: Georgia, 'Times New Roman', serif; font-weight: 900; font-size: 16px; line-height: 1.08; color: #6b2c5c; background: radial-gradient(circle, rgba(255,255,255,.82), rgba(255,232,244,.74)); border: 3px double rgba(212,175,55,.9); transform: rotate(-8deg); box-shadow: 0 10px 26px rgba(80, 56, 100, .2); backdrop-filter: blur(2px); }
+    .bingo-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin: 16px 0; }
+    .bingo-cell { min-height: 116px; padding: 10px; border-radius: 16px; border: 1px solid var(--line); background: #fff; font-size: 12px; }
+    .bingo-cell.done { background: linear-gradient(135deg, #d9fff0, #fff2a8); border-color: #59bf99; text-decoration: line-through; }
+    .bingo-cell strong { display: block; font-size: 13px; margin: 4px 0; text-decoration: none; }
+    .bingo-progress { font-weight: 900; color: var(--muted); }
+    .bingo-celebration h2 { font-size: 30px; }
+    .bingo-celebration::before { content: '🎊 ✨ 🎉 ✨ 🎊'; display: block; font-size: 30px; letter-spacing: 8px; animation: bingo-pop 1s ease-in-out infinite alternate; }
+    @keyframes bingo-pop { to { transform: scale(1.08) rotate(2deg); } }
     .profile-modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: rgba(43, 28, 58, .42); }
     .profile-modal.hidden { display: none; }
     .profile-dialog { position: relative; width: min(720px, 100%); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 28px; background: rgba(255, 250, 255, .96); box-shadow: 0 24px 70px rgba(50, 30, 62, .32); }
@@ -619,7 +627,7 @@
         <div class="top-hud-left">
           <button id="profileHudBtn" class="hud-icon" type="button" aria-label="Профиль">👤</button>
           <button id="raffleHudBtn" class="hud-icon" type="button" aria-label="Розыгрыш">🎟️</button>
-          <button id="paletteHudBtn" class="hud-icon" type="button" aria-label="Моя палитра">🎨</button>
+          <button id="paletteHudBtn" class="hud-icon" type="button" aria-label="Моя палитра">🎨</button><button id="bingoHudBtn" class="hud-icon" type="button" aria-label="Сезонное Бинго">🎟️</button>
           <button id="miniGamesHudBtn" class="hud-icon" type="button" aria-label="Мини-игры">🎲</button>
         </div>
         <div class="top-hud-right"><button id="playersHudBtn" class="hud-icon hud-wide" type="button" aria-label="Список игроков">👥</button><button id="galleryHudBtn" class="hud-icon" type="button" aria-label="Галерея">🖼️</button><button id="cloudQuestBtn" class="hud-icon cloud-quest-btn hidden" type="button" aria-label="Облачный квест">🌈</button></div>
@@ -842,6 +850,8 @@
   <div id="notificationsModal" class="notifications-modal hidden"><div class="notifications-dialog"><button id="notificationsCloseBtn" class="profile-close" type="button">×</button><h2>🔔 Личные звоночки</h2><div id="notificationsContent"></div></div></div>
   <div id="duelModal" class="duel-modal hidden"><div class="duel-dialog"><button id="duelCloseBtn" class="profile-close" type="button">×</button><h2>🧩 Дуэль в пятнашки</h2><p class="muted">Собери пятнашки быстрее соперника! Первые 3 игры идут по старым лимитам и дают победителю +1 красочку. Затем вызов доступен раз в 3 дня после одобренной работы за эти 3 дня, а награда победителю — +1 Пигмент. У соперника есть 24 часа на ответ, иначе — автопоражение. Закрытие вызова = проигрыш</p><div id="duelContent"></div></div></div>
   <div id="confirmModal" class="confirm-modal hidden"><div class="confirm-dialog"><h2>Подтверждение</h2><p id="confirmText" class="muted"></p><div class="actions"><button id="confirmYesBtn" class="danger" type="button">Да</button><button id="confirmNoBtn" class="ghost" type="button">Отмена</button></div></div></div>
+  <div id="bingoModal" class="profile-modal hidden"><div class="profile-dialog"><button id="bingoCloseBtn" class="profile-close" type="button">×</button><div id="bingoContent"></div></div></div>
+  <div id="bingoRewardModal" class="finish-modal hidden"><div class="finish-dialog bingo-celebration"><h2>🎉 БИНГО! Твоя линия сошлась!</h2><p class="muted">Невероятно! Ты закрыла победную линию в сезонном Бинго-челлендже! Твоя активность, творчество и удача сошлись в идеальную комбинацию.</p><p><strong>🎟️ Твоя награда: +3 Красочки начислены в копилку финального розыгрыша!</strong></p><p class="muted">Твои шансы на главный приз только что взлетели до небес. Продолжай раскрашивать свой путь к финишу! 🎨✨</p><div class="actions"><button id="bingoRewardCloseBtn" type="button">Ура!</button></div></div></div>
   <div id="profileModal" class="profile-modal hidden"><div class="profile-dialog"><button id="profileCloseBtn" class="profile-close" type="button">×</button><div id="profileContent"></div></div></div>
   <div id="toast" class="toast hidden"></div>
   <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>

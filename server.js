@@ -148,6 +148,8 @@ async function initDb() {
   await ensureCloudQuestTables();
   await ensurePigmentGiftsTable();
   await ensureGalleryTables();
+  await ensureSeasonalBingoTable();
+  await ensureAlchemySessionsTable();
 
   await ensureSingleActiveSubmissionIndex();
 
@@ -390,6 +392,64 @@ async function getAlchemyState(tgId, create = true) {
 }
 
 
+
+const BINGO_GOALS = [
+  { id: 'generous', icon: '☕', title: 'Щедрая душа', description: 'Отправить 20 чашек кофе или сердечек другим игрокам.', target: 20 },
+  { id: 'dice_ones', icon: '🎲', title: 'Упрямый кубик', description: 'Выбросить единицу на кубике 3 раза.', target: 3 },
+  { id: 'gallery_votes', icon: '🖼️', title: 'Внимательный зритель', description: 'Проголосовать за 20 выставок в Галерее.', target: 20 },
+  { id: 'pigments', icon: '✨', title: 'Ловец Пигмента', description: 'Заработать или найти 5 Пигментов.', target: 5 },
+  { id: 'alchemy', icon: '🧪', title: 'Истинный алхимик', description: 'Победить 10 раз в мини-игре «Алхимия Красок».', target: 10 },
+  { id: 'duel', icon: '🧩', title: 'Пятнашечный дуэлянт', description: 'Победить хотя бы в одной дуэли в «Пятнашки».', target: 1 },
+  { id: 'protection', icon: '☂️', title: 'Под защитой', description: 'Использовать Облачный зонтик или карту Таро от ловушки/отката.', target: 1 },
+  { id: 'friendship', icon: '🌈', title: 'Сила дружбы', description: 'Участвовать в парном Облачном квесте или получить «Заряд музы».', target: 1 },
+  { id: 'equator', icon: '🚀', title: 'Экватор пройден', description: 'Перешагнуть 50-ю клетку на карте.', target: 1 }
+];
+
+async function ensureSeasonalBingoTable() {
+  await run(`CREATE TABLE IF NOT EXISTS seasonal_bingo (
+    tg_id TEXT PRIMARY KEY, completed_json TEXT NOT NULL DEFAULT '{}', rewarded_at TEXT DEFAULT NULL,
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+}
+
+async function ensureAlchemySessionsTable() {
+  await run(`CREATE TABLE IF NOT EXISTS alchemy_sessions (
+    tg_id TEXT PRIMARY KEY, answer INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+}
+
+async function getBingoProgress(tgId) {
+  const [reactions, diceOnes, galleryVotes, pigments, alchemy, duel, protection, friendship, user, saved] = await Promise.all([
+    get('SELECT COUNT(*) AS count FROM reaction_logs WHERE from_tg_id = ?', [tgId]),
+    get("SELECT COUNT(*) AS count FROM player_action_logs WHERE tg_id = ? AND event_type = 'dice_roll' AND meta_json LIKE '%\"raw_dice\":1%'", [tgId]),
+    get('SELECT COUNT(*) AS count FROM gallery_votes WHERE voter_tg_id = ?', [tgId]),
+    get("SELECT COUNT(*) AS count FROM player_action_logs WHERE tg_id = ? AND event_type IN ('pigment_cell', 'double_one_pigment', 'gallery_activity_pigment', 'puzzle_duel_pigment_win')", [tgId]),
+    get("SELECT COUNT(*) AS count FROM player_action_logs WHERE tg_id = ? AND event_type = 'alchemy_win'", [tgId]),
+    get("SELECT COUNT(*) AS count FROM puzzle_duels WHERE winner_tg_id = ? AND status IN ('challenger_won', 'opponent_won')", [tgId]),
+    get("SELECT COUNT(*) AS count FROM player_action_logs WHERE tg_id = ? AND event_type IN ('cloud_umbrella_trap_used', 'trap_immunity_used')", [tgId]),
+    get("SELECT COUNT(*) AS count FROM cloud_quests WHERE status = 'approved' AND (player1_tg_id = ? OR player2_tg_id = ?) ", [tgId, tgId]).then(async row => ({ count: Number(row?.count || 0) + Number((await get('SELECT COUNT(*) AS count FROM pigment_gifts WHERE recipient_tg_id = ?', [tgId]))?.count || 0) })),
+    get('SELECT current_cell FROM users WHERE tg_id = ?', [tgId]),
+    get('SELECT completed_json, rewarded_at FROM seasonal_bingo WHERE tg_id = ?', [tgId])
+  ]);
+  const values = { generous: reactions?.count, dice_ones: diceOnes?.count, gallery_votes: galleryVotes?.count, pigments: pigments?.count, alchemy: alchemy?.count, duel: duel?.count, protection: protection?.count, friendship: friendship?.count, equator: Number(user?.current_cell || 0) > 50 ? 1 : 0 };
+  const goals = BINGO_GOALS.map(goal => ({ ...goal, progress: Math.min(Number(values[goal.id] || 0), goal.target), completed: Number(values[goal.id] || 0) >= goal.target }));
+  const completed = goals.filter(goal => goal.completed).map(goal => goal.id);
+  await run('INSERT OR IGNORE INTO seasonal_bingo (tg_id) VALUES (?)', [tgId]);
+  await run('UPDATE seasonal_bingo SET completed_json = ? WHERE tg_id = ?', [JSON.stringify(completed), tgId]);
+  let rewarded = Boolean(saved?.rewarded_at);
+  let rewardIssued = false;
+  if (completed.length === BINGO_GOALS.length && !rewarded) {
+    const claimed = await run('UPDATE seasonal_bingo SET rewarded_at = CURRENT_TIMESTAMP WHERE tg_id = ? AND rewarded_at IS NULL', [tgId]);
+    if (claimed.changes) {
+      const tickets = await Promise.all([1, 2, 3].map(() => issueTicket(tgId, 'bonus', null, 'seasonal_bingo')));
+      await addNewsEvent('🎟️ Красочка за Сезонное Бинго: +3 бонусные Красочки начислены в копилку финального розыгрыша.', { eventType: 'seasonal_bingo_reward', tgId, ticketNumber: tickets[0].ticket_number });
+      await logPlayerAction(tgId, 'seasonal_bingo_reward', 'Красочка за Сезонное Бинго: выдано 3 бонусные Красочки.', { meta: { ticket_numbers: tickets.map(ticket => ticket.ticket_number) } });
+      rewarded = true; rewardIssued = true;
+    }
+  }
+  return { goals, completed_count: completed.length, total: BINGO_GOALS.length, rewarded, reward_issued: rewardIssued };
+}
 
 async function ensureUserEndgameColumns() {
   const columns = await all('PRAGMA table_info(users)');
@@ -3468,6 +3528,8 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await run('DELETE FROM gallery_exhibitions');
     await run('DELETE FROM gallery_ticket_rewards');
     await run('DELETE FROM gallery_activity_rewards');
+    await run('DELETE FROM seasonal_bingo');
+    await run('DELETE FROM alchemy_sessions');
     await run('DELETE FROM news_events');
     await regenerateMapConfig();
     await loadMapConfig();
@@ -3501,6 +3563,8 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM gallery_exhibitions');
     await run('DELETE FROM gallery_ticket_rewards');
     await run('DELETE FROM gallery_activity_rewards');
+    await run('DELETE FROM seasonal_bingo');
+    await run('DELETE FROM alchemy_sessions');
     await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);
     await run('DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?, ?, ?, ?, ?, ?)', ['submissions', 'tickets', 'raffle_results', 'news_events', 'puzzle_duels', 'cloud_quests', 'pigment_gifts', 'gallery_exhibitions', 'gallery_votes']);
     await run(`UPDATE raffle_config

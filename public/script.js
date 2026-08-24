@@ -22,6 +22,12 @@ const els = {
   mapRoads: document.getElementById('mapRoads'),
   topHud: document.getElementById('topHud'),
   profileHudBtn: document.getElementById('profileHudBtn'),
+  bingoHudBtn: document.getElementById('bingoHudBtn'),
+  bingoModal: document.getElementById('bingoModal'),
+  bingoContent: document.getElementById('bingoContent'),
+  bingoCloseBtn: document.getElementById('bingoCloseBtn'),
+  bingoRewardModal: document.getElementById('bingoRewardModal'),
+  bingoRewardCloseBtn: document.getElementById('bingoRewardCloseBtn'),
   raffleHudBtn: document.getElementById('raffleHudBtn'),
   paletteHudBtn: document.getElementById('paletteHudBtn'),
   miniGamesHudBtn: document.getElementById('miniGamesHudBtn'),
@@ -1140,6 +1146,20 @@ async function openWorkDetails(workId) {
   renderWorkDetails(data.work);
 }
 
+function renderBingo(bingo) {
+  if (!els.bingoContent) return;
+  const data = bingo || { goals: [], completed_count: 0, total: 9 };
+  els.bingoContent.innerHTML = `<h2>🎟️ Сезонное Бинго</h2><p class="muted">Закрой все 9 целей до конца сезона и получи 3 бонусные Красочки — один раз за игру.</p><p class="bingo-progress">Закрыто: ${Number(data.completed_count || 0)}/${Number(data.total || 9)}</p><div class="bingo-grid">${(data.goals || []).map(goal => `<article class="bingo-cell ${goal.completed ? 'done' : ''}"><span>${goal.icon}</span><strong>${escapeHtml(goal.title)}</strong><small>${escapeHtml(goal.description)}</small><p>${Number(goal.progress || 0)}/${Number(goal.target || 1)}</p></article>`).join('')}</div>${data.rewarded ? '<p class="notice">🎟️ Награда за Бинго уже начислена в этом сезоне.</p>' : ''}`;
+}
+async function openBingo() {
+  if (!state?.user) return;
+  els.bingoModal.classList.remove('hidden');
+  els.bingoContent.innerHTML = '<div class="empty-state">Загружаем Бинго...</div>';
+  const result = await api(`/api/bingo/${encodeURIComponent(tgId)}`);
+  renderBingo(result.bingo);
+}
+function closeBingo() { els.bingoModal?.classList.add('hidden'); }
+
 async function openProfile(profileId) {
   els.profileModal.classList.remove('hidden');
   els.profileContent.innerHTML = '<div class="empty-state">Загружаем профиль...</div>';
@@ -1151,6 +1171,7 @@ async function openProfile(profileId) {
   const ownProfile = String(profile.tg_id) === String(tgId);
   const mapEmoji = profile.map_emoji || playerEmoji(profile);
   const balancesBlock = ownProfile ? `<div class="profile-balances item"><p>🎟️ Красочки: <strong>${Number(profile.paints || 0)}</strong> шт.</p><p>✨ Пигмент: <strong>${Number(profile.magical_pigment || 0)}</strong> шт.</p></div>` : '';
+  const bingoBlock = ownProfile ? `<button class="item" type="button" data-open-bingo>🎟️ <strong>Сезонное Бинго</strong><br><small>Открыть карточку 3×3 и посмотреть прогресс</small></button>` : '';
   const emojiSettingsBlock = ownProfile ? `<p class="profile-token-line">${escapeHtml(mapEmoji)} – твоя фишка</p>` : '';
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
   const adminToolsBlock = isAdminView ? `<div class="profile-admin-tools"><button class="ghost icon-button" type="button" data-player-log title="Лог действий">📜</button></div>` : '';
@@ -1158,7 +1179,7 @@ async function openProfile(profileId) {
   const worksBlock = `<h3>Сданные работы</h3><div class="work-cube-grid">${works.map((work, index) => `<button class="work-cube" type="button" data-profile-work="${index}"><strong>Клетка ${Number(work.cell || 0)}</strong><small>работа #${Number(work.id || 0)}</small></button>`).join('') || '<p class="muted">Сданных работ пока нет.</p>'}</div><div id="profileWorkDetails" class="profile-work-details"></div>`;
   const emergencyBlock = isAdminView ? `<div class="profile-emergency"><button class="danger" type="button" data-defibrillate>⚙️</button></div>` : '';
   const profileTitleBlock = `<div class="profile-title-row"><h2>${escapeHtml(profile.name)}</h2>${ownProfile ? '<button class="bell-btn profile-bell-btn" type="button" data-profile-notifications aria-label="Личные уведомления" title="Личные уведомления">🔔</button>' : ''}</div>`;
-  els.profileContent.innerHTML = `${profileTitleBlock}${adminToolsBlock}${balancesBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${emojiSettingsBlock}${activeTaskBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
+  els.profileContent.innerHTML = `${profileTitleBlock}${adminToolsBlock}${balancesBlock}${bingoBlock}<p>Клетка: <strong>${Number(profile.current_cell || 0)}/100</strong></p><p>Статус: ${escapeHtml(profile.local_status)}</p>${emojiSettingsBlock}${activeTaskBlock}${ticketsBlock}${worksBlock}${emergencyBlock}`;
 
   els.profileContent.querySelectorAll('[data-map-emoji]').forEach((button) => {
     button.addEventListener('click', () => saveMapEmoji(button.dataset.mapEmoji).catch((error) => showToast(error.message)));
@@ -1175,6 +1196,7 @@ async function openProfile(profileId) {
       if (work?.id) renderProfileWorkInline(work, isAdminView, ownProfile);
     });
   });
+  els.profileContent.querySelector('[data-open-bingo]')?.addEventListener('click', () => openBingo().catch((error) => showToast(error.message)));
   els.profileContent.querySelector('[data-profile-notifications]')?.addEventListener('click', () => openNotifications().catch((error) => showToast(error.message)));
   els.profileContent.querySelector('[data-player-log]')?.addEventListener('click', () => openPlayerLog(profile.tg_id).catch((error) => showToast(error.message)));
   els.profileContent.querySelector('[data-defibrillate]')?.addEventListener('click', () => defibrillatePlayer(profile.tg_id).catch((error) => showToast(error.message)));
@@ -1525,6 +1547,15 @@ async function checkLatestGalleryMilestoneNotice() {
   const event = (data.events || []).find((item) => item.event_type === 'gallery_masterpiece_50');
   if (!event) return;
   showDismissibleNotice(`gallery_notice_closed_${event.id}`, event.message || '🎉 Твой рисунок стал Народным Шедевром!');
+}
+
+async function playAlchemy() {
+  const started = await api('/api/alchemy/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId }) });
+  const choice = Number(window.prompt(`${started.prompt}\nВыбери флакон: 1, 2 или 3.`, '1'));
+  if (![1, 2, 3].includes(choice)) return;
+  const result = await api('/api/alchemy/play', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, choice }) });
+  showToast(result.won ? '🧪 Смесь удалась! Победа засчитана в Бинго.' : 'Смесь не получилась — попробуйте ещё раз.');
+  await loadState();
 }
 
 function openMiniGamesOverlay() {
@@ -2813,6 +2844,9 @@ els.tarotBtn?.addEventListener('click', openTarotModal);
 els.duelBtn?.addEventListener('click', openDuelModal);
 els.notificationsBtn?.addEventListener('click', () => openNotifications().catch((error) => showToast(error.message)));
 els.profileHudBtn?.addEventListener('click', () => openProfile(tgId).catch((error) => showToast(error.message)));
+els.bingoHudBtn?.addEventListener('click', () => openBingo().catch((error) => showToast(error.message)));
+els.bingoCloseBtn?.addEventListener('click', closeBingo);
+els.bingoRewardCloseBtn?.addEventListener('click', () => els.bingoRewardModal?.classList.add('hidden'));
 els.taskHudBtn?.addEventListener('click', () => openTaskOverlayForCurrentCell(state?.activeSubmission?.cell || state?.pendingLucky?.cell || currentMapCell()));
 els.paletteHudBtn?.addEventListener('click', () => openSectionOverlay('🎨 Моя палитра', els.paletteScreen));
 els.miniGamesHudBtn?.addEventListener('click', () => openMiniGamesOverlay());
