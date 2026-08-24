@@ -129,6 +129,7 @@ async function initDb() {
   await ensureUserTarotColumns();
   await ensureUserDuelColumns();
   await ensureUserGameCounterColumns();
+  await ensureAlchemyTables();
   await ensureUserEndgameColumns();
   await ensureUserRoleColumn();
   await ensureUserReactionColumns();
@@ -343,6 +344,51 @@ async function ensureUserGameCounterColumns() {
   if (!names.has('total_buffs')) await run('ALTER TABLE users ADD COLUMN total_buffs INTEGER DEFAULT 0');
   if (!names.has('finished_at')) await run('ALTER TABLE users ADD COLUMN finished_at TEXT DEFAULT NULL');
   if (!names.has('finish_modal_shown')) await run('ALTER TABLE users ADD COLUMN finish_modal_shown INTEGER DEFAULT 0');
+}
+
+// The recipe stays on the server: the client receives only the reference shade.
+async function ensureAlchemyTables() {
+  await run(`CREATE TABLE IF NOT EXISTS alchemy_sessions (
+    tg_id TEXT PRIMARY KEY,
+    shade_name TEXT NOT NULL,
+    target_r INTEGER NOT NULL, target_g INTEGER NOT NULL, target_b INTEGER NOT NULL,
+    recipe_json TEXT NOT NULL,
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS alchemy_cooldowns (
+    tg_id TEXT PRIMARY KEY,
+    available_at TEXT NOT NULL,
+    result TEXT NOT NULL,
+    finished_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`);
+}
+
+const ALCHEMY_SHADES = [
+  { name: 'Мятный трюфель', recipe: { red: 1, blue: 2, yellow: 3, white: 8, black: 0 } },
+  { name: 'Пыльная слива', recipe: { red: 5, blue: 4, yellow: 1, white: 4, black: 1 } },
+  { name: 'Терракота', recipe: { red: 7, blue: 1, yellow: 5, white: 2, black: 1 } },
+  { name: 'Лунный шалфей', recipe: { red: 2, blue: 3, yellow: 4, white: 7, black: 1 } }
+];
+const ALCHEMY_BASES = { red: [230, 70, 82], blue: [59, 130, 246], yellow: [250, 204, 21], white: [255, 255, 255], black: [32, 31, 38] };
+function alchemyColor(recipe) {
+  const total = Object.values(recipe).reduce((sum, value) => sum + Number(value || 0), 0) || 1;
+  return ['r', 'g', 'b'].map((_, index) => Math.round(Object.entries(recipe).reduce((sum, [key, amount]) => sum + ALCHEMY_BASES[key][index] * Number(amount || 0), 0) / total));
+}
+function alchemyHex(rgb) { return `#${rgb.map((value) => value.toString(16).padStart(2, '0')).join('')}`; }
+function alchemyAccuracy(target, actual) { return Math.max(0, Math.min(100, Math.round((1 - Math.hypot(...target.map((value, index) => value - actual[index])) / 441.673) * 100))); }
+function alchemyRecipeText(recipe) { return Object.entries(recipe).filter(([, amount]) => amount).map(([color, amount]) => `${color === 'red' ? 'красный' : color === 'blue' ? 'синий' : color === 'yellow' ? 'желтый' : color === 'white' ? 'белый' : 'черный'} — ${amount}`).join(', '); }
+async function getAlchemyState(tgId, create = true) {
+  const cooldown = await get("SELECT *, CAST((julianday(available_at) - julianday('now')) * 86400 AS INTEGER) AS seconds_remaining FROM alchemy_cooldowns WHERE tg_id = ? AND datetime(available_at) > datetime('now')", [tgId]);
+  if (cooldown) return { available: false, seconds_remaining: Math.max(0, Number(cooldown.seconds_remaining || 0)) };
+  if (!create) return { available: true, session: null };
+  let session = await get('SELECT * FROM alchemy_sessions WHERE tg_id = ?', [tgId]);
+  if (!session) {
+    const shade = ALCHEMY_SHADES[Math.floor(Math.random() * ALCHEMY_SHADES.length)];
+    const [r, g, b] = alchemyColor(shade.recipe);
+    await run('INSERT INTO alchemy_sessions (tg_id, shade_name, target_r, target_g, target_b, recipe_json) VALUES (?, ?, ?, ?, ?, ?)', [tgId, shade.name, r, g, b, JSON.stringify(shade.recipe)]);
+    session = await get('SELECT * FROM alchemy_sessions WHERE tg_id = ?', [tgId]);
+  }
+  return { available: true, session: { shade_name: session.shade_name, target_hex: alchemyHex([session.target_r, session.target_g, session.target_b]) } };
 }
 
 
@@ -1916,33 +1962,55 @@ async function getActiveCloudQuestForPlayer(tgId) {
   return { ...quest, partner, tasks: CLOUD_QUEST_TASKS };
 }
 
-app.post('/api/alchemy/start', async (req, res, next) => {
+app.post('/api/alchemy/state', async (req, res, next) => {
   try {
     const tgId = normalizeTgId(req.body.tg_id);
-    const user = await requireApproved(tgId); assertPlayableUser(user);
-    const answer = crypto.randomInt(1, 4);
-    await run('INSERT INTO alchemy_sessions (tg_id, answer) VALUES (?, ?) ON CONFLICT(tg_id) DO UPDATE SET answer = excluded.answer, created_at = CURRENT_TIMESTAMP', [tgId, answer]);
-    res.json({ ok: true, prompt: 'Какой из трёх флаконов завершит смесь Пигментов?' });
-  } catch (error) { next(error); }
-});
-app.post('/api/alchemy/play', async (req, res, next) => {
-  try {
-    const tgId = normalizeTgId(req.body.tg_id); const choice = Number(req.body.choice);
-    await requireApproved(tgId);
-    const session = await get("SELECT answer FROM alchemy_sessions WHERE tg_id = ? AND datetime(created_at) >= datetime('now', '-5 minutes')", [tgId]);
-    if (!session || ![1, 2, 3].includes(choice)) throw Object.assign(new Error('Начните новую алхимическую смесь'), { status: 400 });
-    await run('DELETE FROM alchemy_sessions WHERE tg_id = ?', [tgId]);
-    const won = choice === Number(session.answer);
-    if (won) await logPlayerAction(tgId, 'alchemy_win', '🧪 Алхимия Красок: смесь успешно создана.', { meta: { choice } });
-    res.json({ ok: true, won, bingo: await getBingoProgress(tgId) });
+    const user = await get('SELECT is_approved FROM users WHERE tg_id = ?', [tgId]);
+    if (!user || Number(user.is_approved) !== 1) throw Object.assign(new Error('Мини-игра доступна после одобрения'), { status: 403 });
+    res.json(await getAlchemyState(tgId));
   } catch (error) { next(error); }
 });
 
-app.get('/api/bingo/:tgId', async (req, res, next) => {
+app.post('/api/alchemy/mix', async (req, res, next) => {
   try {
-    const tgId = normalizeTgId(req.params.tgId);
-    await requireApproved(tgId);
-    res.json({ bingo: await getBingoProgress(tgId) });
+    const tgId = normalizeTgId(req.body.tg_id);
+    const state = await getAlchemyState(tgId, false);
+    if (!state.available) throw Object.assign(new Error('Лаборатория на перерыве'), { status: 400 });
+    const session = await get('SELECT * FROM alchemy_sessions WHERE tg_id = ?', [tgId]);
+    if (!session) throw Object.assign(new Error('Сначала откройте лабораторию'), { status: 400 });
+    const recipe = Object.fromEntries(Object.keys(ALCHEMY_BASES).map((key) => [
+      key,
+      Math.max(0, Math.min(100, Math.floor(Number(req.body.recipe?.[key] || 0))))
+    ]));
+    if (!Object.values(recipe).some(Boolean)) throw Object.assign(new Error('Добавьте хотя бы одну каплю краски'), { status: 400 });
+    const actual = alchemyColor(recipe);
+    const accuracy = alchemyAccuracy([session.target_r, session.target_g, session.target_b], actual);
+    if (accuracy < 95) return res.json({ won: false, accuracy, color_hex: alchemyHex(actual) });
+    const availableAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    await run('BEGIN IMMEDIATE');
+    try {
+      await run('INSERT INTO alchemy_cooldowns (tg_id, available_at, result) VALUES (?, ?, ?) ON CONFLICT(tg_id) DO UPDATE SET available_at = excluded.available_at, result = excluded.result, finished_at = CURRENT_TIMESTAMP', [tgId, availableAt, 'won']);
+      await run('DELETE FROM alchemy_sessions WHERE tg_id = ?', [tgId]);
+      await addPigmentReward(tgId, '🧪 Алхимия Красок: найден идеальный оттенок! +1 Магический Пигмент ✨.', 'alchemy_win', { accuracy });
+      await run('COMMIT');
+    } catch (error) { await run('ROLLBACK'); throw error; }
+    res.json({ won: true, accuracy, color_hex: alchemyHex(actual), available_at: availableAt });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/alchemy/surrender', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const state = await getAlchemyState(tgId, false);
+    if (!state.available) throw Object.assign(new Error('Лаборатория на перерыве'), { status: 400 });
+    const session = await get('SELECT * FROM alchemy_sessions WHERE tg_id = ?', [tgId]);
+    if (!session) throw Object.assign(new Error('Нет активного эксперимента'), { status: 400 });
+    const availableAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    await run('INSERT INTO alchemy_cooldowns (tg_id, available_at, result) VALUES (?, ?, ?) ON CONFLICT(tg_id) DO UPDATE SET available_at = excluded.available_at, result = excluded.result, finished_at = CURRENT_TIMESTAMP', [tgId, availableAt, 'surrendered']);
+    await run('DELETE FROM alchemy_sessions WHERE tg_id = ?', [tgId]);
+    const recipe = JSON.parse(session.recipe_json);
+    await logPlayerAction(tgId, 'alchemy_surrendered', 'Алхимия Красок: игрок сдался.', { meta: { recipe } });
+    res.json({ ok: true, recipe: alchemyRecipeText(recipe), available_at: availableAt });
   } catch (error) { next(error); }
 });
 
@@ -1969,8 +2037,8 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const cloudQuest = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser) ? await getActiveCloudQuestForPlayer(tgId) : null;
     const canBuyMuseCharge = Number(responseUser.current_cell || 0) >= 100 && Number(responseUser.magical_pigment || 0) >= 2 && await hasMuseChargeRecipient();
     const duelCompletedCount = await getCompletedPuzzleDuelCount(tgId);
-    const bingo = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser) ? await getBingoProgress(tgId) : null;
-    res.json({ bingo, cloudQuest, can_buy_muse_charge: canBuyMuseCharge, user: { ...responseUser, duel_completed_count: duelCompletedCount, duel_advanced: duelCompletedCount >= 3, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, cloud_umbrella_charges: Number(responseUser.cloud_umbrella_charges || 0), next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0), magical_pigment: Number(responseUser.magical_pigment || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS], pigment_cells: [...PIGMENT_CELLS] } });
+    const alchemy = await getAlchemyState(tgId, false);
+    res.json({ cloudQuest, alchemy, can_buy_muse_charge: canBuyMuseCharge, user: { ...responseUser, duel_completed_count: duelCompletedCount, duel_advanced: duelCompletedCount >= 3, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, cloud_umbrella_charges: Number(responseUser.cloud_umbrella_charges || 0), next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0), magical_pigment: Number(responseUser.magical_pigment || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS], pigment_cells: [...PIGMENT_CELLS] } });
   } catch (error) {
     next(error);
   }
