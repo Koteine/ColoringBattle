@@ -260,7 +260,15 @@ function showToast(message, duration = 3400) {
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      const contentType = response.headers.get('content-type') || 'неизвестный формат';
+      throw new Error(`Запрос ${path} вернул ${contentType} вместо JSON (HTTP ${response.status}). Проверьте актуальность сервера.`);
+    }
+  }
   if (!response.ok) throw new Error(data.error || data.message || `HTTP ${response.status}`);
   return data;
 }

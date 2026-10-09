@@ -3805,7 +3805,10 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
   }
 });
 
-app.get('*', (_req, res) => {
+app.get('*', (req, res) => {
+  if (req.path === '/api' || req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: `API-маршрут ${req.path} не найден` });
+  }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
