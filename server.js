@@ -149,6 +149,7 @@ async function initDb() {
   await ensurePigmentGiftsTable();
   await ensureGalleryTables();
   await ensureSeasonalBingoTable();
+  await ensureBingoTables();
   await ensureAlchemySessionsTable();
 
   await ensureSingleActiveSubmissionIndex();
@@ -410,6 +411,59 @@ async function ensureSeasonalBingoTable() {
     tg_id TEXT PRIMARY KEY, completed_json TEXT NOT NULL DEFAULT '{}', rewarded_at TEXT DEFAULT NULL,
     FOREIGN KEY (tg_id) REFERENCES users(tg_id)
   )`);
+}
+
+async function ensureBingoTables() {
+  await run(`CREATE TABLE IF NOT EXISTS bingo_boards (
+    tg_id TEXT PRIMARY KEY,
+    rewarded_at TEXT DEFAULT NULL,
+    reward_notice_shown INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS bingo_cells (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id TEXT NOT NULL,
+    cell INTEGER NOT NULL CHECK(cell BETWEEN 1 AND 9),
+    status TEXT NOT NULL DEFAULT 'selected' CHECK(status IN ('selected', 'pending', 'rejected', 'approved')),
+    photo_before TEXT DEFAULT NULL,
+    photo_after TEXT DEFAULT NULL,
+    admin_comment TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tg_id, cell),
+    FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+  )`);
+  await run('CREATE INDEX IF NOT EXISTS idx_bingo_cells_review ON bingo_cells(status, updated_at)');
+}
+
+async function getBingoBoard(tgId) {
+  await run('INSERT OR IGNORE INTO bingo_boards (tg_id) VALUES (?)', [tgId]);
+  const [savedCells, board] = await Promise.all([
+    all('SELECT cell, status, photo_before, photo_after, admin_comment FROM bingo_cells WHERE tg_id = ?', [tgId]),
+    get('SELECT rewarded_at, reward_notice_shown FROM bingo_boards WHERE tg_id = ?', [tgId])
+  ]);
+  const byCell = new Map(savedCells.map((cell) => [Number(cell.cell), cell]));
+  const cells = Array.from({ length: 9 }, (_, index) => {
+    const cellNumber = index + 1;
+    const saved = byCell.get(cellNumber);
+    return {
+      cell: cellNumber,
+      task: 'Раскрась иллюстрацию',
+      status: saved?.status || 'available',
+      photo_before: saved?.photo_before || null,
+      photo_after: saved?.photo_after || null,
+      admin_comment: saved?.admin_comment || ''
+    };
+  });
+  const completedCount = cells.filter((cell) => cell.status === 'approved').length;
+  return {
+    cells,
+    completed_count: completedCount,
+    total: 9,
+    completed: completedCount === 9,
+    rewarded: Boolean(board?.rewarded_at),
+    reward_notice_pending: Boolean(board?.rewarded_at) && Number(board?.reward_notice_shown || 0) === 0
+  };
 }
 
 async function ensureAlchemySessionsTable() {
@@ -1140,7 +1194,8 @@ async function seedTasks() {
 77. «Зеркальный номер»: Найди в любой из своих книг страницу с «зеркальным» номером (11, 22, 33, 44, 55, 66, 77, 88, 99). Какое бы задание там ни было — это твоя цель на этот этап. (Кодовое слово: Зеркало)
 78. «Праздник к нам приходит»: Найди страницу, где персонажи что-то празднуют, танцуют, дарят подарки или где в кадре есть конфетти/салют. Раскрась этот момент максимально шумно и сочно! (Кодовое слово: Праздник)
 79. «Этот парень — настоящий бродяга с верным другом-абу, который влюбился в принцессу и притворился принцем с помощью одного синего весельчака. Но его главная фишка — он умеет летать на ковре без всякого пилота». Назови героя, найди и раскрась его! (Ответ и кодовое слово — задача на этап)
-80. «Ее мачеха была настолько одержима своей красотой, что приказала охотнику отнести сердце девушки в шкатулке. Но беглянка нашла приют в маленьком домике посреди леса, где жили семеро шахтеров». (Ответ и кодовое слово — задача на этап)`;
+80. «Ее мачеха была настолько одержима своей красотой, что приказала охотнику отнести сердце девушки в шкатулке. Но беглянка нашла приют в маленьком домике посреди леса, где жили семеро шахтеров». (Ответ и кодовое слово — задача на этап)
+81. То, ради чего мы все здесь собрались: Раскрась любую иллюстрацию в раскраске «Бери и Крась»`;
 
   const tasks = parseSeedTasks(rawTasks);
 
@@ -1189,8 +1244,8 @@ function parseSeedTasks(rawTasks) {
     .map((task) => task.replace(/^\[[^\]]+\]\s*[^:]+:\s*/, '').trim())
     .filter((task) => task.length > 0);
 
-  if (tasks.length !== 80) {
-    throw new Error(`Ожидалось 80 заданий для посева, получено ${tasks.length}`);
+  if (tasks.length !== 81) {
+    throw new Error(`Ожидалось 81 задание для посева, получено ${tasks.length}`);
   }
 
   tasks.forEach((task, index) => {
@@ -2038,7 +2093,11 @@ app.get('/api/me/:tgId', async (req, res, next) => {
     const canBuyMuseCharge = Number(responseUser.current_cell || 0) >= 100 && Number(responseUser.magical_pigment || 0) >= 2 && await hasMuseChargeRecipient();
     const duelCompletedCount = await getCompletedPuzzleDuelCount(tgId);
     const alchemy = await getAlchemyState(tgId, false);
-    res.json({ cloudQuest, alchemy, can_buy_muse_charge: canBuyMuseCharge, user: { ...responseUser, duel_completed_count: duelCompletedCount, duel_advanced: duelCompletedCount >= 3, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, cloud_umbrella_charges: Number(responseUser.cloud_umbrella_charges || 0), next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0), magical_pigment: Number(responseUser.magical_pigment || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS], pigment_cells: [...PIGMENT_CELLS] } });
+    const bingoBoard = Number(responseUser.is_approved) === 1 && !isPrivilegedRole(responseUser)
+      ? await get('SELECT rewarded_at, reward_notice_shown FROM bingo_boards WHERE tg_id = ?', [tgId])
+      : null;
+    const bingoRewardPending = Boolean(bingoBoard?.rewarded_at) && Number(bingoBoard.reward_notice_shown || 0) === 0;
+    res.json({ cloudQuest, alchemy, bingo_reward_pending: bingoRewardPending, can_buy_muse_charge: canBuyMuseCharge, user: { ...responseUser, duel_completed_count: duelCompletedCount, duel_advanced: duelCompletedCount >= 3, dice_frozen: effectiveDiceFrozen, has_used_tarot: Number(responseUser.has_used_tarot) === 1, trap_immunity: Number(responseUser.trap_immunity) === 1, cloud_umbrella_charges: Number(responseUser.cloud_umbrella_charges || 0), next_roll_halved: Number(responseUser.next_roll_halved) === 1, next_roll_doubled: Number(responseUser.next_roll_doubled) === 1, penalty_rerolls: Number(responseUser.penalty_rerolls || 0), total_dice_rolls: Number(responseUser.total_dice_rolls || 0), magical_pigment: Number(responseUser.magical_pigment || 0) }, activeSubmission, pendingLucky, tickets, needs_application: false, is_finalist: Number(responseUser.current_cell) >= 100, is_admin: responseUser.role === 'admin', is_moderator: responseUser.role === 'moderator', finish_summary: finishSummary, map_config: { trap_cells: [...TRAP_CELLS], lucky_cells: [...LUCKY_CELLS], pigment_cells: [...PIGMENT_CELLS] } });
   } catch (error) {
     next(error);
   }
@@ -2342,6 +2401,145 @@ app.get('/api/news', async (req, res, next) => {
   try {
     const events = await getNewsEvents(req.query.limit);
     res.json({ events });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/bingo/:tgId', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.params.tgId);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    res.json({ bingo: await getBingoBoard(tgId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/bingo/start', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    const cell = Number(req.body.cell);
+    if (!Number.isInteger(cell) || cell < 1 || cell > 9) throw Object.assign(new Error('Некорректная клетка Бинго'), { status: 400 });
+    await run('INSERT OR IGNORE INTO bingo_cells (tg_id, cell) VALUES (?, ?)', [tgId, cell]);
+    const bingo = await getBingoBoard(tgId);
+    res.json({ ok: true, bingo, cell: bingo.cells[cell - 1] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/bingo/submit', upload.fields([
+  { name: 'photo_before', maxCount: 1 },
+  { name: 'photo_after', maxCount: 1 },
+  { name: 'work_image', maxCount: 1 }
+]), async (req, res, next) => {
+  const uploadedFiles = Object.values(req.files || {}).flat();
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    const cell = Number(req.body.cell);
+    if (!Number.isInteger(cell) || cell < 1 || cell > 9) throw Object.assign(new Error('Некорректная клетка Бинго'), { status: 400 });
+    const photoBefore = req.files?.photo_before?.[0];
+    const photoAfter = req.files?.photo_after?.[0] || req.files?.work_image?.[0];
+    if (Boolean(photoBefore) === Boolean(photoAfter)) throw Object.assign(new Error('Загрузите ровно одно фото: ДО или ПОСЛЕ'), { status: 400 });
+
+    const work = await get('SELECT * FROM bingo_cells WHERE tg_id = ? AND cell = ?', [tgId, cell]);
+    if (!work) throw Object.assign(new Error('Сначала выберите клетку Бинго'), { status: 404 });
+    if (['pending', 'approved'].includes(work.status)) throw Object.assign(new Error('Эта работа уже отправлена на проверку или одобрена'), { status: 400 });
+
+    let uploadedStage;
+    if (photoBefore) {
+      await run(`UPDATE bingo_cells
+        SET photo_before = ?, photo_after = NULL, status = 'selected', admin_comment = '', updated_at = CURRENT_TIMESTAMP
+        WHERE tg_id = ? AND cell = ?`, [photoBefore.filename, tgId, cell]);
+      uploadedStage = 'before';
+    } else {
+      if (!work.photo_before) throw Object.assign(new Error('Сначала загрузите Фото ДО'), { status: 400 });
+      if (work.status === 'rejected') throw Object.assign(new Error('После отклонения начните повторную сдачу с Фото ДО'), { status: 400 });
+      await run(`UPDATE bingo_cells
+        SET photo_after = ?, status = 'pending', admin_comment = '', updated_at = CURRENT_TIMESTAMP
+        WHERE tg_id = ? AND cell = ?`, [photoAfter.filename, tgId, cell]);
+      uploadedStage = 'after';
+    }
+    res.json({ ok: true, uploaded_stage: uploadedStage, bingo: await getBingoBoard(tgId) });
+  } catch (error) {
+    for (const file of uploadedFiles) await fs.promises.rm(path.join(UPLOADS_DIR, file.filename), { force: true }).catch(() => {});
+    next(error);
+  }
+});
+
+app.post('/api/bingo/reward-ack', async (req, res, next) => {
+  try {
+    const tgId = normalizeTgId(req.body.tg_id);
+    const user = await requireApproved(tgId);
+    assertPlayableUser(user);
+    await run('UPDATE bingo_boards SET reward_notice_shown = 1 WHERE tg_id = ? AND rewarded_at IS NOT NULL', [tgId]);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/bingo-submissions', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.query.admin_tg_id);
+    const submissions = await all(`SELECT b.id, b.tg_id, b.cell, b.photo_before, b.photo_after, b.updated_at, u.username
+      FROM bingo_cells b JOIN users u ON u.tg_id = b.tg_id
+      WHERE b.status = 'pending' AND b.photo_before IS NOT NULL AND b.photo_after IS NOT NULL
+      ORDER BY b.updated_at ASC, b.id ASC`);
+    res.json({ submissions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/bingo-review', async (req, res, next) => {
+  try {
+    await requireModeratorOrAdmin(req.body.admin_tg_id);
+    const submissionId = Number(req.body.submission_id);
+    const action = String(req.body.action || '').trim();
+    const comment = String(req.body.admin_comment || '').trim();
+    if (!Number.isInteger(submissionId) || submissionId < 1) throw Object.assign(new Error('Некорректный ID работы Бинго'), { status: 400 });
+    if (!['approve', 'reject'].includes(action)) throw Object.assign(new Error('Выберите решение по работе'), { status: 400 });
+    if (action === 'reject' && comment.length < 5) throw Object.assign(new Error('Комментарий должен быть не короче 5 символов'), { status: 400 });
+
+    let submission;
+    let issuedTickets = [];
+    let completedCount = 0;
+    await run('BEGIN IMMEDIATE');
+    try {
+      submission = await get(`SELECT id, tg_id, cell FROM bingo_cells
+        WHERE id = ? AND status = 'pending' AND photo_before IS NOT NULL AND photo_after IS NOT NULL`, [submissionId]);
+      if (!submission) throw Object.assign(new Error('Работа Бинго не найдена или уже проверена'), { status: 404 });
+      const status = action === 'approve' ? 'approved' : 'rejected';
+      await run('UPDATE bingo_cells SET status = ?, admin_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [status, action === 'reject' ? comment : '', submissionId]);
+
+      if (action === 'approve') {
+        const progress = await get("SELECT COUNT(*) AS count FROM bingo_cells WHERE tg_id = ? AND status = 'approved'", [submission.tg_id]);
+        completedCount = Number(progress?.count || 0);
+        if (completedCount === 9) {
+          const claimed = await run('UPDATE bingo_boards SET rewarded_at = CURRENT_TIMESTAMP, reward_notice_shown = 0 WHERE tg_id = ? AND rewarded_at IS NULL', [submission.tg_id]);
+          if (claimed.changes) {
+            for (let index = 0; index < 10; index += 1) issuedTickets.push(await issueTicket(submission.tg_id, 'bonus', null, 'bingo'));
+            const user = await get('SELECT username FROM users WHERE tg_id = ?', [submission.tg_id]);
+            const numbers = issuedTickets.map((ticket) => `№${ticket.ticket_number}`).join(', ');
+            await addNewsEvent(`🎉 БИНГО! ${formatUserHandle(user?.username, submission.tg_id)} закрыл все 9 клеток и получил 10 Красочек: ${numbers}.`, { eventType: 'bingo_complete', tgId: submission.tg_id, ticketNumber: issuedTickets[0].ticket_number });
+            await logPlayerAction(submission.tg_id, 'bingo_complete', 'Все 9 клеток Бинго закрыты: выдано 10 Красочек.', { meta: { ticket_numbers: issuedTickets.map((ticket) => ticket.ticket_number) } });
+          }
+        }
+      }
+      await run('COMMIT');
+    } catch (error) {
+      await run('ROLLBACK').catch(() => {});
+      throw error;
+    }
+
+    res.json({ ok: true, action, completed_count: completedCount, issued_tickets: issuedTickets });
   } catch (error) {
     next(error);
   }
@@ -2832,7 +3030,9 @@ app.get('/api/check-status/:tgId', async (req, res, next) => {
     const tickets = await getPlayerTickets(tgId);
     const { user: reconciledUser, activeSubmission } = await reconcileDiceLock(tgId, user);
     const pendingLucky = reconciledUser?.pending_lucky_cell !== null && reconciledUser?.pending_lucky_cell !== undefined;
-    res.json({ submission, active_submission: activeSubmission || null, post_moderation_debt: activeSubmission?.frozen_by_post_moderation ? activeSubmission : null, dice_frozen: activeSubmission || pendingLucky ? 1 : reconciledUser.dice_frozen, progress_status: activeSubmission?.frozen_by_post_moderation ? 'frozen_by_post_moderation' : getSubmissionProgressStatus(activeSubmission), tickets, is_finalist: Number(reconciledUser.current_cell) >= 100, finish_summary: finishSummary });
+    const bingoBoard = await get('SELECT rewarded_at, reward_notice_shown FROM bingo_boards WHERE tg_id = ?', [tgId]);
+    const bingoRewardPending = Boolean(bingoBoard?.rewarded_at) && Number(bingoBoard.reward_notice_shown || 0) === 0;
+    res.json({ submission, active_submission: activeSubmission || null, post_moderation_debt: activeSubmission?.frozen_by_post_moderation ? activeSubmission : null, dice_frozen: activeSubmission || pendingLucky ? 1 : reconciledUser.dice_frozen, progress_status: activeSubmission?.frozen_by_post_moderation ? 'frozen_by_post_moderation' : getSubmissionProgressStatus(activeSubmission), bingo_reward_pending: bingoRewardPending, tickets, is_finalist: Number(reconciledUser.current_cell) >= 100, finish_summary: finishSummary });
   } catch (error) {
     next(error);
   }
@@ -3528,6 +3728,8 @@ app.post('/api/admin/reset-round', async (req, res, next) => {
     await run('DELETE FROM gallery_exhibitions');
     await run('DELETE FROM gallery_ticket_rewards');
     await run('DELETE FROM gallery_activity_rewards');
+    await run('DELETE FROM bingo_cells');
+    await run('DELETE FROM bingo_boards');
     await run('DELETE FROM seasonal_bingo');
     await run('DELETE FROM alchemy_sessions');
     await run('DELETE FROM news_events');
@@ -3563,6 +3765,8 @@ app.post('/api/admin/global-reset', async (req, res, next) => {
     await run('DELETE FROM gallery_exhibitions');
     await run('DELETE FROM gallery_ticket_rewards');
     await run('DELETE FROM gallery_activity_rewards');
+    await run('DELETE FROM bingo_cells');
+    await run('DELETE FROM bingo_boards');
     await run('DELETE FROM seasonal_bingo');
     await run('DELETE FROM alchemy_sessions');
     await run('DELETE FROM users WHERE tg_id <> ?', [OWNER_TG_ID]);

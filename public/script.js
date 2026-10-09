@@ -165,6 +165,7 @@ let mapAutofocused = false;
 let lastMapKey = '';
 let displayedPlayerCell = null;
 let adminPendingSubmissionsCache = [];
+let adminBingoSubmissionsCache = [];
 let adminArchivePlayersCache = [];
 let adminCloudQuestCache = [];
 let cloudQuestTimer = null;
@@ -173,6 +174,7 @@ let adminUsersCache = [];
 let adminRejectedSubmissionsCache = [];
 let movementTimer = null;
 let rollResultTimer = null;
+let bingoRewardNoticeOpen = false;
 const playerEmojiPool = ['🐱','🦊','👑','💎','🌸','👻','🦄','🚀','🍄','✨','🧸','🔮','👽','🙈','💅','👅','🧚‍♀️','👸','🧟‍♀️','🧜‍♀️','🧛','🐭','🐷','🌹','🐌','🍼','🍬','🍭','🎁','🕶️','🗿','💊','🧨'];
 const scratchers = new Map();
 let trapCells = new Set([13, 26, 39, 52, 65, 78, 91]);
@@ -436,11 +438,12 @@ function updateDiceFace(value) {
 async function renderWorkArchive() {
   els.paletteGrid.classList.add('archive-mode');
   els.paletteHint.textContent = 'Админские разделы палитры открываются отдельными полноэкранными окнами.';
-  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="eventWorksBtn" type="button" class="admin-palette-button ghost">Работы события</button><button id="autoApprovedBtn" type="button" class="admin-palette-button ghost">Автоодобрение</button><button id="rejectedWorksBtn" type="button" class="admin-palette-button danger">Отклоненные</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
+  els.pendingSubmissions.innerHTML = '<div class="admin-palette-actions"><button id="pendingApprovalsBtn" type="button" class="admin-palette-button">Ожидают одобрения</button><button id="bingoWorksBtn" type="button" class="admin-palette-button ghost">Бинго на проверке</button><button id="eventWorksBtn" type="button" class="admin-palette-button ghost">Работы события</button><button id="autoApprovedBtn" type="button" class="admin-palette-button ghost">Автоодобрение</button><button id="rejectedWorksBtn" type="button" class="admin-palette-button danger">Отклоненные</button><button id="allPlayersPaletteBtn" type="button" class="admin-palette-button ghost">Все игроки</button></div>';
   els.paletteGrid.innerHTML = '<div class="empty-state">Загружаем админские разделы...</div>';
 
-  const [pendingData, autoApprovedData, rejectedData, cloudQuestData, archiveData, usersData] = await Promise.all([
+  const [pendingData, bingoData, autoApprovedData, rejectedData, cloudQuestData, archiveData, usersData] = await Promise.all([
     api(`/api/admin/submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
+    api(`/api/admin/bingo-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/auto-approved-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/rejected-submissions?admin_tg_id=${encodeURIComponent(tgId)}`),
     api(`/api/admin/cloud-quests?admin_tg_id=${encodeURIComponent(tgId)}`),
@@ -449,6 +452,7 @@ async function renderWorkArchive() {
   ]);
 
   adminPendingSubmissionsCache = pendingData.submissions || [];
+  adminBingoSubmissionsCache = bingoData.submissions || [];
   adminAutoApprovedSubmissionsCache = autoApprovedData.submissions || [];
   adminRejectedSubmissionsCache = rejectedData.submissions || [];
   adminCloudQuestCache = cloudQuestData.quests || [];
@@ -847,6 +851,7 @@ async function loadState() {
   applyMapConfig(state.map_config);
   lastSubmissionStatus = state.activeSubmission?.status || lastSubmissionStatus;
   render();
+  if (state.bingo_reward_pending) showBingoRewardNotice();
   loadLeaderboard().catch(() => {});
   checkLatestDuelOutcomeNotice().catch(() => {});
   checkLatestGalleryMilestoneNotice().catch(() => {});
@@ -1146,17 +1151,97 @@ async function openWorkDetails(workId) {
   renderWorkDetails(data.work);
 }
 
-function renderBingo(bingo) {
+function renderBingo(bingo, selectedCellNumber = null) {
   if (!els.bingoContent) return;
-  const data = bingo || { goals: [], completed_count: 0, total: 9 };
-  els.bingoContent.innerHTML = `<h2>🎟️ Сезонное Бинго</h2><p class="muted">Закрой все 9 целей до конца сезона и получи 3 бонусные Красочки — один раз за игру.</p><p class="bingo-progress">Закрыто: ${Number(data.completed_count || 0)}/${Number(data.total || 9)}</p><div class="bingo-grid">${(data.goals || []).map(goal => `<article class="bingo-cell ${goal.completed ? 'done' : ''}"><span>${goal.icon}</span><strong>${escapeHtml(goal.title)}</strong><small>${escapeHtml(goal.description)}</small><p>${Number(goal.progress || 0)}/${Number(goal.target || 1)}</p></article>`).join('')}</div>${data.rewarded ? '<p class="notice">🎟️ Награда за Бинго уже начислена в этом сезоне.</p>' : ''}`;
+  const data = bingo || { cells: [], completed_count: 0, total: 9 };
+  const cells = data.cells || [];
+  const completed = Number(data.completed_count || 0) === 9;
+  const selectedCell = cells.find((cell) => Number(cell.cell) === Number(selectedCellNumber));
+  const statusLabel = (cell) => {
+    if (cell.status === 'selected') return cell.photo_before ? 'Фото ДО загружено' : 'Задание выбрано';
+    return { available: 'Выбрать задание', pending: 'На проверке', rejected: 'Нужна пересдача', approved: 'Выполнено' }[cell.status] || '';
+  };
+  const cellsMarkup = cells.map((cell) => `<button class="bingo-cell ${cell.status === 'approved' ? 'done' : ''} ${Number(cell.cell) === Number(selectedCellNumber) ? 'selected' : ''}" type="button" data-bingo-cell="${Number(cell.cell)}" ${cell.status === 'approved' ? 'disabled' : ''} aria-label="Клетка ${Number(cell.cell)}: ${escapeHtml(statusLabel(cell))}"><span class="bingo-cell-number">${Number(cell.cell)}</span><strong>${escapeHtml(cell.task || 'Раскрась иллюстрацию')}</strong><small>${escapeHtml(statusLabel(cell))}</small></button>`).join('');
+  let selectedMarkup = '';
+  if (selectedCell?.status === 'pending') {
+    selectedMarkup = '<p class="notice">Работа отправлена модератору. После одобрения клетка закроется.</p>';
+  } else if (selectedCell && selectedCell.status !== 'approved') {
+    const stage = selectedCell.status === 'rejected' || !selectedCell.photo_before ? 'before' : 'after';
+    const stageTitle = stage === 'before' ? 'Шаг 1: фото до раскрашивания' : 'Шаг 2: готовая работа';
+    const stageHint = stage === 'before'
+      ? 'Загрузите незакрашенную иллюстрацию. После этого появится загрузка готовой работы.'
+      : 'Теперь загрузите фото готовой иллюстрации для проверки.';
+    selectedMarkup = `<section class="bingo-task-detail"><h3>Клетка ${Number(selectedCell.cell)} · ${escapeHtml(selectedCell.task || 'Раскрась иллюстрацию')}</h3>${selectedCell.status === 'rejected' ? `<p class="notice"><strong>Комментарий:</strong> ${escapeHtml(selectedCell.admin_comment || 'Работу попросили пересдать.')}</p>` : ''}<p class="muted">${stageTitle}. ${stageHint}</p><form id="bingoUploadForm" class="bingo-upload-form"><label>${stage === 'before' ? 'Фото ДО' : 'Фото ПОСЛЕ'}<input name="bingo_photo" type="file" accept="image/*" required></label><button type="submit">Отправить ${stage === 'before' ? 'Фото ДО' : 'Фото ПОСЛЕ'}</button></form></section>`;
+  }
+  els.bingoContent.innerHTML = `<h2>🎟️ Бинго</h2><p class="muted">Выбирай любую клетку и сдавай работу отдельно от основной игры. Закрой все 9, чтобы получить 10 Красочек.</p><p class="bingo-progress">Закрыто: ${Number(data.completed_count || 0)}/9</p><div class="bingo-board ${completed ? 'completed' : ''}"><div class="bingo-grid">${cellsMarkup}</div>${completed ? '<div class="bingo-closed-label">БИНГО!</div>' : ''}</div>${selectedMarkup}${data.rewarded ? '<p class="notice">Награда за Бинго уже начислена.</p>' : ''}`;
+
+  els.bingoContent.querySelectorAll('[data-bingo-cell]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        const cellNumber = Number(button.dataset.bingoCell);
+        const cell = cells.find((item) => Number(item.cell) === cellNumber);
+        if (!cell || cell.status === 'approved') return;
+        const result = cell.status === 'available'
+          ? await api('/api/bingo/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId, cell: cellNumber }) })
+          : { bingo: data };
+        renderBingo(result.bingo, cellNumber);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  els.bingoContent.querySelector('#bingoUploadForm')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submitButton = form.querySelector('button[type="submit"]');
+    const photo = form.elements.bingo_photo.files[0];
+    if (!photo || !selectedCell) return;
+    const stage = selectedCell.status === 'rejected' || !selectedCell.photo_before ? 'before' : 'after';
+    const formData = new FormData();
+    formData.append('tg_id', tgId);
+    formData.append('cell', String(selectedCell.cell));
+    formData.append(stage === 'before' ? 'photo_before' : 'photo_after', photo);
+    submitButton.disabled = true;
+    try {
+      const result = await api('/api/bingo/submit', { method: 'POST', body: formData });
+      renderBingo(result.bingo, selectedCell.cell);
+      showToast(stage === 'before' ? 'Фото ДО сохранено' : 'Работа отправлена на проверку');
+    } catch (error) {
+      showToast(error.message);
+      submitButton.disabled = false;
+    }
+  });
 }
+
+function showBingoRewardNotice() {
+  if (!state?.bingo_reward_pending || bingoRewardNoticeOpen) return;
+  bingoRewardNoticeOpen = true;
+  els.bingoRewardModal?.classList.remove('hidden');
+}
+
+async function closeBingoRewardNotice() {
+  if (!bingoRewardNoticeOpen) return;
+  bingoRewardNoticeOpen = false;
+  els.bingoRewardModal?.classList.add('hidden');
+  try {
+    await api('/api/bingo/reward-ack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tg_id: tgId }) });
+    if (state) state.bingo_reward_pending = false;
+  } catch (error) {
+    bingoRewardNoticeOpen = true;
+    els.bingoRewardModal?.classList.remove('hidden');
+    showToast(error.message);
+  }
+}
+
 async function openBingo() {
   if (!state?.user) return;
   els.bingoModal.classList.remove('hidden');
   els.bingoContent.innerHTML = '<div class="empty-state">Загружаем Бинго...</div>';
   const result = await api(`/api/bingo/${encodeURIComponent(tgId)}`);
   renderBingo(result.bingo);
+  state.bingo_reward_pending = Boolean(result.bingo.reward_notice_pending);
+  showBingoRewardNotice();
 }
 function closeBingo() { els.bingoModal?.classList.add('hidden'); }
 
@@ -1171,7 +1256,7 @@ async function openProfile(profileId) {
   const ownProfile = String(profile.tg_id) === String(tgId);
   const mapEmoji = profile.map_emoji || playerEmoji(profile);
   const balancesBlock = ownProfile ? `<div class="profile-balances item"><p>🎟️ Красочки: <strong>${Number(profile.paints || 0)}</strong> шт.</p><p>✨ Пигмент: <strong>${Number(profile.magical_pigment || 0)}</strong> шт.</p></div>` : '';
-  const bingoBlock = ownProfile ? `<button class="item" type="button" data-open-bingo>🎟️ <strong>Сезонное Бинго</strong><br><small>Открыть карточку 3×3 и посмотреть прогресс</small></button>` : '';
+  const bingoBlock = ownProfile ? `<button class="item" type="button" data-open-bingo>🎟️ <strong>Бинго</strong><br><small>Открыть поле заданий 3×3</small></button>` : '';
   const emojiSettingsBlock = ownProfile ? `<p class="profile-token-line">${escapeHtml(mapEmoji)} – твоя фишка</p>` : '';
   const ticketsBlock = `<h3>Красочки</h3><div class="profile-works">${tickets.map((ticket, index) => `<button class="paint-card" type="button" data-profile-ticket-index="${index}"${ticket.submission_id ? '' : ' disabled'}><strong>№${escapeHtml(ticket.ticket_number)}${ticket.type === 'bonus' ? '★' : ''}</strong><small>${ticket.submission_id ? 'Работа прикреплена' : escapeHtml(ticket.status)}</small></button>`).join('') || '<p class="muted">Красочек пока нет.</p>'}</div>`;
   const adminToolsBlock = isAdminView ? `<div class="profile-admin-tools"><button class="ghost icon-button" type="button" data-player-log title="Лог действий">📜</button></div>` : '';
@@ -1807,6 +1892,10 @@ async function checkStatus() {
       return;
     }
     const data = await api(`/api/check-status/${encodeURIComponent(tgId)}`);
+    if (data.bingo_reward_pending && state) {
+      state.bingo_reward_pending = true;
+      showBingoRewardNotice();
+    }
     const submission = data.submission;
     const knownFrozen = Number(state?.user?.dice_frozen || 0);
     const serverFrozen = Number(data.dice_frozen || 0);
@@ -2212,6 +2301,7 @@ function renderPendingUsers(users) {
 
 function renderAdminPaletteButtons() {
   const pendingButton = document.getElementById('pendingApprovalsBtn');
+  const bingoButton = document.getElementById('bingoWorksBtn');
   const playersButton = document.getElementById('allPlayersPaletteBtn');
   const autoApprovedButton = document.getElementById('autoApprovedBtn');
   const eventWorksButton = document.getElementById('eventWorksBtn');
@@ -2235,6 +2325,11 @@ function renderAdminPaletteButtons() {
     rejectedButton.classList.toggle('has-pending', adminRejectedSubmissionsCache.length > 0);
     rejectedButton.setAttribute('aria-label', adminRejectedSubmissionsCache.length > 0 ? `Отклоненные: ${adminRejectedSubmissionsCache.length}` : 'Отклоненные');
     rejectedButton.addEventListener('click', () => openRejectedWorksModal());
+  }
+  if (bingoButton) {
+    bingoButton.textContent = adminBingoSubmissionsCache.length ? `Бинго на проверке: ${adminBingoSubmissionsCache.length}` : 'Бинго на проверке';
+    bingoButton.classList.toggle('has-pending', adminBingoSubmissionsCache.length > 0);
+    bingoButton.addEventListener('click', () => openBingoSubmissionsModal());
   }
   if (playersButton) playersButton.addEventListener('click', () => openAllPlayersModal());
 }
@@ -2371,6 +2466,48 @@ function openCloudQuestReviewModal() {
     item.append(actions); content.append(item);
   }
   openAdminFullscreenModal('Работы события', content);
+}
+
+function openBingoSubmissionsModal() {
+  const content = document.createElement('div');
+  content.className = 'list';
+  if (!adminBingoSubmissionsCache.length) content.innerHTML = '<div class="empty-state">Работ Бинго на проверке нет.</div>';
+  for (const submission of adminBingoSubmissionsCache) {
+    const beforeUrl = `/uploads/${encodeURIComponent(submission.photo_before)}`;
+    const afterUrl = `/uploads/${encodeURIComponent(submission.photo_after)}`;
+    const playerName = submission.username ? `@${String(submission.username).replace(/^@/, '')}` : `ID ${submission.tg_id}`;
+    const item = document.createElement('article');
+    item.className = 'item';
+    item.innerHTML = `<strong>${escapeHtml(playerName)} · Бинго, клетка ${Number(submission.cell)}</strong><p>Раскрась иллюстрацию</p><div class="comparison-grid"><a class="comparison-photo" href="${beforeUrl}" target="_blank" rel="noopener"><strong>Фото ДО</strong><img src="${beforeUrl}" alt="Фото ДО"></a><a class="comparison-photo" href="${afterUrl}" target="_blank" rel="noopener"><strong>Фото ПОСЛЕ</strong><img src="${afterUrl}" alt="Фото ПОСЛЕ"></a></div>`;
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    for (const [label, action, className] of [['Одобрить', 'approve', 'success'], ['Отклонить', 'reject', 'danger']]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = className;
+      button.textContent = label;
+      button.addEventListener('click', async () => {
+        let comment = '';
+        if (action === 'reject') {
+          comment = window.prompt('Что нужно исправить?') || '';
+          if (comment.trim().length < 5) return;
+        }
+        await api('/api/admin/bingo-review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ admin_tg_id: tgId, submission_id: submission.id, action, admin_comment: comment.trim() })
+        });
+        showToast(action === 'approve' ? 'Работа Бинго одобрена' : 'Работа Бинго отклонена');
+        await renderWorkArchive();
+        openBingoSubmissionsModal();
+        if (submission.tg_id === tgId) await loadState();
+      });
+      actions.append(button);
+    }
+    item.append(actions);
+    content.append(item);
+  }
+  openAdminFullscreenModal('Работы Бинго', content);
 }
 
 function openPendingApprovalsModal() {
@@ -2846,7 +2983,7 @@ els.notificationsBtn?.addEventListener('click', () => openNotifications().catch(
 els.profileHudBtn?.addEventListener('click', () => openProfile(tgId).catch((error) => showToast(error.message)));
 els.bingoHudBtn?.addEventListener('click', () => openBingo().catch((error) => showToast(error.message)));
 els.bingoCloseBtn?.addEventListener('click', closeBingo);
-els.bingoRewardCloseBtn?.addEventListener('click', () => els.bingoRewardModal?.classList.add('hidden'));
+els.bingoRewardCloseBtn?.addEventListener('click', () => closeBingoRewardNotice().catch((error) => showToast(error.message)));
 els.taskHudBtn?.addEventListener('click', () => openTaskOverlayForCurrentCell(state?.activeSubmission?.cell || state?.pendingLucky?.cell || currentMapCell()));
 els.paletteHudBtn?.addEventListener('click', () => openSectionOverlay('🎨 Моя палитра', els.paletteScreen));
 els.miniGamesHudBtn?.addEventListener('click', () => openMiniGamesOverlay());
